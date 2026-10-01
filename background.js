@@ -172,12 +172,15 @@ const minSizeBytes = (settings) =>
   Math.max(0, settings.minSizeMB | 0) * 1024 * 1024;
 
 async function decidePending(id) {
+  // Acquire the guard before the first await: two interleaved calls (an alarm
+  // and a size event arriving together) would otherwise both pass the check
+  // above before either reaches the add below, and both would intercept.
   if (deciding.has(id)) return;
-  const stored = await chrome.storage.session.get(pendingKey(id));
-  const deadline = stored[pendingKey(id)];
-  if (deadline === undefined) return;
   deciding.add(id);
   try {
+    const stored = await chrome.storage.session.get(pendingKey(id));
+    const deadline = stored[pendingKey(id)];
+    if (deadline === undefined) return;
     await dropPending(id);
 
     const settings = await getSettings();
@@ -330,8 +333,8 @@ chrome.contextMenus.onClicked.addListener((info) => {
   sendToGrab(url);
 });
 
-chrome.action.onClicked.addListener((tab) => {
-  if (tab && tab.url) sendToGrab(tab.url);
+chrome.action.onClicked.addListener(() => {
+  chrome.runtime.openOptionsPage();
 });
 
 chrome.commands.onCommand.addListener((command) => {
