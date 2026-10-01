@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Grab Options</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        font-size: 14px;
+        max-width: 480px;
+        margin: 24px;
+        color: #1e1e1e;
+      }
+      label {
+        display: block;
+        margin: 16px 0 4px;
+      }
+      .hint {
+        color: #666;
+        font-size: 12px;
+        margin: 2px 0 0;
+      }
+      input[type="text"] {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px 8px;
+        margin-top: 4px;
+      }
+      #saved {
+        color: #1a7f37;
+        opacity: 0;
+        transition: opacity 0.3s;
+        margin-top: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Grab</h2>
+    <label>
+      <input type="checkbox" id="interceptDownloads" />
+      Automatically send browser downloads to Grab
+    </label>
+    <p class="hint">
+      When on, downloads are cancelled in the browser and opened in Grab
+      instead. Blob and data URLs can't be handed off and always stay in the
+      browser.
+    </p>
+    <label for="minSizeMB">Only intercept downloads of at least</label>
+    <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px">
+      <input
+        type="number"
+        id="minSizeMB"
+        min="0"
+        step="1"
+        style="width: 80px; padding: 6px 8px"
+      />
+      <span>MB</span>
+    </div>
+    <p class="hint">
+      Smaller downloads stay in the browser. 0 intercepts everything.
+    </p>
+    <label for="skipTypes">Don't intercept these file types</label>
+    <input type="text" id="skipTypes" placeholder="pdf, jpg, png" />
+    <p class="hint">Comma-separated extensions, e.g. <code>pdf, jpg</code>.</p>
+    <label>
+      <input type="checkbox" id="showContextMenu" />
+      Show “Download with Grab” in the right-click menu
+    </label>
+    <p id="saved">Saved</p>
+    <script src="options.js"></script>
+  </body>
+</html>
