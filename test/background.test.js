@@ -52,6 +52,7 @@ function makeChrome(shared) {
       sendMessage: async (id, msg) => calls.push(["tabs.sendMessage", id, msg]),
       onActivated: capture("tabs.onActivated"),
       onRemoved: capture("tabs.onRemoved"),
+      onUpdated: capture("tabs.onUpdated"),
     },
     alarms: {
       create: async (name, info) => {
@@ -102,9 +103,6 @@ function makeChrome(shared) {
     commands: { onCommand: capture("commands.onCommand") },
     webRequest: {
       onResponseStarted: capture("webRequest.onResponseStarted"),
-    },
-    webNavigation: {
-      onCommitted: capture("webNavigation.onCommitted"),
     },
   };
   return chrome;

@@ -7,8 +7,10 @@ const path = require("node:path");
 const BG_PATH = path.join(__dirname, "..", "background.js");
 const CONTENT_PATH = path.join(__dirname, "..", "content.js");
 
-/// Chrome mock extended for video detection: webRequest, webNavigation,
-/// tabs.onActivated/onRemoved/sendMessage, runtime.onMessage, action badges.
+/// Chrome mock extended for video detection: webRequest,
+/// tabs.onActivated/onRemoved/onUpdated/sendMessage, runtime.onMessage, action badges.
+// (Deliberately no webNavigation: the manifest doesn't request it, so the
+// mock must not provide it either — see the permission-mirror test below.)
 function makeChrome(shared) {
   shared = shared || {};
   const listeners = {};
@@ -52,6 +54,7 @@ function makeChrome(shared) {
       sendMessage: async (id, msg) => calls.push(["tabs.sendMessage", id, msg]),
       onActivated: capture("tabs.onActivated"),
       onRemoved: capture("tabs.onRemoved"),
+      onUpdated: capture("tabs.onUpdated"),
     },
     alarms: {
       create: async (name, info) => {
@@ -102,9 +105,6 @@ function makeChrome(shared) {
     commands: { onCommand: capture("commands.onCommand") },
     webRequest: {
       onResponseStarted: capture("webRequest.onResponseStarted"),
-    },
-    webNavigation: {
-      onCommitted: capture("webNavigation.onCommitted"),
     },
   };
   return chrome;
@@ -452,12 +452,49 @@ describe("detection wiring", () => {
     assert.ok(chrome._calls.some(([n, id]) => n === "menus.create" && id === "grabVideo:0"));
 
     chrome._calls.length = 0;
-    await L["webNavigation.onCommitted"]({ tabId: 5, frameId: 0 });
+    await L["tabs.onUpdated"](5, { status: "loading" });
     await tick();
     assert.equal(
       chrome._calls.some(([n, id]) => n === "menus.create" && String(id).startsWith("grabVideo")),
       false,
       "no video menu after navigation"
     );
+  });
+});
+
+describe("manifest permission mirror", () => {
+  test("worker starts using only permitted chrome namespaces", () => {
+    // Regression: 1.0.5 called chrome.webNavigation.onCommitted at the top
+    // level without declaring the permission. In a real browser that namespace
+    // is undefined, so the whole service worker died on startup — no context
+    // menu at all. The Node mock had always provided webNavigation, so the
+    // suite stayed green. This test wraps the mock in a Proxy that throws on
+    // any top-level chrome namespace the manifest doesn't grant (plus the
+    // namespaces Chrome exposes without a permission), so the same class of
+    // bug fails here instead of in the user's browser.
+    const fs = require("node:fs");
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "..", "manifest.json"), "utf8")
+    );
+    const allowed = new Set([
+      ...manifest.permissions,
+      // Exposed without a permission: runtime/action always; tabs as a
+      // namespace (url/title stay hidden without the "tabs" permission, which
+      // the worker doesn't need); commands via manifest key bindings.
+      "runtime",
+      "tabs",
+      "action",
+      "commands",
+    ]);
+    const chrome = makeChrome();
+    const guarded = new Proxy(chrome, {
+      get(target, prop, receiver) {
+        if (typeof prop === "string" && !prop.startsWith("_") && !allowed.has(prop)) {
+          throw new Error(`chrome.${prop} used but not in manifest permissions`);
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    assert.doesNotThrow(() => loadBackground(guarded));
   });
 });
