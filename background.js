@@ -22,10 +22,14 @@ const DEFAULTS = {
 };
 
 /// Wrap an http(s) URL for the Grab desktop app. Anything else (blob:, data:,
-/// file:, …) cannot be handed off and returns null.
+/// file:, …) cannot be handed off and returns null. The original scheme is
+/// carried as the first path segment (grab://https/host/...) so Grab can
+/// restore http vs https; needs Grab 4.7.1+.
 function toGrabUrl(url) {
-  if (typeof url !== "string" || !/^https?:\/\//i.test(url)) return null;
-  return GRAB_SCHEME + url.replace(/^https?:\/\//i, "");
+  if (typeof url !== "string") return null;
+  const m = /^(https?):\/\/(.+)$/i.exec(url);
+  if (!m) return null;
+  return `${GRAB_SCHEME}${m[1].toLowerCase()}/${m[2]}`;
 }
 
 /// Hand a URL to the Grab desktop app. Navigating a tab to an unknown scheme
@@ -96,8 +100,37 @@ async function interceptDownload(item) {
 }
 
 // Downloads parked while waiting for their size to become known, when the
-// user set a minimum intercept size. Maps download id -> { timer }.
-const pendingSize = new Map();
+// user set a minimum intercept size. MV3 service workers are ephemeral: an
+// in-memory Map + setTimeout can die mid-wait and lose the interception, so
+// the pending set lives in session storage (survives worker restarts, clears
+// with the browser) and the deadline is a chrome.alarms one-shot (alarms
+// wake the worker). After a restart, the next onChanged or alarm re-reads
+// the pending set and decides.
+const pendingKey = (id) => `pendingSize:${id}`;
+const alarmName = (id) => `size-wait:${id}`;
+
+// Best-effort guard against deciding the same download twice when an alarm
+// and a size event interleave within one worker lifetime. Cross-restart
+// dedup comes from dropPending's session-storage removal.
+const deciding = new Set();
+
+async function isPending(id) {
+  const key = pendingKey(id);
+  const result = await chrome.storage.session.get(key);
+  return result[key] !== undefined;
+}
+
+async function parkForSize(item) {
+  await chrome.storage.session.set({ [pendingKey(item.id)]: Date.now() });
+  await chrome.alarms.create(alarmName(item.id), {
+    when: Date.now() + SIZE_WAIT_MS,
+  });
+}
+
+async function dropPending(id) {
+  await chrome.alarms.clear(alarmName(id)).catch(() => {});
+  await chrome.storage.session.remove(pendingKey(id));
+}
 
 // How long to wait for a server to report the size before treating an
 // unknown size as big enough to intercept (streams rarely send one, and they
@@ -108,29 +141,35 @@ const minSizeBytes = (settings) =>
   Math.max(0, settings.minSizeMB | 0) * 1024 * 1024;
 
 async function decidePending(id) {
-  const pending = pendingSize.get(id);
-  if (!pending) return;
-  clearTimeout(pending.timer);
-  pendingSize.delete(id);
+  if (deciding.has(id)) return;
+  if (!(await isPending(id))) return;
+  deciding.add(id);
+  try {
+    await dropPending(id);
 
-  const settings = await getSettings();
-  const items = await chrome.downloads.search({ id });
-  const item = items[0];
-  if (!item) return;
-  // The user may have changed their mind while we waited.
-  if (!settings.interceptDownloads) return;
-  if (isSkipped(item.url, settings.skipTypes)) return;
-  if (!toGrabUrl(item.url)) return;
-  // Small enough to stay in the browser; unknown size falls through to
-  // interception (see SIZE_WAIT_MS).
-  if (item.fileSize >= 0 && item.fileSize < minSizeBytes(settings)) return;
-  await interceptDownload(item);
+    const settings = await getSettings();
+    const items = await chrome.downloads.search({ id });
+    const item = items[0];
+    if (!item) return;
+    // The user may have changed their mind while we waited.
+    if (!settings.interceptDownloads) return;
+    if (isSkipped(item.url, settings.skipTypes)) return;
+    if (!toGrabUrl(item.url)) return;
+    // Small enough to stay in the browser; unknown size falls through to
+    // interception (see SIZE_WAIT_MS).
+    if (item.fileSize >= 0 && item.fileSize < minSizeBytes(settings)) return;
+    await interceptDownload(item);
+  } finally {
+    deciding.delete(id);
+  }
 }
 
-function parkForSize(item) {
-  const timer = setTimeout(() => decidePending(item.id), SIZE_WAIT_MS);
-  pendingSize.set(item.id, { timer });
-}
+// Size-wait deadline: decide the parked download even if the worker was
+// restarted while it was parked (the pending set survived in session storage).
+chrome.alarms.onAlarm.addListener((alarm) => {
+  const m = /^size-wait:(\d+)$/.exec(alarm.name);
+  if (m) decidePending(Number(m[1]));
+});
 
 chrome.downloads.onCreated.addListener(async (item) => {
   const settings = await getSettings();
@@ -147,7 +186,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
     if (item.fileSize < 0) {
       // Size not known yet (headers haven't arrived): wait for it instead of
       // guessing. The browser download proceeds normally meanwhile.
-      parkForSize(item);
+      await parkForSize(item);
       return;
     }
   }
@@ -156,13 +195,11 @@ chrome.downloads.onCreated.addListener(async (item) => {
 });
 
 chrome.downloads.onChanged.addListener(async (delta) => {
-  if (pendingSize.has(delta.id)) {
+  if (await isPending(delta.id)) {
     const state = delta.state && delta.state.current;
     if (state === "complete" || state === "interrupted") {
       // Finished or failed before the size arrived: too late to hand over.
-      const pending = pendingSize.get(delta.id);
-      clearTimeout(pending.timer);
-      pendingSize.delete(delta.id);
+      await dropPending(delta.id);
       return;
     }
     if (delta.fileSize && delta.fileSize.current >= 0) {
@@ -209,12 +246,13 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (settings.showContextMenu) createContextMenu();
 });
 
-chrome.storage.onChanged.addListener((changes, area) => {
+chrome.storage.onChanged.addListener(async (changes, area) => {
   if (area !== "sync" || !changes.showContextMenu) return;
+  // removeAll first: rapid toggles would otherwise stack a duplicate-id
+  // create on top of an in-flight one.
+  await chrome.contextMenus.removeAll().catch(() => {});
   if (changes.showContextMenu.newValue) {
     createContextMenu();
-  } else {
-    chrome.contextMenus.remove("sendToGrab").catch(() => {});
   }
 });
 
@@ -241,3 +279,19 @@ chrome.commands.onCommand.addListener((command) => {
     if (tabs[0] && tabs[0].url) sendToGrab(tabs[0].url);
   });
 });
+
+// Test hook for node:test (MV3 service workers have no `module`).
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    toGrabUrl,
+    isSkipped,
+    minSizeBytes,
+    decidePending,
+    parkForSize,
+    dropPending,
+    isPending,
+    DEFAULTS,
+    SIZE_WAIT_MS,
+    GRAB_SCHEME,
+  };
+}
