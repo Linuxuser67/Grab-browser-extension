@@ -3,6 +3,11 @@
 Sends browser downloads and links to the [Grab](https://github.com/Linuxuser67/Grab)
 download manager (MV3, Chromium-based browsers).
 
+[![Install Grab for Linux](assets/install-grab.png)](https://github.com/Linuxuser67/Grab/releases/latest/download/Grab.flatpak)
+
+_Grab 4.7.1 or newer required — the button downloads the latest release's
+Flatpak bundle; open the downloaded file to install it._
+
 ## Install (developer mode)
 
 1. Open `chrome://extensions`, enable **Developer mode**.
@@ -11,7 +16,8 @@ download manager (MV3, Chromium-based browsers).
    tick **Always allow** so the prompt doesn't return.
 
 Grab must be installed with its desktop entry (it registers as the
-`x-scheme-handler/grab` handler).
+`x-scheme-handler/grab` handler). Requires Grab 4.7.1 or newer (the handoff
+carries the original http/https scheme, which older versions don't read).
 
 ## What it does
 
@@ -33,8 +39,11 @@ Magnet links are passed to the OS untouched — Grab already handles `magnet:`.
 - Downloads that need the browser's session (logged-in direct links) may fail
   in Grab — the extension doesn't forward cookies.
 - POST-form downloads hand Grab the action URL, which may not resolve to the file.
+- Interception hands the full download URL to the Grab desktop app through the
+  OS-registered `grab:` handler — inherent to the custom-scheme design.
 
 ## Permissions
 
 `downloads` (cancel intercepted downloads), `contextMenus`, `storage`
-(settings), `activeTab` (read the current tab's URL when you click the button).
+(settings), `alarms` (size-wait deadlines that survive worker restarts),
+`activeTab` (read the current tab's URL when you click the button).
