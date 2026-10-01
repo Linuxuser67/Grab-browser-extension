@@ -3,10 +3,9 @@
 Sends browser downloads and links to the [Grab](https://github.com/Linuxuser67/Grab)
 download manager (MV3, Chromium-based browsers).
 
-[![Install Grab for Linux](assets/install-grab.png)](https://github.com/Linuxuser67/Grab/releases/latest/download/Grab.flatpak)
+[![Get it on FlatPark](assets/get-it-on-flatpark.png)](https://flatpark.org/apps/io.github.linuxuser67.Grab/)
 
-_Grab 4.7.1 or newer required — the button downloads the latest release's
-Flatpak bundle; open the downloaded file to install it._
+_Grab 4.7.1 or newer required — install it from FlatPark via the badge above._
 
 ## Install (developer mode)
 
