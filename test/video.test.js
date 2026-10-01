@@ -51,6 +51,7 @@ function makeChrome(shared) {
       },
       remove: async (id) => calls.push(["tabs.remove", id]),
       query: (q, cb) => cb([]),
+      get: async (id) => ({ id, url: "https://example.com/" }),
       sendMessage: async (id, msg) => calls.push(["tabs.sendMessage", id, msg]),
       onActivated: capture("tabs.onActivated"),
       onRemoved: capture("tabs.onRemoved"),
@@ -496,5 +497,77 @@ describe("manifest permission mirror", () => {
       },
     });
     assert.doesNotThrow(() => loadBackground(guarded));
+  });
+});
+
+describe("excluded hosts", () => {
+  const tick = () => new Promise((r) => setTimeout(r, 30));
+
+  test("hostExcluded matches hosts and subdomains only", () => {
+    const bg = loadBackground(makeChrome());
+    assert.ok(bg.hostExcluded("instagram.com"));
+    assert.ok(bg.hostExcluded("www.tiktok.com"));
+    assert.ok(bg.hostExcluded("vm.tiktok.com"));
+    assert.ok(bg.hostExcluded("INSTAGRAM.COM"));
+    assert.equal(bg.hostExcluded("example.com"), false);
+    assert.equal(bg.hostExcluded("tiktok.com.evil.com"), false);
+    assert.equal(bg.hostExcluded("nottiktok.com"), false);
+    assert.equal(bg.hostExcluded(""), false);
+    assert.equal(bg.hostExcluded(null), false);
+  });
+
+  test("content script hostExcluded agrees with the worker's", () => {
+    const bg = loadBackground(makeChrome());
+    const content = loadContent();
+    for (const h of ["instagram.com", "www.tiktok.com", "example.com", "x.com"]) {
+      assert.equal(content.hostExcluded(h), bg.hostExcluded(h), h);
+    }
+  });
+
+  test("no menu or badge on excluded hosts, even with finds", async () => {
+    const chrome = makeChrome();
+    // The tab lives on TikTok: direct sources and sniffed manifests exist,
+    // but nothing may be shown.
+    chrome.tabs.get = async (id) => ({ id, url: "https://www.tiktok.com/@u/video/1" });
+    loadBackground(chrome);
+    const L = chrome._listeners;
+
+    await L["tabs.onActivated"]({ tabId: 7 });
+    L["webRequest.onResponseStarted"]({
+      tabId: 7,
+      url: "https://cdn.example.com/s/stream.m3u8",
+      responseHeaders: [],
+    });
+    await tick();
+    await tick();
+    assert.equal(
+      chrome._calls.some(([n, id]) => n === "menus.create" && String(id).startsWith("grabVideo")),
+      false,
+      "no video menu on excluded host"
+    );
+    assert.equal(
+      chrome._calls.some(([n]) => n === "action.setBadgeText"),
+      false,
+      "no badge on excluded host"
+    );
+  });
+
+  test("non-excluded hosts still get the menu", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    const L = chrome._listeners;
+
+    await L["tabs.onActivated"]({ tabId: 9 });
+    L["webRequest.onResponseStarted"]({
+      tabId: 9,
+      url: "https://cdn.example.com/s/stream.m3u8",
+      responseHeaders: [],
+    });
+    await tick();
+    await tick();
+    assert.ok(
+      chrome._calls.some(([n, id]) => n === "menus.create" && id === "grabVideo:0"),
+      "menu shown on ordinary hosts"
+    );
   });
 });
