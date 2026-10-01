@@ -85,7 +85,10 @@ function makeChrome(shared) {
       removeAll: async () => calls.push(["menus.removeAll"]),
       onClicked: capture("menus.onClicked"),
     },
-    runtime: { onInstalled: capture("runtime.onInstalled") },
+    runtime: {
+      onInstalled: capture("runtime.onInstalled"),
+      openOptionsPage: async () => calls.push(["runtime.openOptionsPage"]),
+    },
     action: { onClicked: capture("action.onClicked") },
     commands: { onCommand: capture("commands.onCommand") },
   };
@@ -509,5 +512,45 @@ describe("size-wait deadline design (review fixes 2 and 3)", () => {
     assert.equal(handedOff(chrome), false);
     assert.equal(chrome._session.has("pendingSize:13"), true);
     assert.equal(chrome._alarms.has("size-wait:13"), true);
+  });
+
+  test("concurrent decidePending calls hand off only once (review finding)", async () => {
+    const chrome = makeChrome(settings());
+    const bg = loadBackground(chrome);
+    chrome._downloads.set(14, item(14));
+    // Deadline already past, so decidePending intercepts instead of re-parking.
+    chrome._session.set("pendingSize:14", Date.now() - 1000);
+    // An alarm and a size-change event arriving together.
+    await Promise.all([bg.decidePending(14), bg.decidePending(14)]);
+    const handoffs = chrome._calls.filter(
+      ([name, arg]) =>
+        name === "tabs.create" &&
+        typeof arg.url === "string" &&
+        arg.url.startsWith("grab:")
+    );
+    assert.equal(handoffs.length, 1);
+  });
+});
+
+describe("toolbar opens the options page", () => {
+  test("clicking the toolbar button opens options, not a Grab handoff", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    await chrome._listeners["action.onClicked"]({
+      url: "https://example.com/video",
+    });
+    assert.equal(
+      chrome._calls.some(([name]) => name === "runtime.openOptionsPage"),
+      true
+    );
+    assert.equal(
+      chrome._calls.some(
+        ([name, arg]) =>
+          (name === "tabs.update" || name === "tabs.create") &&
+          typeof arg.url === "string" &&
+          arg.url.startsWith("grab:")
+      ),
+      false
+    );
   });
 });
