@@ -19,7 +19,7 @@
         ]
       },
       "id": "grab@linuxuser67.github.io",
-      "strict_min_version": "126.0"
+      "strict_min_version": "142.0"
     }
   },
   "commands": {
@@ -49,5 +49,5 @@
     "downloads",
     "storage"
   ],
-  "version": "1.0.3"
+  "version": "1.0.4"
 }
