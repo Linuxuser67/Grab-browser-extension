@@ -380,19 +380,32 @@ const VIDEO_PARENT_ID = "grabVideos";
 const VIDEO_ITEM_PREFIX = "grabVideo:";
 const MAX_VIDEO_ITEMS = 8;
 
-/// Hosts where handing a detected media URL to Grab can't succeed: the
-/// players use auth-gated/expiring CDN URLs (or DRM), so listing them only
-/// produces noise. Detection stays off there; page/link sends keep going
-/// through yt-dlp the old way, which is what handles those sites.
-const VIDEO_DETECT_EXCLUDED_HOSTS = ["instagram.com", "tiktok.com"];
+/// Video platforms yt-dlp extracts: their players use auth-gated/expiring
+/// CDN URLs (or DRM), so a detected media URL handed to Grab can't succeed —
+/// listing them only produces noise. Detection stays off on these hosts;
+/// sending the page itself keeps going through yt-dlp the old way, which is
+/// what handles them. Subdomains are covered by hostExcluded below.
+const YTDLP_EXCLUSIVE_HOSTS = [
+  "youtube.com",
+  "youtu.be",
+  "vimeo.com",
+  "dailymotion.com",
+  "dai.ly",
+  "tiktok.com",
+  "instagram.com",
+  "facebook.com",
+  "fb.com",
+  "fb.watch",
+  "twitter.com",
+  "x.com",
+  "twitch.tv",
+];
 
 /// True for the host itself and any subdomain ("www.tiktok.com"), never for
 /// lookalikes ("tiktok.com.evil.com", "nottiktok.com").
 function hostExcluded(host) {
   const h = String(host || "").toLowerCase();
-  return VIDEO_DETECT_EXCLUDED_HOSTS.some(
-    (d) => h === d || h.endsWith("." + d),
-  );
+  return YTDLP_EXCLUSIVE_HOSTS.some((d) => h === d || h.endsWith("." + d));
 }
 
 /// True when the tab lives on an excluded host. Host permissions are granted,
@@ -659,7 +672,7 @@ if (typeof module !== "undefined" && module.exports) {
     videoMenuTitle,
     mergeVideoFinds,
     hostExcluded,
-    VIDEO_DETECT_EXCLUDED_HOSTS,
+    YTDLP_EXCLUSIVE_HOSTS,
     DEFAULTS,
     SIZE_WAIT_MS,
     GRAB_SCHEME,

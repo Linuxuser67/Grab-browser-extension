@@ -505,21 +505,47 @@ describe("excluded hosts", () => {
 
   test("hostExcluded matches hosts and subdomains only", () => {
     const bg = loadBackground(makeChrome());
-    assert.ok(bg.hostExcluded("instagram.com"));
-    assert.ok(bg.hostExcluded("www.tiktok.com"));
-    assert.ok(bg.hostExcluded("vm.tiktok.com"));
-    assert.ok(bg.hostExcluded("INSTAGRAM.COM"));
-    assert.equal(bg.hostExcluded("example.com"), false);
-    assert.equal(bg.hostExcluded("tiktok.com.evil.com"), false);
-    assert.equal(bg.hostExcluded("nottiktok.com"), false);
-    assert.equal(bg.hostExcluded(""), false);
+    for (const h of [
+      "instagram.com",
+      "www.tiktok.com",
+      "vm.tiktok.com",
+      "youtube.com",
+      "www.youtube.com",
+      "youtu.be",
+      "vimeo.com",
+      "www.dailymotion.com",
+      "dai.ly",
+      "facebook.com",
+      "fb.watch",
+      "twitter.com",
+      "x.com",
+      "www.twitch.tv",
+      "INSTAGRAM.COM",
+    ]) {
+      assert.ok(bg.hostExcluded(h), h);
+    }
+    for (const h of [
+      "example.com",
+      "rumble.com",
+      "tiktok.com.evil.com",
+      "nottiktok.com",
+      "x.com.evil.com",
+      "",
+    ]) {
+      assert.equal(bg.hostExcluded(h), false, h);
+    }
     assert.equal(bg.hostExcluded(null), false);
   });
 
   test("content script hostExcluded agrees with the worker's", () => {
     const bg = loadBackground(makeChrome());
     const content = loadContent();
-    for (const h of ["instagram.com", "www.tiktok.com", "example.com", "x.com"]) {
+    assert.deepEqual(
+      [...content.DETECT_EXCLUDED_HOSTS].sort(),
+      [...bg.YTDLP_EXCLUSIVE_HOSTS].sort(),
+      "the two exclusion lists must stay in sync"
+    );
+    for (const h of ["instagram.com", "www.tiktok.com", "youtube.com", "x.com", "example.com"]) {
       assert.equal(content.hostExcluded(h), bg.hostExcluded(h), h);
     }
   });

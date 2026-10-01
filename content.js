@@ -9,11 +9,25 @@
 
 const MIN_VIDEO_PX = 120; // ignore tiny players (ads, trackers)
 
-// Hosts where handing a detected media URL to Grab can't succeed
-// (auth-gated/expiring CDN URLs): detection only produces noise there.
-// Keep in sync with VIDEO_DETECT_EXCLUDED_HOSTS in background.js — the
-// worker gates the menu too, for manifests sniffed without a page report.
-const DETECT_EXCLUDED_HOSTS = ["instagram.com", "tiktok.com"];
+// Video platforms yt-dlp extracts (auth-gated/expiring CDN URLs or DRM):
+// detection only produces noise there. Keep in sync with
+// YTDLP_EXCLUSIVE_HOSTS in background.js — the worker gates the menu too,
+// for manifests sniffed without a page report.
+const DETECT_EXCLUDED_HOSTS = [
+  "youtube.com",
+  "youtu.be",
+  "vimeo.com",
+  "dailymotion.com",
+  "dai.ly",
+  "tiktok.com",
+  "instagram.com",
+  "facebook.com",
+  "fb.com",
+  "fb.watch",
+  "twitter.com",
+  "x.com",
+  "twitch.tv",
+];
 
 /// True for the host itself and any subdomain, never for lookalikes.
 function hostExcluded(host) {
@@ -113,5 +127,5 @@ if (
 
 // Test hook for node:test.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { collectVideos, usableVideoSrc, hostExcluded, MIN_VIDEO_PX };
+  module.exports = { collectVideos, usableVideoSrc, hostExcluded, DETECT_EXCLUDED_HOSTS, MIN_VIDEO_PX };
 }
