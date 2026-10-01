@@ -49,6 +49,9 @@ function makeChrome(shared) {
       },
       remove: async (id) => calls.push(["tabs.remove", id]),
       query: (q, cb) => cb([]),
+      sendMessage: async (id, msg) => calls.push(["tabs.sendMessage", id, msg]),
+      onActivated: capture("tabs.onActivated"),
+      onRemoved: capture("tabs.onRemoved"),
     },
     alarms: {
       create: async (name, info) => {
@@ -87,10 +90,22 @@ function makeChrome(shared) {
     },
     runtime: {
       onInstalled: capture("runtime.onInstalled"),
+      onMessage: capture("runtime.onMessage"),
       openOptionsPage: async () => calls.push(["runtime.openOptionsPage"]),
     },
-    action: { onClicked: capture("action.onClicked") },
+    action: {
+      onClicked: capture("action.onClicked"),
+      setBadgeText: async (args) => calls.push(["action.setBadgeText", args]),
+      setBadgeBackgroundColor: async (args) =>
+        calls.push(["action.setBadgeBackgroundColor", args]),
+    },
     commands: { onCommand: capture("commands.onCommand") },
+    webRequest: {
+      onResponseStarted: capture("webRequest.onResponseStarted"),
+    },
+    webNavigation: {
+      onCommitted: capture("webNavigation.onCommitted"),
+    },
   };
   return chrome;
 }

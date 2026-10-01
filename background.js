@@ -1,12 +1,15 @@
 // Grab browser extension (MV3) — service worker.
 //
-// Two jobs:
+// Three jobs:
 //   1. Automatic interception: browser downloads are cancelled and handed to
 //      the Grab desktop app through the grab: URI scheme (registered by the
 //      app's .desktop entry as x-scheme-handler/grab).
 //   2. Explicit sends: context menu and keyboard shortcut send the current
 //      tab or a link/media URL to Grab. The toolbar button opens the options
 //      page instead.
+//   3. Video detection: <video> elements reported by the content script plus
+//      stream manifests sniffed via webRequest are offered in the right-click
+//      menu as "Download video with Grab", FDM-style.
 //
 // All listeners are registered synchronously at the top level: the worker is
 // ephemeral and Chrome only wakes it for events it registered for on startup.
@@ -18,6 +21,9 @@ const DEFAULTS = {
   // Comma-separated file extensions the browser keeps handling itself.
   skipTypes: "",
   showContextMenu: true,
+  // Detect videos playing in tabs (content script + webRequest sniffing)
+  // and offer them in the right-click menu.
+  detectVideos: true,
   // Minimum download size (MiB) that gets intercepted. 0 intercepts everything.
   minSizeMB: 0,
 };
@@ -312,17 +318,32 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 chrome.storage.onChanged.addListener(async (changes, area) => {
-  if (area !== "sync" || !changes.showContextMenu) return;
-  // removeAll first: rapid toggles would otherwise stack a duplicate-id
-  // create on top of an in-flight one.
-  await chrome.contextMenus.removeAll().catch(() => {});
-  if (changes.showContextMenu.newValue) {
-    createContextMenu();
+  if (area !== "sync") return;
+  if (changes.showContextMenu) {
+    // removeAll first: rapid toggles would otherwise stack a duplicate-id
+    // create on top of an in-flight one.
+    await chrome.contextMenus.removeAll().catch(() => {});
+    if (changes.showContextMenu.newValue) {
+      createContextMenu();
+    }
+  }
+  if (changes.detectVideos) {
+    detectVideosOn = changes.detectVideos.newValue !== false;
+    if (!detectVideosOn) clearAllVideoUi();
   }
 });
 
-chrome.contextMenus.onClicked.addListener((info) => {
-  if (info.menuItemId !== "sendToGrab") return;
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  const id = info.menuItemId;
+  if (typeof id === "string" && id.startsWith(VIDEO_ITEM_PREFIX)) {
+    // A detected video: same explicit-send channel as the main item (the
+    // user picked this tab), not the background-tab interception channel.
+    const urls = mergedVideoUrls(tab && tab.id != null ? tab.id : activeTabId);
+    const url = urls[Number(id.slice(VIDEO_ITEM_PREFIX.length))];
+    if (url) sendToGrab(url);
+    return;
+  }
+  if (id !== "sendToGrab") return;
   // Magnet links already open in Grab through the OS handler; pass them
   // through unwrapped.
   const url = info.linkUrl || info.srcUrl || info.pageUrl;
@@ -345,6 +366,255 @@ chrome.commands.onCommand.addListener((command) => {
   });
 });
 
+// --- Video detection ------------------------------------------------------
+//
+// FDM-style video menu: the content script reports <video> elements with
+// direct http(s) sources, and webRequest sniffs the HLS/DASH stream
+// manifests (.m3u8/.mpd) that blob:-based MSE players actually fetch.
+// Detections are kept per tab and offered as right-click menu children; a
+// toolbar badge shows the count. Picking an entry hands the URL to the Grab
+// desktop app. Segment traffic (.ts/.m4s/...) is ignored so the menu isn't
+// flooded with fragments.
+
+const VIDEO_PARENT_ID = "grabVideos";
+const VIDEO_ITEM_PREFIX = "grabVideo:";
+const MAX_VIDEO_ITEMS = 8;
+
+/// Classify a sniffed response URL: "manifest" for HLS/DASH playlists,
+/// "media" for direct video files, null for everything else (segments,
+/// audio, images, pages). Manifests win on content type alone because some
+/// are served extensionless; extensionless media is NOT guessed because
+/// DASH segments look exactly like that.
+function classifyStream(url, contentType) {
+  const u = String(url || "").toLowerCase();
+  if (!/^https?:\/\//i.test(u)) return null;
+  const ct = String(contentType || "").toLowerCase().split(";")[0].trim();
+  if (/\.(m3u8|m3u|mpd)([?#]|$)/.test(u)) return "manifest";
+  if (
+    ct === "application/vnd.apple.mpegurl" ||
+    ct === "application/x-mpegurl" ||
+    ct === "audio/x-mpegurl" ||
+    ct === "application/dash+xml"
+  ) {
+    return "manifest";
+  }
+  if (/\.(mp4|m4v|webm|ogv|mov|mkv)([?#]|$)/.test(u)) return "media";
+  return null;
+}
+
+/// Menu title for a detected video: the file name, decoded and shortened.
+function videoMenuTitle(url, index) {
+  try {
+    const name = decodeURIComponent(
+      new URL(url).pathname.split("/").filter(Boolean).pop() || "",
+    );
+    if (name) return name.length > 40 ? name.slice(0, 40) + "…" : name;
+  } catch {
+    // Fall through to the numbered fallback.
+  }
+  return `Video ${index + 1}`;
+}
+
+/// Merge content-script reports (direct sources first) with sniffed stream
+/// URLs, deduplicated. blob: entries carry no URL; they fall back to the
+/// sniffed manifests.
+function mergeVideoFinds(domVideos, sniffedUrls) {
+  const out = [];
+  const seen = new Set();
+  const push = (u) => {
+    if (typeof u === "string" && u && !seen.has(u)) {
+      seen.add(u);
+      out.push(u);
+    }
+  };
+  for (const v of domVideos || []) push(v && v.src);
+  for (const u of sniffedUrls || []) push(u);
+  return out;
+}
+
+// Per-tab detections: tabId -> { frames: Map(frameId -> [{src, blob}]),
+// sniffed: [url] }. Reports are tracked per frame because the content script
+// runs in all frames; last-writer-wins per tab would drop other frames'
+// videos whenever two frames report at different times.
+const videoFinds = new Map();
+let activeTabId = null;
+let detectVideosOn = DEFAULTS.detectVideos;
+
+getSettings().then((s) => {
+  detectVideosOn = s.detectVideos !== false;
+});
+
+function domVideosFor(tabId) {
+  const f = videoFinds.get(tabId);
+  if (!f) return [];
+  const out = [];
+  for (const videos of f.frames.values()) out.push(...videos);
+  return out;
+}
+
+function mergedVideoUrls(tabId) {
+  const f = videoFinds.get(tabId);
+  return f ? mergeVideoFinds(domVideosFor(tabId), f.sniffed).slice(0, MAX_VIDEO_ITEMS) : [];
+}
+
+function sniffedHeader(headers, name) {
+  for (const h of headers || []) {
+    if (h.name && h.name.toLowerCase() === name) return h.value || "";
+  }
+  return "";
+}
+
+function noteSniffed(tabId, url) {
+  let f = videoFinds.get(tabId);
+  if (!f) {
+    f = { frames: new Map(), sniffed: [] };
+    videoFinds.set(tabId, f);
+  }
+  if (!f.sniffed.includes(url)) {
+    f.sniffed.push(url);
+    // Bound the list: a long-lived tab could otherwise grow it forever.
+    if (f.sniffed.length > 50) f.sniffed.splice(0, f.sniffed.length - 50);
+  }
+}
+
+// Refreshes are serialized through a promise chain: burst manifest traffic
+// could otherwise interleave remove/create and hit duplicate menu ids.
+let menuChain = Promise.resolve();
+
+/// Rebuild the video submenu for the active tab. Menus are global, so this
+/// only renders the tab the menu would open on.
+function refreshVideoMenu(tabId) {
+  menuChain = menuChain.then(() => doRefreshVideoMenu(tabId)).catch(() => {});
+}
+
+function safeMenuCreate(props) {
+  try {
+    const r = chrome.contextMenus.create(props);
+    if (r && typeof r.catch === "function") r.catch(() => {});
+  } catch {
+    // Duplicate id from a raced rebuild; the next event rebuilds.
+  }
+}
+
+function doRefreshVideoMenu(tabId) {
+  const rebuild = () => {
+    // Re-read: the finds may have changed while the remove was in flight.
+    const urls = tabId === activeTabId ? mergedVideoUrls(tabId) : [];
+    if (urls.length === 0) return;
+    safeMenuCreate({
+      id: VIDEO_PARENT_ID,
+      title: "Videos detected by Grab",
+      contexts: ["page", "video", "link"],
+    });
+    urls.forEach((u, i) => {
+      safeMenuCreate({
+        id: `${VIDEO_ITEM_PREFIX}${i}`,
+        parentId: VIDEO_PARENT_ID,
+        title: videoMenuTitle(u, i),
+        contexts: ["page", "video", "link"],
+      });
+    });
+    const badged = chrome.action.setBadgeText({
+      tabId,
+      text: String(urls.length),
+    });
+    if (badged && typeof badged.catch === "function") badged.catch(() => {});
+  };
+  // remove() drops the children too; a missing menu rejects, which is fine.
+  const removed = chrome.contextMenus.remove(VIDEO_PARENT_ID);
+  if (removed && typeof removed.then === "function") {
+    return removed.then(rebuild, rebuild);
+  }
+  rebuild();
+  return undefined;
+}
+
+function clearVideoUi(tabId) {
+  videoFinds.delete(tabId);
+  if (tabId === activeTabId) {
+    refreshVideoMenu(tabId); // rebuild sees no finds: drops the menu
+    const badged = chrome.action.setBadgeText({ tabId, text: "" });
+    if (badged && typeof badged.catch === "function") {
+      badged.catch(() => {});
+    }
+  }
+}
+
+function clearAllVideoUi() {
+  const tabIds = [...videoFinds.keys()];
+  videoFinds.clear();
+  refreshVideoMenu(activeTabId);
+  for (const id of tabIds) {
+    const badged = chrome.action.setBadgeText({ tabId: id, text: "" });
+    if (badged && typeof badged.catch === "function") {
+      badged.catch(() => {});
+    }
+  }
+}
+
+function onVideoEvent(tabId) {
+  if (!detectVideosOn) return;
+  if (tabId !== activeTabId) return;
+  refreshVideoMenu(tabId);
+}
+
+chrome.webRequest.onResponseStarted.addListener(
+  (details) => {
+    if (!detectVideosOn) return;
+    if (details.tabId == null || details.tabId < 0) return;
+    const kind = classifyStream(
+      details.url,
+      sniffedHeader(details.responseHeaders, "content-type"),
+    );
+    if (kind === null) return;
+    noteSniffed(details.tabId, details.url);
+    onVideoEvent(details.tabId);
+  },
+  { urls: ["http://*/*", "https://*/*"] },
+  ["responseHeaders"],
+);
+
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (!msg || msg.type !== "grab-videos-detected") return;
+  if (!detectVideosOn) return;
+  const tabId = sender && sender.tab && sender.tab.id;
+  if (tabId == null || tabId < 0) return;
+  const frameId = sender && sender.frameId != null ? sender.frameId : 0;
+  let f = videoFinds.get(tabId);
+  if (!f) {
+    f = { frames: new Map(), sniffed: [] };
+    videoFinds.set(tabId, f);
+  }
+  f.frames.set(frameId, Array.isArray(msg.videos) ? msg.videos : []);
+  onVideoEvent(tabId);
+});
+
+chrome.tabs.onActivated.addListener((info) => {
+  activeTabId = info.tabId;
+  refreshVideoMenu(info.tabId);
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  videoFinds.delete(tabId);
+});
+
+chrome.webNavigation.onCommitted.addListener((details) => {
+  // Top-level navigation: the page's videos are gone; the content script
+  // reports fresh ones for the new document.
+  if (details.frameId === 0) clearVideoUi(details.tabId);
+});
+
+// After a worker restart the in-memory finds are gone but the content
+// scripts are still injected: ask the active tab to report again.
+chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+  if (!tabs || !tabs[0] || tabs[0].id == null) return;
+  activeTabId = tabs[0].id;
+  const sent = chrome.tabs.sendMessage(tabs[0].id, { type: "grab-rescan" });
+  if (sent && typeof sent.catch === "function") {
+    sent.catch(() => {});
+  }
+});
+
 // Test hook for node:test (MV3 service workers have no `module`).
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
@@ -355,6 +625,9 @@ if (typeof module !== "undefined" && module.exports) {
     parkForSize,
     dropPending,
     isPending,
+    classifyStream,
+    videoMenuTitle,
+    mergeVideoFinds,
     DEFAULTS,
     SIZE_WAIT_MS,
     GRAB_SCHEME,
