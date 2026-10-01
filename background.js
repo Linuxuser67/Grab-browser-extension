@@ -598,10 +598,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   videoFinds.delete(tabId);
 });
 
-chrome.webNavigation.onCommitted.addListener((details) => {
-  // Top-level navigation: the page's videos are gone; the content script
-  // reports fresh ones for the new document.
-  if (details.frameId === 0) clearVideoUi(details.tabId);
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  // New document loading in the tab: the page's videos are gone; the content
+  // script reports fresh ones once it runs. (webNavigation.onCommitted would
+  // need another manifest permission; tabs.onUpdated needs none.)
+  if (changeInfo && changeInfo.status === "loading") clearVideoUi(tabId);
 });
 
 // After a worker restart the in-memory finds are gone but the content
