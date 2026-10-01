@@ -27,6 +27,10 @@ carries the original http/https scheme, which older versions don't read).
 - **`Alt+G`**: sends the current tab to Grab (video pages open
   the New Download card, other links download normally).
 - **Right-click → Download with Grab**: on links, images, video, audio, and pages.
+- **Video detection** (on by default): videos playing in the tab — including
+  streams behind `blob:` players — appear under right-click →
+  **Videos detected by Grab**, with a count badge on the toolbar button.
+  Picking one opens it in Grab, which probes it like any other link.
 - **Options page**: turn interception on/off, set a minimum download size
   (smaller downloads stay in the browser), set file types the browser keeps
   handling itself (e.g. `pdf, jpg`), toggle the context menu.
@@ -46,4 +50,5 @@ Magnet links are passed to the OS untouched — Grab already handles `magnet:`.
 
 `downloads` (cancel intercepted downloads), `contextMenus`, `storage`
 (settings), `alarms` (size-wait deadlines that survive worker restarts),
-`activeTab` (read the current tab's URL for `Alt+G`).
+`activeTab` (read the current tab's URL for `Alt+G`), `webRequest` (spot
+video stream manifests), host access to http/https pages (video detection).
