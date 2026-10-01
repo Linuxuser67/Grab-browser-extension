@@ -32,12 +32,37 @@ function toGrabUrl(url) {
   return `${GRAB_SCHEME}${m[1].toLowerCase()}/${m[2]}`;
 }
 
-/// Hand a URL to the Grab desktop app. Navigating a tab to an unknown scheme
-/// delegates to the OS handler without replacing the page (same mechanism as
-/// mailto: links), so the user's tab is left alone.
+/// Explicit user action (toolbar button, keyboard shortcut, context menu):
+/// navigate the active tab to the grab: URL. The user acted on this tab, and
+/// external-protocol navigations are handed to the OS without replacing the
+/// page (the mailto: mechanism), so the tab is left alone. Never use this for
+/// automatic interception: the download can come from any tab, or none.
 function sendToGrab(url) {
   const grabUrl = toGrabUrl(url);
   if (grabUrl) chrome.tabs.update({ url: grabUrl });
+}
+
+/// Automatic interception must never repurpose the user's selected tab: the
+/// download can originate from any tab, or from no tab at all. Hand off
+/// through a dedicated background tab, removed once the OS has taken the URL.
+async function handOffInterception(url) {
+  const grabUrl = toGrabUrl(url);
+  if (!grabUrl) return;
+  try {
+    const tab = await chrome.tabs.create({ url: grabUrl, active: false });
+    // The custom-scheme navigation is handed to the OS handler; the tab
+    // itself only ever shows a blank page, so drop it shortly after. The
+    // unref keeps the Node test suite from waiting out the delay; in Chrome
+    // setTimeout returns a number and the guard is a no-op.
+    const timer = setTimeout(
+      () => chrome.tabs.remove(tab.id).catch(() => {}),
+      2000,
+    );
+    if (timer && typeof timer.unref === "function") timer.unref();
+  } catch {
+    // No window to open the handoff tab in; without a tab to navigate there
+    // is no other IPC channel, so the cancelled download can't be handed off.
+  }
 }
 
 /// True when the URL's file extension is on the user's skip list.
@@ -96,7 +121,9 @@ async function interceptDownload(item) {
   } catch {
     // Nothing written yet or already removed.
   }
-  sendToGrab(item.url);
+  // Automatic path: never touch the user's selected tab (see
+  // handOffInterception).
+  await handOffInterception(item.url);
 }
 
 // Downloads parked while waiting for their size to become known, when the
@@ -121,10 +148,14 @@ async function isPending(id) {
 }
 
 async function parkForSize(item) {
-  await chrome.storage.session.set({ [pendingKey(item.id)]: Date.now() });
-  await chrome.alarms.create(alarmName(item.id), {
-    when: Date.now() + SIZE_WAIT_MS,
-  });
+  // The alarm is only the worker-wakeup: the stored deadline is the real
+  // timer. Packaged Chrome fires alarms no earlier than ~30s out, so the
+  // effective wait in packaged builds is >= 30s even though the deadline is
+  // sooner; the deadline still decides, so unpacked builds keep the short
+  // wait for development.
+  const deadline = Date.now() + SIZE_WAIT_MS;
+  await chrome.storage.session.set({ [pendingKey(item.id)]: deadline });
+  await chrome.alarms.create(alarmName(item.id), { when: deadline });
 }
 
 async function dropPending(id) {
@@ -142,7 +173,9 @@ const minSizeBytes = (settings) =>
 
 async function decidePending(id) {
   if (deciding.has(id)) return;
-  if (!(await isPending(id))) return;
+  const stored = await chrome.storage.session.get(pendingKey(id));
+  const deadline = stored[pendingKey(id)];
+  if (deadline === undefined) return;
   deciding.add(id);
   try {
     await dropPending(id);
@@ -151,13 +184,27 @@ async function decidePending(id) {
     const items = await chrome.downloads.search({ id });
     const item = items[0];
     if (!item) return;
+    // The download finished or failed while parked (or in the async gap
+    // between deciding to park and persisting the pending state): too late
+    // to hand over — leave the browser copy alone.
+    if (item.state === "complete" || item.state === "interrupted") return;
     // The user may have changed their mind while we waited.
     if (!settings.interceptDownloads) return;
     if (isSkipped(item.url, settings.skipTypes)) return;
     if (!toGrabUrl(item.url)) return;
-    // Small enough to stay in the browser; unknown size falls through to
-    // interception (see SIZE_WAIT_MS).
-    if (item.fileSize >= 0 && item.fileSize < minSizeBytes(settings)) return;
+    if (item.fileSize >= 0) {
+      // Size is known: small enough stays in the browser, big enough is
+      // intercepted now.
+      if (item.fileSize < minSizeBytes(settings)) return;
+    } else if (Date.now() < deadline) {
+      // Size still unknown but the deadline hasn't passed: this call came
+      // too early (the alarm is only the wakeup). Re-park and wait for the
+      // real deadline instead of intercepting early.
+      await parkForSize(item);
+      return;
+    }
+    // Unknown size past the deadline: streams rarely report one, and they
+    // belong in Grab (see SIZE_WAIT_MS).
     await interceptDownload(item);
   } finally {
     deciding.delete(id);
@@ -187,6 +234,20 @@ chrome.downloads.onCreated.addListener(async (item) => {
       // Size not known yet (headers haven't arrived): wait for it instead of
       // guessing. The browser download proceeds normally meanwhile.
       await parkForSize(item);
+      // The download may have finished while the pending state was being
+      // written (async gap between deciding to park and persisting it):
+      // re-check, and drop the parked entry if it's already too late to
+      // hand over. Anything finishing after this is caught by the onChanged
+      // guard or by decidePending's own state check.
+      const fresh = await chrome.downloads.search({ id: item.id });
+      const current = fresh[0];
+      if (
+        !current ||
+        current.state === "complete" ||
+        current.state === "interrupted"
+      ) {
+        await dropPending(item.id);
+      }
       return;
     }
   }

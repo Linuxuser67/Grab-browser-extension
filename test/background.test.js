@@ -43,6 +43,11 @@ function makeChrome(shared) {
     },
     tabs: {
       update: (props) => calls.push(["tabs.update", props]),
+      create: async (props) => {
+        calls.push(["tabs.create", props]);
+        return { id: 987 };
+      },
+      remove: async (id) => calls.push(["tabs.remove", id]),
       query: (q, cb) => cb([]),
     },
     alarms: {
@@ -210,12 +215,15 @@ describe("size-wait interception", () => {
   const intercepted = () =>
     chrome._calls.some(
       ([name, arg]) =>
-        name === "tabs.update" && arg.url === "grab://https/example.com/big.iso"
+        name === "tabs.create" &&
+        arg.url === "grab://https/example.com/big.iso" &&
+        arg.active === false
     );
   const cancelled = (id) =>
     chrome._calls.some(([name, arg]) => name === "cancel" && arg === id);
 
   test("parks an unknown-size download in session storage with an alarm", async () => {
+    chrome._downloads.set(7, { ...bigItem(7), state: "in_progress" });
     await listeners["downloads.onCreated"](bigItem(7));
     assert.equal(chrome._session.get("pendingSize:7") !== undefined, true);
     assert.equal(chrome._alarms.has("size-wait:7"), true);
@@ -248,6 +256,7 @@ describe("size-wait interception", () => {
   });
 
   test("drops the wait when the download finishes first", async () => {
+    chrome._downloads.set(7, { ...bigItem(7), state: "in_progress" });
     await listeners["downloads.onCreated"](bigItem(7));
     await listeners["downloads.onChanged"]({
       id: 7,
@@ -261,6 +270,9 @@ describe("size-wait interception", () => {
   test("the alarm intercepts after the timeout with no size", async () => {
     chrome._downloads.set(7, bigItem(7));
     await listeners["downloads.onCreated"](bigItem(7));
+    // Simulate the alarm firing after the deadline (packaged Chrome fires
+    // no earlier than ~30s out; the stored deadline is the real timer).
+    chrome._session.set("pendingSize:7", Date.now() - 1000);
     listeners["alarms.onAlarm"]({ name: "size-wait:7" });
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(cancelled(7), true);
@@ -269,6 +281,7 @@ describe("size-wait interception", () => {
 
   test("a restarted worker reconstructs the wait from session storage", async () => {
     // Worker A parks the download, then "dies".
+    chrome._downloads.set(7, { ...bigItem(7), state: "in_progress" });
     await listeners["downloads.onCreated"](bigItem(7));
     assert.equal(chrome._session.has("pendingSize:7"), true);
 
@@ -288,7 +301,9 @@ describe("size-wait interception", () => {
     });
     const interceptedB = chromeB._calls.some(
       ([name, arg]) =>
-        name === "tabs.update" && arg.url === "grab://https/example.com/big.iso"
+        name === "tabs.create" &&
+        arg.url === "grab://https/example.com/big.iso" &&
+        arg.active === false
     );
     assert.equal(interceptedB, true);
   });
@@ -305,8 +320,9 @@ describe("master interception toggle", () => {
     chrome._calls.some(
       ([name, arg]) =>
         (name === "cancel" && arg === id) ||
-        (name === "tabs.update" &&
-          arg.url === "grab://https/example.com/file.zip")
+        (name === "tabs.create" &&
+          arg.url === "grab://https/example.com/file.zip" &&
+          arg.active === false)
     );
 
   test("onCreated leaves the download in the browser when off", async () => {
@@ -327,6 +343,7 @@ describe("master interception toggle", () => {
     const chrome = makeChrome(shared);
     const bg = loadBackground(chrome);
 
+    chrome._downloads.set(9, { ...item(9), fileSize: -1, state: "in_progress" });
     await chrome._listeners["downloads.onCreated"]({ ...item(9), fileSize: -1 });
     assert.equal(chrome._session.has("pendingSize:9"), true);
 
@@ -360,5 +377,137 @@ describe("context menu toggle", () => {
       if (name === "menus.removeAll") ri = i;
       if (name === "menus.create") assert.ok(ri < i);
     }
+  });
+});
+
+describe("handoff tab separation (review fix 1)", () => {
+  test("automatic interception uses a background tab, never the selected tab", async () => {
+    const chrome = makeChrome({
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    });
+    loadBackground(chrome);
+    await chrome._listeners["downloads.onCreated"]({
+      id: 31,
+      url: "https://example.com/big.iso",
+      fileSize: -1,
+    });
+    const viaBackgroundTab = chrome._calls.some(
+      ([name, arg]) =>
+        name === "tabs.create" &&
+        arg.url === "grab://https/example.com/big.iso" &&
+        arg.active === false
+    );
+    const viaSelectedTab = chrome._calls.some(
+      ([name, arg]) =>
+        name === "tabs.update" &&
+        typeof arg.url === "string" &&
+        arg.url.startsWith("grab:")
+    );
+    assert.equal(viaBackgroundTab, true);
+    assert.equal(viaSelectedTab, false);
+  });
+
+  test("explicit context-menu send still navigates the active tab", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    chrome._listeners["menus.onClicked"](
+      { menuItemId: "sendToGrab", linkUrl: "https://example.com/f.zip" },
+      null
+    );
+    const viaSelectedTab = chrome._calls.some(
+      ([name, arg]) =>
+        name === "tabs.update" && arg.url === "grab://https/example.com/f.zip"
+    );
+    const viaBackgroundTab = chrome._calls.some(
+      ([name]) => name === "tabs.create"
+    );
+    assert.equal(viaSelectedTab, true);
+    assert.equal(viaBackgroundTab, false);
+  });
+});
+
+describe("size-wait deadline design (review fixes 2 and 3)", () => {
+  const settings = () => ({
+    syncSettings: { interceptDownloads: true, minSizeMB: 100, skipTypes: "" },
+  });
+  const item = (id) => ({
+    id,
+    url: "https://example.com/big.iso",
+    fileSize: -1,
+    state: "in_progress",
+  });
+  const handedOff = (chrome) =>
+    chrome._calls.some(([name]) => name === "tabs.create");
+
+  test("parkForSize stores the deadline the alarm wakes for", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const before = Date.now();
+    await bg.parkForSize({ id: 21, url: "https://example.com/x" });
+    const deadline = chrome._session.get("pendingSize:21");
+    assert.ok(deadline >= before + bg.SIZE_WAIT_MS);
+    assert.ok(deadline <= Date.now() + bg.SIZE_WAIT_MS);
+    assert.equal(chrome._alarms.get("size-wait:21").when, deadline);
+  });
+
+  test("a download finishing during parkForSize is left alone", async () => {
+    const chrome = makeChrome(settings());
+    loadBackground(chrome);
+    chrome._downloads.set(11, item(11));
+    // Race: the download completes while the pending state is being written.
+    const origSet = chrome.storage.session.set;
+    chrome.storage.session.set = async (obj) => {
+      const dl = chrome._downloads.get(11);
+      if (dl) dl.state = "complete";
+      return origSet(obj);
+    };
+    await chrome._listeners["downloads.onCreated"](item(11));
+    // onCreated re-queried after persisting and dropped the parked entry.
+    assert.equal(chrome._session.has("pendingSize:11"), false);
+    assert.equal(chrome._alarms.has("size-wait:11"), false);
+    assert.equal(handedOff(chrome), false);
+    assert.equal(
+      chrome._calls.some(([name]) => name === "cancel"),
+      false
+    );
+  });
+
+  test("the alarm does not intercept an already-completed download", async () => {
+    const chrome = makeChrome(settings());
+    const bg = loadBackground(chrome);
+    chrome._downloads.set(12, item(12));
+    await chrome._listeners["downloads.onCreated"](item(12));
+    assert.equal(chrome._session.has("pendingSize:12"), true);
+    chrome._downloads.get(12).state = "complete";
+    await bg.decidePending(12);
+    // No handoff through any channel, and the browser download is untouched.
+    assert.equal(handedOff(chrome), false);
+    assert.equal(
+      chrome._calls.some(
+        ([name, arg]) =>
+          name === "tabs.update" &&
+          typeof arg.url === "string" &&
+          arg.url.startsWith("grab:")
+      ),
+      false
+    );
+    assert.equal(
+      chrome._calls.some(([name]) => name === "cancel" || name === "removeFile"),
+      false
+    );
+    assert.equal(chrome._session.has("pendingSize:12"), false);
+  });
+
+  test("an early decidePending re-parks instead of intercepting", async () => {
+    const chrome = makeChrome(settings());
+    const bg = loadBackground(chrome);
+    chrome._downloads.set(13, item(13));
+    await chrome._listeners["downloads.onCreated"](item(13));
+    // A stray call before the deadline with the size still unknown must not
+    // intercept: the stored deadline decides.
+    await bg.decidePending(13);
+    assert.equal(handedOff(chrome), false);
+    assert.equal(chrome._session.has("pendingSize:13"), true);
+    assert.equal(chrome._alarms.has("size-wait:13"), true);
   });
 });
