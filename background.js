@@ -4,8 +4,9 @@
 //   1. Automatic interception: browser downloads are cancelled and handed to
 //      the Grab desktop app through the grab: URI scheme (registered by the
 //      app's .desktop entry as x-scheme-handler/grab).
-//   2. Explicit sends: toolbar button, context menu, and keyboard shortcut
-//      send the current tab or a link/media URL to Grab.
+//   2. Explicit sends: context menu and keyboard shortcut send the current
+//      tab or a link/media URL to Grab. The toolbar button opens the options
+//      page instead.
 //
 // All listeners are registered synchronously at the top level: the worker is
 // ephemeral and Chrome only wakes it for events it registered for on startup.
@@ -32,7 +33,7 @@ function toGrabUrl(url) {
   return `${GRAB_SCHEME}${m[1].toLowerCase()}/${m[2]}`;
 }
 
-/// Explicit user action (toolbar button, keyboard shortcut, context menu):
+/// Explicit user action (keyboard shortcut, context menu):
 /// navigate the active tab to the grab: URL. The user acted on this tab, and
 /// external-protocol navigations are handed to the OS without replacing the
 /// page (the mailto: mechanism), so the tab is left alone. Never use this for
