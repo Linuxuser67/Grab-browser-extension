@@ -344,15 +344,19 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     return;
   }
   if (id !== "sendToGrab") return;
+  const candidates = [info.linkUrl, info.srcUrl, info.pageUrl];
   // Magnet links already open in Grab through the OS handler; pass them
   // through unwrapped.
-  const url = info.linkUrl || info.srcUrl || info.pageUrl;
-  if (typeof url === "string" && url.toLowerCase().startsWith("magnet:")) {
-    chrome.tabs.update({ url });
+  const magnet = candidates.find(
+    (u) => typeof u === "string" && u.toLowerCase().startsWith("magnet:"),
+  );
+  if (magnet) {
+    chrome.tabs.update({ url: magnet });
     return;
   }
-  // Prefer the media/link target; fall back to the page URL.
-  sendToGrab(url);
+  // Prefer the media/link target, but a blob:/data: media URL can't leave
+  // the browser — fall back to the page URL so yt-dlp can extract it there.
+  sendToGrab(candidates.find((u) => toGrabUrl(u)));
 });
 
 chrome.action.onClicked.addListener(() => {

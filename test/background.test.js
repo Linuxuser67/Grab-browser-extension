@@ -441,6 +441,61 @@ describe("handoff tab separation (review fix 1)", () => {
     assert.equal(viaSelectedTab, true);
     assert.equal(viaBackgroundTab, false);
   });
+
+  test("a blob: media URL falls back to the page URL for extraction", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    chrome._listeners["menus.onClicked"](
+      {
+        menuItemId: "sendToGrab",
+        srcUrl: "blob:https://example.com/uuid",
+        pageUrl: "https://example.com/room/user",
+      },
+      null
+    );
+    const sent = chrome._calls.some(
+      ([name, arg]) =>
+        name === "tabs.update" &&
+        arg.url === "grab://https/example.com/room/user"
+    );
+    assert.equal(sent, true);
+  });
+
+  test("a usable media URL is still preferred over the page URL", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    chrome._listeners["menus.onClicked"](
+      {
+        menuItemId: "sendToGrab",
+        srcUrl: "https://cdn.example.com/v.mp4",
+        pageUrl: "https://example.com/watch/1",
+      },
+      null
+    );
+    const sent = chrome._calls.some(
+      ([name, arg]) =>
+        name === "tabs.update" && arg.url === "grab://https/cdn.example.com/v.mp4"
+    );
+    assert.equal(sent, true);
+  });
+
+  test("a magnet link passes through unwrapped", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    chrome._listeners["menus.onClicked"](
+      {
+        menuItemId: "sendToGrab",
+        linkUrl: "magnet:?xt=urn:btih:abc",
+        pageUrl: "https://example.com/x",
+      },
+      null
+    );
+    const raw = chrome._calls.some(
+      ([name, arg]) =>
+        name === "tabs.update" && arg.url === "magnet:?xt=urn:btih:abc"
+    );
+    assert.equal(raw, true);
+  });
 });
 
 describe("size-wait deadline design (review fixes 2 and 3)", () => {
