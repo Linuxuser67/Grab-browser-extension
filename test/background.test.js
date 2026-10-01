@@ -49,6 +49,7 @@ function makeChrome(shared) {
       },
       remove: async (id) => calls.push(["tabs.remove", id]),
       query: (q, cb) => cb([]),
+      get: async (id) => ({ id, url: "https://example.com/" }),
       sendMessage: async (id, msg) => calls.push(["tabs.sendMessage", id, msg]),
       onActivated: capture("tabs.onActivated"),
       onRemoved: capture("tabs.onRemoved"),

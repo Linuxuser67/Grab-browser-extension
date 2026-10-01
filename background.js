@@ -380,6 +380,34 @@ const VIDEO_PARENT_ID = "grabVideos";
 const VIDEO_ITEM_PREFIX = "grabVideo:";
 const MAX_VIDEO_ITEMS = 8;
 
+/// Hosts where handing a detected media URL to Grab can't succeed: the
+/// players use auth-gated/expiring CDN URLs (or DRM), so listing them only
+/// produces noise. Detection stays off there; page/link sends keep going
+/// through yt-dlp the old way, which is what handles those sites.
+const VIDEO_DETECT_EXCLUDED_HOSTS = ["instagram.com", "tiktok.com"];
+
+/// True for the host itself and any subdomain ("www.tiktok.com"), never for
+/// lookalikes ("tiktok.com.evil.com", "nottiktok.com").
+function hostExcluded(host) {
+  const h = String(host || "").toLowerCase();
+  return VIDEO_DETECT_EXCLUDED_HOSTS.some(
+    (d) => h === d || h.endsWith("." + d),
+  );
+}
+
+/// True when the tab lives on an excluded host. Host permissions are granted,
+/// so tabs.get exposes the URL; anything odd (no tab, weird URL) is treated
+/// as not excluded.
+async function isExcludedTab(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const url = tab && tab.url;
+    return !!url && hostExcluded(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
 /// Classify a sniffed response URL: "manifest" for HLS/DASH playlists,
 /// "media" for direct video files, null for everything else (segments,
 /// audio, images, pages). Manifests win on content type alone because some
@@ -497,9 +525,10 @@ function safeMenuCreate(props) {
 }
 
 function doRefreshVideoMenu(tabId) {
-  const rebuild = () => {
+  const rebuild = async () => {
     // Re-read: the finds may have changed while the remove was in flight.
-    const urls = tabId === activeTabId ? mergedVideoUrls(tabId) : [];
+    let urls = tabId === activeTabId ? mergedVideoUrls(tabId) : [];
+    if (urls.length > 0 && (await isExcludedTab(tabId))) urls = [];
     if (urls.length === 0) return;
     safeMenuCreate({
       id: VIDEO_PARENT_ID,
@@ -629,6 +658,8 @@ if (typeof module !== "undefined" && module.exports) {
     classifyStream,
     videoMenuTitle,
     mergeVideoFinds,
+    hostExcluded,
+    VIDEO_DETECT_EXCLUDED_HOSTS,
     DEFAULTS,
     SIZE_WAIT_MS,
     GRAB_SCHEME,

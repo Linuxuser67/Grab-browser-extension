@@ -31,6 +31,9 @@ carries the original http/https scheme, which older versions don't read).
   streams behind `blob:` players — appear under right-click →
   **Videos detected by Grab**, with a count badge on the toolbar button.
   Picking one opens it in Grab, which probes it like any other link.
+  Skipped on sites where a detected media URL can't work (auth-gated CDN
+  URLs, e.g. Instagram and TikTok) — sending the page itself there still
+  goes through yt-dlp the usual way.
 - **Options page**: turn interception on/off, set a minimum download size
   (smaller downloads stay in the browser), set file types the browser keeps
   handling itself (e.g. `pdf, jpg`), toggle the context menu.

@@ -9,6 +9,18 @@
 
 const MIN_VIDEO_PX = 120; // ignore tiny players (ads, trackers)
 
+// Hosts where handing a detected media URL to Grab can't succeed
+// (auth-gated/expiring CDN URLs): detection only produces noise there.
+// Keep in sync with VIDEO_DETECT_EXCLUDED_HOSTS in background.js — the
+// worker gates the menu too, for manifests sniffed without a page report.
+const DETECT_EXCLUDED_HOSTS = ["instagram.com", "tiktok.com"];
+
+/// True for the host itself and any subdomain, never for lookalikes.
+function hostExcluded(host) {
+  const h = String(host || "").toLowerCase();
+  return DETECT_EXCLUDED_HOSTS.some((d) => h === d || h.endsWith("." + d));
+}
+
 /// First http(s) candidate among currentSrc, src and <source> children.
 function usableVideoSrc(video) {
   const candidates = [];
@@ -54,7 +66,14 @@ function collectVideos(doc) {
 
 // --- Live wiring (browser only; the pure helpers above are unit-tested) ---
 
-if (typeof chrome !== "undefined" && chrome.runtime && typeof document !== "undefined") {
+if (
+  typeof chrome !== "undefined" &&
+  chrome.runtime &&
+  typeof document !== "undefined" &&
+  // No reporting where detection can't produce a downloadable URL; the
+  // worker applies the same gate to sniffed manifests.
+  (typeof location === "undefined" || !hostExcluded(location.hostname))
+) {
   let lastSent = "";
 
   function report() {
@@ -94,5 +113,5 @@ if (typeof chrome !== "undefined" && chrome.runtime && typeof document !== "unde
 
 // Test hook for node:test.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { collectVideos, usableVideoSrc, MIN_VIDEO_PX };
+  module.exports = { collectVideos, usableVideoSrc, hostExcluded, MIN_VIDEO_PX };
 }
