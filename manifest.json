@@ -4,7 +4,8 @@
   "version": "1.0.0",
   "description": "Send downloads and links to the Grab download manager.",
   "homepage_url": "https://github.com/Linuxuser67/Grab",
-  "permissions": ["activeTab", "contextMenus", "downloads", "storage"],
+  "permissions": ["activeTab", "alarms", "contextMenus", "downloads", "storage"],
+  "minimum_chrome_version": "102",
   "background": {
     "service_worker": "background.js"
   },
