@@ -1,0 +1,54 @@
+{
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    },
+    "default_title": "Grab options"
+  },
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "service_worker": "background.js"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      },
+      "id": "grab@linuxuser67.github.io",
+      "strict_min_version": "126.0"
+    }
+  },
+  "commands": {
+    "send-tab-to-grab": {
+      "description": "Send the current tab to Grab.",
+      "suggested_key": {
+        "default": "Alt+G",
+        "mac": "Alt+G"
+      }
+    }
+  },
+  "description": "Send downloads and links to the Grab download manager.",
+  "homepage_url": "https://github.com/Linuxuser67/Grab",
+  "icons": {
+    "128": "icons/icon128.png",
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png"
+  },
+  "manifest_version": 3,
+  "name": "Grab",
+  "options_page": "options.html",
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "contextMenus",
+    "downloads",
+    "storage"
+  ],
+  "version": "1.0.1"
+}
