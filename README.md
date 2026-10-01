@@ -24,7 +24,8 @@ carries the original http/https scheme, which older versions don't read).
 - **Automatic interception** (on by default): downloads started in the browser
   are cancelled and opened in Grab instead. If a tiny download finishes before
   the cancel lands, the duplicate is removed from the browser.
-- **Toolbar button / `Alt+G`**: sends the current tab to Grab (video pages open
+- **Toolbar button**: opens the extension's options page.
+- **`Alt+G`**: sends the current tab to Grab (video pages open
   the New Download card, other links download normally).
 - **Right-click → Download with Grab**: on links, images, video, audio, and pages.
 - **Options page**: turn interception on/off, set a minimum download size
@@ -46,4 +47,4 @@ Magnet links are passed to the OS untouched — Grab already handles `magnet:`.
 
 `downloads` (cancel intercepted downloads), `contextMenus`, `storage`
 (settings), `alarms` (size-wait deadlines that survive worker restarts),
-`activeTab` (read the current tab's URL when you click the button).
+`activeTab` (read the current tab's URL for `Alt+G`).
