@@ -97,7 +97,6 @@ function makeChrome(shared) {
     runtime: {
       onInstalled: capture("runtime.onInstalled"),
       onMessage: capture("runtime.onMessage"),
-      onStartup: capture("runtime.onStartup"),
       openOptionsPage: async () => calls.push(["runtime.openOptionsPage"]),
       sendNativeMessage: async (host, msg) => {
         calls.push(["runtime.sendNativeMessage", host, msg]);
@@ -244,12 +243,6 @@ describe("size-wait interception", () => {
         name === "runtime.sendNativeMessage" &&
         host === "io.github.linuxuser67.grab" &&
         msg.url === "grab://https/example.com/big.iso"
-    ) ||
-    chrome._calls.some(
-      ([name, arg]) =>
-        name === "tabs.create" &&
-        arg.url === "grab://https/example.com/big.iso" &&
-        arg.active === true
     );
   const cancelled = (id) =>
     chrome._calls.some(([name, arg]) => name === "cancel" && arg === id);
@@ -331,19 +324,12 @@ describe("size-wait interception", () => {
       id: 7,
       fileSize: { current: 200 * MiB },
     });
-    const interceptedB =
-      chromeB._calls.some(
-        ([name, host, msg]) =>
-          name === "runtime.sendNativeMessage" &&
-          host === "io.github.linuxuser67.grab" &&
-          msg.url === "grab://https/example.com/big.iso"
-      ) ||
-      chromeB._calls.some(
-        ([name, arg]) =>
-          name === "tabs.create" &&
-          arg.url === "grab://https/example.com/big.iso" &&
-          arg.active === true
-      );
+    const interceptedB = chromeB._calls.some(
+      ([name, host, msg]) =>
+        name === "runtime.sendNativeMessage" &&
+        host === "io.github.linuxuser67.grab" &&
+        msg.url === "grab://https/example.com/big.iso"
+    );
     assert.equal(interceptedB, true);
   });
 });
@@ -446,7 +432,7 @@ describe("handoff tab separation (review fix 1)", () => {
     assert.equal(viaSelectedTab, false);
   });
 
-  test("falls back to a visible tab when the native host is missing", async () => {
+  test("leaves the download in the browser when the native host is missing", async () => {
     const chrome = makeChrome({
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
@@ -460,20 +446,18 @@ describe("handoff tab separation (review fix 1)", () => {
       url: "https://example.com/big.iso",
       fileSize: -1,
     });
+    // No tab handoff, no cancel: the browser keeps the download.
     const viaVisibleTab = chrome._calls.some(
       ([name, arg]) =>
         name === "tabs.create" &&
-        arg.url === "grab://https/example.com/big.iso" &&
-        arg.active === true
-    );
-    const viaSelectedTab = chrome._calls.some(
-      ([name, arg]) =>
-        name === "tabs.update" &&
         typeof arg.url === "string" &&
         arg.url.startsWith("grab:")
     );
-    assert.equal(viaVisibleTab, true);
-    assert.equal(viaSelectedTab, false);
+    const cancelled = chrome._calls.some(
+      ([name, arg]) => name === "cancel" && arg === 32
+    );
+    assert.equal(viaVisibleTab, false);
+    assert.equal(cancelled, false);
   });
 
   test("explicit context-menu send still navigates the active tab", async () => {
@@ -668,35 +652,5 @@ describe("toolbar opens the popup", () => {
       chrome._listeners["action.onClicked"],
       undefined
     );
-  });
-});
-
-describe("startup cleanup", () => {
-  test("closes stale grab:// handoff tabs on startup", async () => {
-    const chrome = makeChrome();
-    // A restored session: one stale handoff tab, one normal tab.
-    chrome.tabs.query = async () => [
-      { id: 1, url: "grab://https/example.com/video.mp4" },
-      { id: 2, url: "https://example.com/" },
-    ];
-    loadBackground(chrome);
-    const handler = chrome._listeners["runtime.onStartup"];
-    assert.ok(handler, "onStartup listener registered");
-    await handler();
-    const removed = chrome._calls.filter(([name]) => name === "tabs.remove");
-    assert.deepEqual(
-      removed.map(([, id]) => id),
-      [1],
-      "only the grab:// tab is closed"
-    );
-  });
-
-  test("startup with no grab:// tabs removes nothing", async () => {
-    const chrome = makeChrome();
-    chrome.tabs.query = async () => [{ id: 2, url: "https://example.com/" }];
-    loadBackground(chrome);
-    await chrome._listeners["runtime.onStartup"]();
-    const removed = chrome._calls.filter(([name]) => name === "tabs.remove");
-    assert.equal(removed.length, 0);
   });
 });
