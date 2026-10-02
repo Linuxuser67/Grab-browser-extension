@@ -11,16 +11,18 @@ _Grab 4.7.1 or newer required — install it from FlatPark via the badge above._
 
 1. Open `chrome://extensions`, enable **Developer mode**.
 2. **Load unpacked** → select this folder.
-3. Install the native messaging host (required for automatic interception):
+3. Copy the extension ID shown under the extension's name on
+   `chrome://extensions` (unpacked installs get a generated ID — it stays
+   stable as long as the folder path doesn't change).
+4. Install the native messaging host (required for automatic interception):
    ```
    ./native-host/install.py --chromium-id <your-extension-id>
    ```
-   Find the extension ID on `chrome://extensions` (Developer mode). For
-   Firefox, no ID is needed — the add-on ID is fixed.
+   For Firefox, no ID is needed — the add-on ID is fixed
+   (`grab@linuxuser67.github.io`).
 
 The host script hands `grab://` URLs to the OS directly, bypassing the
-browser's external-protocol prompt (which Brave shows tab-modally with no
-"always allow", making the old tab-based handoff invisible and broken).
+browser's external-protocol prompt.
 
 Grab must be installed with its desktop entry (it registers as the
 `x-scheme-handler/grab` handler). Requires Grab 4.7.1 or newer (the handoff
@@ -30,9 +32,9 @@ carries the original http/https scheme, which older versions don't read).
 
 - **Automatic interception** (on by default): downloads started in the browser
   are cancelled and opened in Grab instead via the native messaging host.
-  If the host isn't installed, falls back to a visible tab handoff (you'll
-  see an "Open Grab?" prompt — click Open). If a tiny download finishes before
-  the cancel lands, the duplicate is removed from the browser.
+  If the host isn't installed, downloads stay in the browser untouched.
+  If a tiny download finishes before the cancel lands, the duplicate is
+  removed from the browser.
 - **Toolbar button**: opens a popup with the extension settings (adapts to
   your system's light/dark theme).
 - **`Alt+G`**: sends the current tab to Grab (video pages open
@@ -57,8 +59,7 @@ Magnet links are passed to the OS untouched — Grab already handles `magnet:`.
   in Grab — the extension doesn't forward cookies.
 - POST-form downloads hand Grab the action URL, which may not resolve to the file.
 - Automatic interception requires the native messaging host (see Install).
-  Without it, the tab fallback shows a browser prompt on every download in
-  browsers that don't offer "always allow".
+  Without it, downloads stay in the browser.
 
 ## Permissions
 
