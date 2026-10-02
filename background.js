@@ -49,21 +49,51 @@ function sendToGrab(url) {
   if (grabUrl) chrome.tabs.update({ url: grabUrl });
 }
 
+/// Native-messaging host name (see native-host/). The host runs outside the
+/// browser sandbox and hands the grab:// URL to the OS directly — no tab,
+/// no prompt, no focus steal. This bypasses the external-protocol approval
+/// prompt, which Brave shows tab-modally with no "always allow": a
+/// background tab's prompt is invisible to the user, so the tab-based
+/// handoff silently dies there.
+const NATIVE_HOST = "io.github.linuxuser67.grab";
+
 /// Automatic interception must never repurpose the user's selected tab: the
-/// download can originate from any tab, or from no tab at all. Hand off
-/// through a dedicated background tab, removed once the OS has taken the URL.
+/// download can originate from any tab, or from no tab at all.
 async function handOffInterception(url) {
   const grabUrl = toGrabUrl(url);
   if (!grabUrl) return;
+  if (await handOffNative(grabUrl)) return;
+  await handOffTab(grabUrl);
+}
+
+/// Send the URL through the native host. Returns true when the host
+/// accepted and launched it.
+async function handOffNative(grabUrl) {
   try {
-    const tab = await chrome.tabs.create({ url: grabUrl, active: false });
+    const resp = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
+      url: grabUrl,
+    });
+    return !!(resp && resp.success);
+  } catch {
+    // Host not installed (or failed): fall back to the tab handoff.
+    return false;
+  }
+}
+
+/// Tab-based handoff for when the native host isn't installed. The tab must
+/// be visible (active: true): the external-protocol approval prompt is
+/// tab-modal, and a background tab's prompt is invisible — the user would
+/// never see it before the cleanup timer below destroys it.
+async function handOffTab(grabUrl) {
+  try {
+    const tab = await chrome.tabs.create({ url: grabUrl, active: true });
     // The custom-scheme navigation is handed to the OS handler; the tab
     // itself only ever shows a blank page, so drop it shortly after. The
     // unref keeps the Node test suite from waiting out the delay; in Chrome
     // setTimeout returns a number and the guard is a no-op.
     const timer = setTimeout(
       () => chrome.tabs.remove(tab.id).catch(() => {}),
-      2000,
+      10000,
     );
     if (timer && typeof timer.unref === "function") timer.unref();
   } catch {
@@ -359,9 +389,8 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   sendToGrab(candidates.find((u) => toGrabUrl(u)));
 });
 
-chrome.action.onClicked.addListener(() => {
-  chrome.runtime.openOptionsPage();
-});
+// The toolbar button now opens popup.html (default_popup in the manifest),
+// which hosts the settings UI directly.
 
 chrome.commands.onCommand.addListener((command) => {
   if (command !== "send-tab-to-grab") return;
@@ -676,6 +705,10 @@ if (typeof module !== "undefined" && module.exports) {
     videoMenuTitle,
     mergeVideoFinds,
     hostExcluded,
+    handOffInterception,
+    handOffNative,
+    handOffTab,
+    NATIVE_HOST,
     YTDLP_EXCLUSIVE_HOSTS,
     DEFAULTS,
     SIZE_WAIT_MS,

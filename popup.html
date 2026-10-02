@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1e1e1e;
+        --hint: #666666;
+        --border: #d0d0d0;
+        --input-bg: #ffffff;
+        --saved: #1a7f37;
+        --accent: #1a73e8;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1e1e1e;
+          --fg: #e8e8e8;
+          --hint: #a0a0a0;
+          --border: #404040;
+          --input-bg: #2d2d2d;
+          --saved: #4caf50;
+          --accent: #8ab4f8;
+        }
+      }
+      body {
+        font-family: system-ui, sans-serif;
+        font-size: 13px;
+        width: 300px;
+        margin: 0;
+        padding: 16px;
+        background: var(--bg);
+        color: var(--fg);
+      }
+      h2 {
+        font-size: 15px;
+        margin: 0 0 12px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      h2 img {
+        width: 20px;
+        height: 20px;
+      }
+      label {
+        display: block;
+        margin: 12px 0 4px;
+      }
+      label.checkbox {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        cursor: pointer;
+      }
+      label.checkbox input {
+        margin-top: 2px;
+        accent-color: var(--accent);
+      }
+      .hint {
+        color: var(--hint);
+        font-size: 11px;
+        margin: 2px 0 0;
+        line-height: 1.4;
+      }
+      input[type="text"],
+      input[type="number"] {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px 8px;
+        margin-top: 4px;
+        background: var(--input-bg);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        font-size: 13px;
+      }
+      input[type="text"]:focus,
+      input[type="number"]:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: -1px;
+        border-color: var(--accent);
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 4px;
+      }
+      .row input[type="number"] {
+        width: 70px;
+        margin-top: 0;
+      }
+      #saved {
+        color: var(--saved);
+        opacity: 0;
+        transition: opacity 0.3s;
+        margin: 12px 0 0;
+        font-size: 12px;
+      }
+      .footer {
+        margin-top: 16px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border);
+        font-size: 11px;
+        color: var(--hint);
+      }
+      .footer a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      .footer a:hover {
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+  <body>
+    <h2><img src="icons/icon32.png" alt="" />Grab</h2>
+
+    <label class="checkbox">
+      <input type="checkbox" id="interceptDownloads" />
+      <span>Automatically send browser downloads to Grab</span>
+    </label>
+    <p class="hint">
+      Downloads are cancelled in the browser and opened in Grab instead.
+    </p>
+
+    <label for="minSizeMB">Only intercept downloads of at least</label>
+    <div class="row">
+      <input type="number" id="minSizeMB" min="0" step="1" />
+      <span>MB</span>
+    </div>
+    <p class="hint">Smaller downloads stay in the browser. 0 intercepts everything.</p>
+
+    <label for="skipTypes">Don't intercept these file types</label>
+    <input type="text" id="skipTypes" placeholder="pdf, jpg, png" />
+    <p class="hint">Comma-separated extensions.</p>
+
+    <label class="checkbox">
+      <input type="checkbox" id="showContextMenu" />
+      <span>Show “Download with Grab” in the right-click menu</span>
+    </label>
+
+    <p id="saved">Saved</p>
+
+    <div class="footer">
+      <a href="#" id="openOptions">Full options page</a>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
