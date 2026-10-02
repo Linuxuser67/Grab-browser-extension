@@ -57,17 +57,10 @@ function sendToGrab(url) {
 /// handoff silently dies there.
 const NATIVE_HOST = "io.github.linuxuser67.grab";
 
-/// Automatic interception must never repurpose the user's selected tab: the
-/// download can originate from any tab, or from no tab at all.
-async function handOffInterception(url) {
-  const grabUrl = toGrabUrl(url);
-  if (!grabUrl) return;
-  if (await handOffNative(grabUrl)) return;
-  await handOffTab(grabUrl);
-}
-
 /// Send the URL through the native host. Returns true when the host
-/// accepted and launched it.
+/// accepted and launched it. The native host is the only handoff channel
+/// (FDM/DownloadHelper pattern): there is no tab-based fallback — if the
+/// host isn't installed, the download stays in the browser.
 async function handOffNative(grabUrl) {
   try {
     const resp = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
@@ -75,50 +68,10 @@ async function handOffNative(grabUrl) {
     });
     return !!(resp && resp.success);
   } catch {
-    // Host not installed (or failed): fall back to the tab handoff.
+    // Host not installed (or failed).
     return false;
   }
 }
-
-/// Tab-based handoff for when the native host isn't installed. The tab must
-/// be visible (active: true): the external-protocol approval prompt is
-/// tab-modal, and a background tab's prompt is invisible — the user would
-/// never see it before the cleanup timer below destroys it.
-async function handOffTab(grabUrl) {
-  try {
-    const tab = await chrome.tabs.create({ url: grabUrl, active: true });
-    // The custom-scheme navigation is handed to the OS handler; the tab
-    // itself only ever shows a blank page, so drop it shortly after. The
-    // unref keeps the Node test suite from waiting out the delay; in Chrome
-    // setTimeout returns a number and the guard is a no-op.
-    const timer = setTimeout(
-      () => chrome.tabs.remove(tab.id).catch(() => {}),
-      10000,
-    );
-    if (timer && typeof timer.unref === "function") timer.unref();
-  } catch {
-    // No window to open the handoff tab in; without a tab to navigate there
-    // is no other IPC channel, so the cancelled download can't be handed off.
-  }
-}
-
-/// A handoff tab (handOffTab) lives for 10 seconds before the cleanup timer
-/// removes it. If the browser closes inside that window, session restore
-/// brings the grab:// tab back on next launch and it fires the protocol
-/// handler again — the user gets a Grab launch they never asked for.
-/// Sweep them on startup: a grab:// tab is never a real page.
-chrome.runtime.onStartup.addListener(async () => {
-  try {
-    const tabs = await chrome.tabs.query({});
-    for (const tab of tabs) {
-      if (tab.id != null && tab.url && tab.url.startsWith(GRAB_SCHEME)) {
-        await chrome.tabs.remove(tab.id).catch(() => {});
-      }
-    }
-  } catch {
-    // Nothing to clean up.
-  }
-});
 
 /// True when the URL's file extension is on the user's skip list.
 function isSkipped(url, skipTypes) {
@@ -164,8 +117,14 @@ async function isClaimed(id) {
 // --- Automatic interception ----------------------------------------------
 
 async function interceptDownload(item) {
-  await claimDownload(item.id);
+  const grabUrl = toGrabUrl(item.url);
+  if (!grabUrl) return;
+  // Hand off before cancelling: if the native host isn't installed, the
+  // browser download is left alone (FDM/DownloadHelper pattern) instead of
+  // being cancelled into a dead end.
+  if (!(await handOffNative(grabUrl))) return;
 
+  await claimDownload(item.id);
   try {
     await chrome.downloads.cancel(item.id);
   } catch {
@@ -176,9 +135,6 @@ async function interceptDownload(item) {
   } catch {
     // Nothing written yet or already removed.
   }
-  // Automatic path: never touch the user's selected tab (see
-  // handOffInterception).
-  await handOffInterception(item.url);
 }
 
 // Downloads parked while waiting for their size to become known, when the
@@ -723,9 +679,7 @@ if (typeof module !== "undefined" && module.exports) {
     videoMenuTitle,
     mergeVideoFinds,
     hostExcluded,
-    handOffInterception,
     handOffNative,
-    handOffTab,
     NATIVE_HOST,
     YTDLP_EXCLUSIVE_HOSTS,
     DEFAULTS,
