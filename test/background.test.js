@@ -48,7 +48,11 @@ function makeChrome(shared) {
         return { id: 987 };
       },
       remove: async (id) => calls.push(["tabs.remove", id]),
-      query: (q, cb) => cb([]),
+      query: (q, cb) => {
+        const result = [];
+        if (cb) cb(result);
+        return Promise.resolve(result);
+      },
       get: async (id) => ({ id, url: "https://example.com/" }),
       sendMessage: async (id, msg) => calls.push(["tabs.sendMessage", id, msg]),
       onActivated: capture("tabs.onActivated"),
@@ -93,6 +97,7 @@ function makeChrome(shared) {
     runtime: {
       onInstalled: capture("runtime.onInstalled"),
       onMessage: capture("runtime.onMessage"),
+      onStartup: capture("runtime.onStartup"),
       openOptionsPage: async () => calls.push(["runtime.openOptionsPage"]),
       sendNativeMessage: async (host, msg) => {
         calls.push(["runtime.sendNativeMessage", host, msg]);
@@ -663,5 +668,35 @@ describe("toolbar opens the popup", () => {
       chrome._listeners["action.onClicked"],
       undefined
     );
+  });
+});
+
+describe("startup cleanup", () => {
+  test("closes stale grab:// handoff tabs on startup", async () => {
+    const chrome = makeChrome();
+    // A restored session: one stale handoff tab, one normal tab.
+    chrome.tabs.query = async () => [
+      { id: 1, url: "grab://https/example.com/video.mp4" },
+      { id: 2, url: "https://example.com/" },
+    ];
+    loadBackground(chrome);
+    const handler = chrome._listeners["runtime.onStartup"];
+    assert.ok(handler, "onStartup listener registered");
+    await handler();
+    const removed = chrome._calls.filter(([name]) => name === "tabs.remove");
+    assert.deepEqual(
+      removed.map(([, id]) => id),
+      [1],
+      "only the grab:// tab is closed"
+    );
+  });
+
+  test("startup with no grab:// tabs removes nothing", async () => {
+    const chrome = makeChrome();
+    chrome.tabs.query = async () => [{ id: 2, url: "https://example.com/" }];
+    loadBackground(chrome);
+    await chrome._listeners["runtime.onStartup"]();
+    const removed = chrome._calls.filter(([name]) => name === "tabs.remove");
+    assert.equal(removed.length, 0);
   });
 });
