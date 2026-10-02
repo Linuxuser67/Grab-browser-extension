@@ -4,7 +4,8 @@
       "16": "icons/icon16.png",
       "32": "icons/icon32.png"
     },
-    "default_title": "Grab options"
+    "default_title": "Grab options",
+    "default_popup": "popup.html"
   },
   "background": {
     "scripts": [
@@ -47,6 +48,7 @@
     "alarms",
     "contextMenus",
     "downloads",
+    "nativeMessaging",
     "storage",
     "webRequest"
   ],

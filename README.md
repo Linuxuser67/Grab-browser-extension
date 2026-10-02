@@ -1,7 +1,7 @@
 # Grab Browser Extension
 
 Sends browser downloads and links to the [Grab](https://github.com/Linuxuser67/Grab)
-download manager (MV3, Chromium-based browsers).
+download manager (MV3, Chromium and Firefox).
 
 [![Get it on FlatPark](assets/get-it-on-flatpark.png)](https://flatpark.org/apps/io.github.linuxuser67.Grab/)
 
@@ -11,8 +11,16 @@ _Grab 4.7.1 or newer required — install it from FlatPark via the badge above._
 
 1. Open `chrome://extensions`, enable **Developer mode**.
 2. **Load unpacked** → select this folder.
-3. First use: the browser asks which app opens `grab://` links — pick Grab and
-   tick **Always allow** so the prompt doesn't return.
+3. Install the native messaging host (required for automatic interception):
+   ```
+   ./native-host/install.py --chromium-id <your-extension-id>
+   ```
+   Find the extension ID on `chrome://extensions` (Developer mode). For
+   Firefox, no ID is needed — the add-on ID is fixed.
+
+The host script hands `grab://` URLs to the OS directly, bypassing the
+browser's external-protocol prompt (which Brave shows tab-modally with no
+"always allow", making the old tab-based handoff invisible and broken).
 
 Grab must be installed with its desktop entry (it registers as the
 `x-scheme-handler/grab` handler). Requires Grab 4.7.1 or newer (the handoff
@@ -21,9 +29,12 @@ carries the original http/https scheme, which older versions don't read).
 ## What it does
 
 - **Automatic interception** (on by default): downloads started in the browser
-  are cancelled and opened in Grab instead. If a tiny download finishes before
+  are cancelled and opened in Grab instead via the native messaging host.
+  If the host isn't installed, falls back to a visible tab handoff (you'll
+  see an "Open Grab?" prompt — click Open). If a tiny download finishes before
   the cancel lands, the duplicate is removed from the browser.
-- **Toolbar button**: opens the extension's options page.
+- **Toolbar button**: opens a popup with the extension settings (adapts to
+  your system's light/dark theme).
 - **`Alt+G`**: sends the current tab to Grab (video pages open
   the New Download card, other links download normally).
 - **Right-click → Download with Grab**: on links, images, video, audio, and pages.
@@ -34,9 +45,8 @@ carries the original http/https scheme, which older versions don't read).
   Skipped on video platforms yt-dlp handles itself (YouTube, TikTok,
   Instagram, Facebook, X, Twitch, Vimeo, …) — a detected media URL can't
   work there, so sending the page goes through yt-dlp the usual way.
-- **Options page**: turn interception on/off, set a minimum download size
-  (smaller downloads stay in the browser), set file types the browser keeps
-  handling itself (e.g. `pdf, jpg`), toggle the context menu.
+- **Options page**: same settings as the popup, in a full page (via the
+  popup's "Full options page" link or right-click → Options).
 
 Magnet links are passed to the OS untouched — Grab already handles `magnet:`.
 `blob:` and `data:` URLs can't be handed off and always stay in the browser.
@@ -46,12 +56,14 @@ Magnet links are passed to the OS untouched — Grab already handles `magnet:`.
 - Downloads that need the browser's session (logged-in direct links) may fail
   in Grab — the extension doesn't forward cookies.
 - POST-form downloads hand Grab the action URL, which may not resolve to the file.
-- Interception hands the full download URL to the Grab desktop app through the
-  OS-registered `grab:` handler — inherent to the custom-scheme design.
+- Automatic interception requires the native messaging host (see Install).
+  Without it, the tab fallback shows a browser prompt on every download in
+  browsers that don't offer "always allow".
 
 ## Permissions
 
 `downloads` (cancel intercepted downloads), `contextMenus`, `storage`
 (settings), `alarms` (size-wait deadlines that survive worker restarts),
 `activeTab` (read the current tab's URL for `Alt+G`), `webRequest` (spot
-video stream manifests), host access to http/https pages (video detection).
+video stream manifests), `nativeMessaging` (hand off to Grab without a
+browser prompt), host access to http/https pages (video detection).

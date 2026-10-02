@@ -94,6 +94,10 @@ function makeChrome(shared) {
       onInstalled: capture("runtime.onInstalled"),
       onMessage: capture("runtime.onMessage"),
       openOptionsPage: async () => calls.push(["runtime.openOptionsPage"]),
+      sendNativeMessage: async (host, msg) => {
+        calls.push(["runtime.sendNativeMessage", host, msg]);
+        return { success: true };
+      },
     },
     action: {
       onClicked: capture("action.onClicked"),
@@ -231,10 +235,16 @@ describe("size-wait interception", () => {
 
   const intercepted = () =>
     chrome._calls.some(
+      ([name, host, msg]) =>
+        name === "runtime.sendNativeMessage" &&
+        host === "io.github.linuxuser67.grab" &&
+        msg.url === "grab://https/example.com/big.iso"
+    ) ||
+    chrome._calls.some(
       ([name, arg]) =>
         name === "tabs.create" &&
         arg.url === "grab://https/example.com/big.iso" &&
-        arg.active === false
+        arg.active === true
     );
   const cancelled = (id) =>
     chrome._calls.some(([name, arg]) => name === "cancel" && arg === id);
@@ -316,12 +326,19 @@ describe("size-wait interception", () => {
       id: 7,
       fileSize: { current: 200 * MiB },
     });
-    const interceptedB = chromeB._calls.some(
-      ([name, arg]) =>
-        name === "tabs.create" &&
-        arg.url === "grab://https/example.com/big.iso" &&
-        arg.active === false
-    );
+    const interceptedB =
+      chromeB._calls.some(
+        ([name, host, msg]) =>
+          name === "runtime.sendNativeMessage" &&
+          host === "io.github.linuxuser67.grab" &&
+          msg.url === "grab://https/example.com/big.iso"
+      ) ||
+      chromeB._calls.some(
+        ([name, arg]) =>
+          name === "tabs.create" &&
+          arg.url === "grab://https/example.com/big.iso" &&
+          arg.active === true
+      );
     assert.equal(interceptedB, true);
   });
 });
@@ -398,7 +415,7 @@ describe("context menu toggle", () => {
 });
 
 describe("handoff tab separation (review fix 1)", () => {
-  test("automatic interception uses a background tab, never the selected tab", async () => {
+  test("automatic interception uses native messaging, never the selected tab", async () => {
     const chrome = makeChrome({
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
@@ -408,11 +425,11 @@ describe("handoff tab separation (review fix 1)", () => {
       url: "https://example.com/big.iso",
       fileSize: -1,
     });
-    const viaBackgroundTab = chrome._calls.some(
-      ([name, arg]) =>
-        name === "tabs.create" &&
-        arg.url === "grab://https/example.com/big.iso" &&
-        arg.active === false
+    const viaNative = chrome._calls.some(
+      ([name, host, msg]) =>
+        name === "runtime.sendNativeMessage" &&
+        host === "io.github.linuxuser67.grab" &&
+        msg.url === "grab://https/example.com/big.iso"
     );
     const viaSelectedTab = chrome._calls.some(
       ([name, arg]) =>
@@ -420,7 +437,37 @@ describe("handoff tab separation (review fix 1)", () => {
         typeof arg.url === "string" &&
         arg.url.startsWith("grab:")
     );
-    assert.equal(viaBackgroundTab, true);
+    assert.equal(viaNative, true);
+    assert.equal(viaSelectedTab, false);
+  });
+
+  test("falls back to a visible tab when the native host is missing", async () => {
+    const chrome = makeChrome({
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    });
+    // Simulate a missing native host.
+    chrome.runtime.sendNativeMessage = async () => {
+      throw new Error("No such native application");
+    };
+    loadBackground(chrome);
+    await chrome._listeners["downloads.onCreated"]({
+      id: 32,
+      url: "https://example.com/big.iso",
+      fileSize: -1,
+    });
+    const viaVisibleTab = chrome._calls.some(
+      ([name, arg]) =>
+        name === "tabs.create" &&
+        arg.url === "grab://https/example.com/big.iso" &&
+        arg.active === true
+    );
+    const viaSelectedTab = chrome._calls.some(
+      ([name, arg]) =>
+        name === "tabs.update" &&
+        typeof arg.url === "string" &&
+        arg.url.startsWith("grab:")
+    );
+    assert.equal(viaVisibleTab, true);
     assert.equal(viaSelectedTab, false);
   });
 
@@ -592,34 +639,29 @@ describe("size-wait deadline design (review fixes 2 and 3)", () => {
     // An alarm and a size-change event arriving together.
     await Promise.all([bg.decidePending(14), bg.decidePending(14)]);
     const handoffs = chrome._calls.filter(
-      ([name, arg]) =>
-        name === "tabs.create" &&
-        typeof arg.url === "string" &&
-        arg.url.startsWith("grab:")
+      ([name, host, msg]) =>
+        (name === "runtime.sendNativeMessage" &&
+          host === "io.github.linuxuser67.grab" &&
+          typeof msg.url === "string" &&
+          msg.url.startsWith("grab:")) ||
+        (name === "tabs.create" &&
+          typeof host.url === "string" &&
+          host.url.startsWith("grab:"))
     );
     assert.equal(handoffs.length, 1);
   });
 });
 
-describe("toolbar opens the options page", () => {
-  test("clicking the toolbar button opens options, not a Grab handoff", async () => {
+describe("toolbar opens the popup", () => {
+  test("no onClicked handler: the manifest popup hosts settings now", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
-    await chrome._listeners["action.onClicked"]({
-      url: "https://example.com/video",
-    });
+    // With default_popup set, action.onClicked never fires; the popup UI
+    // (popup.html) owns the settings. There must be no grab: navigation
+    // from a toolbar click path.
     assert.equal(
-      chrome._calls.some(([name]) => name === "runtime.openOptionsPage"),
-      true
-    );
-    assert.equal(
-      chrome._calls.some(
-        ([name, arg]) =>
-          (name === "tabs.update" || name === "tabs.create") &&
-          typeof arg.url === "string" &&
-          arg.url.startsWith("grab:")
-      ),
-      false
+      chrome._listeners["action.onClicked"],
+      undefined
     );
   });
 });
