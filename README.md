@@ -7,19 +7,39 @@ download manager (MV3, Chromium and Firefox).
 
 _Grab 4.7.1 or newer required — install it from FlatPark via the badge above._
 
-## Install (developer mode)
+## Install
 
-1. Open `chrome://extensions`, enable **Developer mode**.
-2. **Load unpacked** → select this folder.
-3. Copy the extension ID shown under the extension's name on
-   `chrome://extensions` (unpacked installs get a generated ID — it stays
-   stable as long as the folder path doesn't change).
-4. Install the native messaging host (required for automatic interception):
+### From a release zip
+
+1. Download `grab-extension-v1.2.1.zip` (Chromium/Brave) or
+   `grab-extension-firefox-v1.2.1.zip` (Firefox) from the
+   [releases page](https://github.com/Linuxuser67/Grab-browser-extension/releases).
+2. Extract it, then load it in your browser:
+   - Chromium/Brave: open `chrome://extensions`, enable **Developer mode**,
+     **Load unpacked** → select the extracted folder. Copy the extension ID
+     shown under its name.
+   - Firefox: open `about:debugging#/runtime/this-firefox`, **Load Temporary
+     Add-on** → select the `manifest.json` inside the extracted folder.
+3. The release zip doesn't include the native messaging host (required for
+   automatic interception). Get it from the repo:
    ```
-   ./native-host/install.py --chromium-id <your-extension-id>
+   git clone https://github.com/Linuxuser67/Grab-browser-extension.git
+   cd Grab-browser-extension
+   python3 ./native-host/install.py --chromium-id <your-extension-id>
    ```
    For Firefox, no ID is needed — the add-on ID is fixed
    (`grab@linuxuser67.github.io`).
+
+### Developer mode (from source)
+
+1. Clone the repo and open `chrome://extensions`, enable **Developer mode**.
+2. **Load unpacked** → select the repo folder. Copy the extension ID shown
+   under its name (unpacked installs get a generated ID — it stays stable
+   as long as the folder path doesn't change).
+3. Install the native messaging host:
+   ```
+   ./native-host/install.py --chromium-id <your-extension-id>
+   ```
 
 The host script hands `grab://` URLs to the OS directly, bypassing the
 browser's external-protocol prompt.
