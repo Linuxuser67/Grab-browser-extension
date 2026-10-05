@@ -95,6 +95,7 @@ function makeChrome(shared) {
     runtime: {
       onInstalled: capture("runtime.onInstalled"),
       onMessage: capture("runtime.onMessage"),
+      onStartup: capture("runtime.onStartup"),
       openOptionsPage: async () => calls.push(["runtime.openOptionsPage"]),
     },
     action: {

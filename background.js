@@ -16,6 +16,15 @@
 
 const GRAB_SCHEME = "grab://";
 
+// Browser startup time (Varia pattern): chrome.downloads.onCreated can re-fire
+// on startup for downloads from a previous session. Anything with a startTime
+// older than this is ignored so a cancelled download doesn't re-prompt on
+// every browser launch.
+let browserStartTime = Date.now();
+chrome.runtime.onStartup.addListener(() => {
+  browserStartTime = Date.now();
+});
+
 const DEFAULTS = {
   interceptDownloads: true,
   // Comma-separated file extensions the browser keeps handling itself.
@@ -235,6 +244,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 chrome.downloads.onCreated.addListener(async (item) => {
   const settings = await getSettings();
   if (!settings.interceptDownloads) return;
+  // Ignore downloads from a previous browser session (Varia pattern):
+  // onCreated can re-fire on startup for old downloads. Missing startTime
+  // is treated as new (not ignored).
+  if (item.startTime) {
+    const downloadTime = new Date(item.startTime).getTime();
+    if (downloadTime < browserStartTime) return;
+  }
   // Extension installs/updates must never be intercepted.
   if (item.mime === "application/x-chrome-extension") return;
   if (isSkipped(item.url, settings.skipTypes)) return;
