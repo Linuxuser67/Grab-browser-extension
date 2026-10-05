@@ -11,8 +11,8 @@ _Grab 4.7.1 or newer required — install it from FlatPark via the badge above._
 
 ### From a release zip
 
-1. Download `grab-extension-v1.2.1.zip` (Chromium/Brave) or
-   `grab-extension-firefox-v1.2.1.zip` (Firefox) from the
+1. Download `grab-extension-v1.2.2.zip` (Chromium/Brave) or
+   `grab-extension-firefox-v1.2.2.zip` (Firefox) from the
    [releases page](https://github.com/Linuxuser67/Grab-browser-extension/releases).
 2. Extract it, then load it in your browser:
    - Chromium/Brave: open `chrome://extensions`, enable **Developer mode**,
@@ -20,11 +20,10 @@ _Grab 4.7.1 or newer required — install it from FlatPark via the badge above._
      shown under its name.
    - Firefox: open `about:debugging#/runtime/this-firefox`, **Load Temporary
      Add-on** → select the `manifest.json` inside the extracted folder.
-3. The release zip doesn't include the native messaging host (required for
-   automatic interception). Get it from the repo:
+3. Install the native messaging host (required for automatic interception)
+   from the extracted folder:
    ```
-   git clone https://github.com/Linuxuser67/Grab-browser-extension.git
-   cd Grab-browser-extension
+   cd <extracted-folder>
    python3 ./native-host/install.py --chromium-id <your-extension-id>
    ```
    For Firefox, no ID is needed — the add-on ID is fixed

@@ -22,9 +22,9 @@ jobs:
           TAG="${{ inputs.tag || github.ref_name }}"
           root="$PWD"
           zip -qr "grab-extension-${TAG}.zip" . \
-            -x ".git/*" ".github/*" "test/*" "native-host/*" "manifest.firefox.json" "grab-extension-*.zip"
+            -x ".git/*" ".github/*" "test/*" "manifest.firefox.json" "grab-extension-*.zip"
           zip -qr "grab-extension-firefox-${TAG}.zip" . \
-            -x ".git/*" ".github/*" "test/*" "native-host/*" "manifest.json" "manifest.firefox.json" "grab-extension-*.zip"
+            -x ".git/*" ".github/*" "test/*" "manifest.json" "manifest.firefox.json" "grab-extension-*.zip"
           tmpdir="$(mktemp -d)"
           cp manifest.firefox.json "$tmpdir/manifest.json"
           (cd "$tmpdir" && zip -q "$root/grab-extension-firefox-${TAG}.zip" manifest.json)
