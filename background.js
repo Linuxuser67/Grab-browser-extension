@@ -102,6 +102,24 @@ async function handOffTab(grabUrl) {
   }
 }
 
+/// A handoff tab (handOffTab) lives for 10 seconds before the cleanup timer
+/// removes it. If the browser closes inside that window, session restore
+/// brings the grab:// tab back on next launch and it fires the protocol
+/// handler again — the user gets a Grab launch they never asked for.
+/// Sweep them on startup: a grab:// tab is never a real page.
+chrome.runtime.onStartup.addListener(async () => {
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (tab.id != null && tab.url && tab.url.startsWith(GRAB_SCHEME)) {
+        await chrome.tabs.remove(tab.id).catch(() => {});
+      }
+    }
+  } catch {
+    // Nothing to clean up.
+  }
+});
+
 /// True when the URL's file extension is on the user's skip list.
 function isSkipped(url, skipTypes) {
   if (!skipTypes) return false;
