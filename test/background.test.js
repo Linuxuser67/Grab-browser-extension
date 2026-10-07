@@ -42,7 +42,7 @@ function makeChrome(shared) {
       },
     },
     tabs: {
-      update: (props) => calls.push(["tabs.update", props]),
+      update: (a, b) => calls.push(["tabs.update", b !== undefined ? b : a, b !== undefined ? a : undefined]),
       create: async (props) => {
         calls.push(["tabs.create", props]);
         return { id: 987 };

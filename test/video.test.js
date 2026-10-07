@@ -52,7 +52,7 @@ function makeChrome(shared) {
       },
     },
     tabs: {
-      update: (props) => calls.push(["tabs.update", props]),
+      update: (a, b) => calls.push(["tabs.update", b !== undefined ? b : a, b !== undefined ? a : undefined]),
       create: async (props) => {
         calls.push(["tabs.create", props]);
         return { id: 987 };
@@ -137,6 +137,20 @@ describe("classifyStream", () => {
   let bg;
   beforeEach(() => {
     bg = loadBackground(makeChrome());
+  });
+
+  test("an extension in the query string is not a media file", () => {
+    assert.equal(bg.classifyStream("https://example.com/page?file=a.mp4", ""), null);
+    assert.equal(bg.classifyStream("https://example.com/watch?u=x.m3u8#t", ""), null);
+    assert.equal(bg.classifyStream("https://cdn.example.com/v/clip.mp4?token=1", ""), "media");
+    assert.equal(bg.classifyStream("https://cdn.example.com/s/a.m3u8?sig=2#x", ""), "manifest");
+  });
+
+  test("links carrying credentials are not handed off", () => {
+    assert.equal(bg.toGrabUrl("https://u:p@example.com/f.zip"), null);
+    assert.equal(bg.toGrabUrl("https://u@example.com/f.zip"), null);
+    // An @ later in the path or query is not userinfo.
+    assert.equal(bg.toGrabUrl("https://example.com/a@b?x=y@z"), "grab://https/example.com/a@b?x=y@z");
   });
 
   test("manifest extensions classify without a content type", () => {
@@ -331,6 +345,49 @@ describe("detection wiring", () => {
     );
   });
 
+  test("a click resolves against the list the menu was built from (other window focused)", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    const L = chrome._listeners;
+    await L["tabs.onActivated"]({ tabId: 5 });
+    L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://a.example.com/a.mp4", responseHeaders: [] });
+    await tick();
+    // Second window: its active tab becomes the menu's tab.
+    await L["tabs.onActivated"]({ tabId: 6 });
+    L["webRequest.onResponseStarted"]({ tabId: 6, url: "https://b.example.com/b.mp4", responseHeaders: [] });
+    L["webRequest.onResponseStarted"]({ tabId: 6, url: "https://b.example.com/c.mp4", responseHeaders: [] });
+    await tick();
+    // Right-click lands in tab 5 (window 1 focused again, no onActivated fired).
+    L["menus.onClicked"]({ menuItemId: "grabVideo:1" }, { id: 5 });
+    assert.ok(
+      chrome._calls.some(([n, arg]) => n === "tabs.update" && arg.url === "grab://https/b.example.com/c.mp4"),
+      "the labelled item (second entry of the menu) is what gets sent"
+    );
+  });
+
+  test("a click after master-playlist filtering sends the master, not the hidden child", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    globalThis.fetch = async (url) => ({
+      ok: true,
+      text: async () =>
+        String(url).endsWith("master.m3u8")
+          ? "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n720/index.m3u8\n"
+          : "#EXTM3U\n#EXT-X-TARGETDURATION=6\n",
+    });
+    const L = chrome._listeners;
+    await L["tabs.onActivated"]({ tabId: 5 });
+    L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://cdn.example.com/v/index.m3u8", responseHeaders: [] });
+    L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://cdn.example.com/v/master.m3u8", responseHeaders: [] });
+    await tick();
+    await tick();
+    L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, { id: 5 });
+    assert.ok(
+      chrome._calls.some(([n, arg]) => n === "tabs.update" && arg.url === "grab://https/cdn.example.com/v/master.m3u8"),
+      "master playlist is sent"
+    );
+  });
+
   test("content-script reports reach the menu", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
@@ -495,6 +552,9 @@ describe("manifest permission mirror", () => {
       "tabs",
       "action",
       "commands",
+      // windows: no manifest permission needed (only used for focus events,
+      // behind an existence check).
+      "windows",
     ]);
     const chrome = makeChrome();
     const guarded = new Proxy(chrome, {

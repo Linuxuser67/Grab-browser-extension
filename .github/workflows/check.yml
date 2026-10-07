@@ -9,6 +9,7 @@ jobs:
         with:
           node-version: "22"
       - name: syntax check
-        run: node --check background.js && node --check options.js
+        run: node --check background.js && node --check content.js && node --check popup.js && node --check options.js
       - name: tests
-        run: node --test test/background.test.js
+        # Explicit globs: `node --test test/` fails on Node 22.
+        run: node --test test/*.test.js
