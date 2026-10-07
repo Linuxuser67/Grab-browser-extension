@@ -45,6 +45,9 @@ function toGrabUrl(url) {
   if (typeof url !== "string") return null;
   const m = /^(https?):\/\/(.+)$/i.exec(url);
   if (!m) return null;
+  // user:pass@host: Grab refuses credentials in links, and the grab: URL
+  // passes through argv (xdg-open), which other local users can read.
+  if (m[2].split(/[/?#]/, 1)[0].includes("@")) return null;
   return `${GRAB_SCHEME}${m[1].toLowerCase()}/${m[2]}`;
 }
 
@@ -53,9 +56,13 @@ function toGrabUrl(url) {
 /// external-protocol navigations are handed to the OS without replacing the
 /// page (the mailto: mechanism), so the tab is left alone. Never use this for
 /// automatic interception: the download can come from any tab, or none.
-function sendToGrab(url) {
+function sendToGrab(url, tabId) {
   const grabUrl = toGrabUrl(url);
-  if (grabUrl) chrome.tabs.update({ url: grabUrl });
+  if (!grabUrl) return;
+  // Name the tab the user acted on; without an id the browser picks the
+  // "current window", which is the wrong one when several are open.
+  if (tabId != null) chrome.tabs.update(tabId, { url: grabUrl });
+  else chrome.tabs.update({ url: grabUrl });
 }
 
 /// Native-messaging host name (see native-host/). The host runs outside the
@@ -358,9 +365,10 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (typeof id === "string" && id.startsWith(VIDEO_ITEM_PREFIX)) {
     // A detected video: same explicit-send channel as the main item (the
     // user picked this tab), not the background-tab interception channel.
-    const urls = mergedVideoUrls(tab && tab.id != null ? tab.id : activeTabId);
-    const url = urls[Number(id.slice(VIDEO_ITEM_PREFIX.length))];
-    if (url) sendToGrab(url);
+    // Resolve against the list the menu was built from: it was filtered
+    // (master playlists) and may belong to another window's tab.
+    const url = menuUrls[Number(id.slice(VIDEO_ITEM_PREFIX.length))];
+    if (url) sendToGrab(url, tab && tab.id);
     return;
   }
   if (id !== "sendToGrab") return;
@@ -371,12 +379,13 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     (u) => typeof u === "string" && u.toLowerCase().startsWith("magnet:"),
   );
   if (magnet) {
-    chrome.tabs.update({ url: magnet });
+    if (tab && tab.id != null) chrome.tabs.update(tab.id, { url: magnet });
+    else chrome.tabs.update({ url: magnet });
     return;
   }
   // Prefer the media/link target, but a blob:/data: media URL can't leave
   // the browser — fall back to the page URL so yt-dlp can extract it there.
-  sendToGrab(candidates.find((u) => toGrabUrl(u)));
+  sendToGrab(candidates.find((u) => toGrabUrl(u)), tab && tab.id);
 });
 
 // The toolbar button now opens popup.html (default_popup in the manifest),
@@ -385,7 +394,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 chrome.commands.onCommand.addListener((command) => {
   if (command !== "send-tab-to-grab") return;
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (tabs[0] && tabs[0].url) sendToGrab(tabs[0].url);
+    if (tabs[0] && tabs[0].url) sendToGrab(tabs[0].url, tabs[0].id);
   });
 });
 
@@ -453,7 +462,14 @@ function classifyStream(url, contentType) {
   const u = String(url || "").toLowerCase();
   if (!/^https?:\/\//i.test(u)) return null;
   const ct = String(contentType || "").toLowerCase().split(";")[0].trim();
-  if (/\.(m3u8|m3u|mpd)([?#]|$)/.test(u)) return "manifest";
+  // Match the extension on the path only: "?file=a.mp4" is not a media file.
+  let path;
+  try {
+    path = new URL(u).pathname;
+  } catch {
+    return null;
+  }
+  if (/\.(m3u8|m3u|mpd)$/.test(path)) return "manifest";
   if (
     ct === "application/vnd.apple.mpegurl" ||
     ct === "application/x-mpegurl" ||
@@ -462,7 +478,7 @@ function classifyStream(url, contentType) {
   ) {
     return "manifest";
   }
-  if (/\.(mp4|m4v|webm|ogv|mov|mkv)([?#]|$)/.test(u)) return "media";
+  if (/\.(mp4|m4v|webm|ogv|mov|mkv)$/.test(path)) return "media";
   return null;
 }
 
@@ -517,6 +533,8 @@ async function isMasterPlaylist(url) {
     // The marker lives in the header lines; cap the scan.
     const isMaster = text.slice(0, 4096).includes("#EXT-X-STREAM-INF");
     masterCache.set(url, isMaster);
+    // Bounded: oldest entries go first (Map keeps insertion order).
+    if (masterCache.size > 200) masterCache.delete(masterCache.keys().next().value);
     return isMaster;
   } catch {
     return null;
@@ -583,6 +601,9 @@ function mergeVideoFinds(domVideos, sniffedUrls) {
 // videos whenever two frames report at different times.
 const videoFinds = new Map();
 let activeTabId = null;
+/// The URLs behind the submenu items as last built (after filtering): a
+/// click index resolves here, never against a fresh, differently-ordered list.
+let menuUrls = [];
 let detectVideosOn = DEFAULTS.detectVideos;
 
 getSettings().then((s) => {
@@ -649,6 +670,7 @@ function doRefreshVideoMenu(tabId) {
     // Prefer master playlists: hides child media playlists whose direct
     // download would miss the audio track.
     urls = await preferMasterPlaylists(urls);
+    menuUrls = urls;
     if (urls.length === 0) return;
     safeMenuCreate({
       id: VIDEO_PARENT_ID,
@@ -746,6 +768,19 @@ chrome.tabs.onActivated.addListener((info) => {
   activeTabId = info.tabId;
   refreshVideoMenu(info.tabId);
 });
+
+// Switching windows fires no tabs.onActivated: follow the focused window so
+// the menu shows its active tab's videos.
+if (chrome.windows && chrome.windows.onFocusChanged) {
+  chrome.windows.onFocusChanged.addListener((windowId) => {
+    if (windowId == null || windowId < 0) return; // WINDOW_ID_NONE
+    chrome.tabs.query({ active: true, windowId }, (tabs) => {
+      if (!tabs || !tabs[0] || tabs[0].id == null) return;
+      activeTabId = tabs[0].id;
+      refreshVideoMenu(activeTabId);
+    });
+  });
+}
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   videoFinds.delete(tabId);
