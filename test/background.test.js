@@ -97,6 +97,7 @@ function makeChrome(shared) {
     runtime: {
       onInstalled: capture("runtime.onInstalled"),
       onMessage: capture("runtime.onMessage"),
+      onStartup: capture("runtime.onStartup"),
       openOptionsPage: async () => calls.push(["runtime.openOptionsPage"]),
       sendNativeMessage: async (host, msg) => {
         calls.push(["runtime.sendNativeMessage", host, msg]);
@@ -359,6 +360,39 @@ describe("master interception toggle", () => {
     await chrome._listeners["downloads.onCreated"](item(9));
     assert.equal(intercepted(chrome, 9), false);
     assert.equal(chrome._session.has("pendingSize:9"), false);
+  });
+
+  test("onCreated ignores downloads from before browser startup", async () => {
+    const chrome = makeChrome({
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    });
+    const bg = loadBackground(chrome);
+    void bg;
+    // Simulate a browser restart: startup time moves to now.
+    chrome._listeners["runtime.onStartup"]();
+    const oldItem = {
+      ...item(9),
+      url: "https://example.com/old.iso",
+      startTime: new Date(Date.now() - 3600000).toISOString(),
+    };
+    await chrome._listeners["downloads.onCreated"](oldItem);
+    assert.equal(intercepted(chrome, 9), false);
+  });
+
+  test("onCreated intercepts downloads from after browser startup", async () => {
+    const chrome = makeChrome({
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    });
+    const bg = loadBackground(chrome);
+    void bg;
+    const newItem = {
+      ...item(9),
+      url: "https://example.com/new.iso",
+      fileSize: 100,
+      startTime: new Date().toISOString(),
+    };
+    await chrome._listeners["downloads.onCreated"](newItem);
+    assert.equal(intercepted(chrome, 9), true);
   });
 
   test("the size-wait decision respects a toggle flipped off mid-wait", async () => {
