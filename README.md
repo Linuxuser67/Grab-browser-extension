@@ -21,12 +21,17 @@ _Grab 4.7.1 or newer required — install it from FlatPark via the badge above._
    - Firefox: open `about:debugging#/runtime/this-firefox`, **Load Temporary
      Add-on** → select the `manifest.json` inside the extracted folder.
 3. Install the native messaging host (required for automatic interception).
-   Grab ships it — no Python needed:
+   With Grab 5.2.3+, no Python needed:
    ```
    grab --install-browser-host --chromium-id <your-extension-id>
    ```
+   On older Grab, use the bundled installer from the extracted folder:
+   ```
+   cd <extracted-folder>
+   python3 ./native-host/install.py --chromium-id <your-extension-id>
+   ```
    For Firefox, no ID is needed — the add-on ID is fixed
-   (`grab@linuxuser67.github.io`). Requires Grab 5.2.3+.
+   (`grab@linuxuser67.github.io`).
 
 ### Developer mode (from source)
 
@@ -34,10 +39,9 @@ _Grab 4.7.1 or newer required — install it from FlatPark via the badge above._
 2. **Load unpacked** → select the repo folder. Copy the extension ID shown
    under its name (unpacked installs get a generated ID — it stays stable
    as long as the folder path doesn't change).
-3. Install the native messaging host (Grab 5.2.3+):
-   ```
-   grab --install-browser-host --chromium-id <your-extension-id>
-   ```
+3. Install the native messaging host:
+   - Grab 5.2.3+: `grab --install-browser-host --chromium-id <your-extension-id>`
+   - Older Grab: `python3 ./native-host/install.py --chromium-id <your-extension-id>`
 
 The host script hands `grab://` URLs to the OS directly, bypassing the
 browser's external-protocol prompt.
