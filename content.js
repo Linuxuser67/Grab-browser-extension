@@ -78,6 +78,15 @@ function collectVideos(doc) {
   return out;
 }
 
+/// The video's own title from the page: og:title is the video title as the
+/// site describes it (no " - Site Name" suffix); empty when absent.
+function pageVideoTitle(doc) {
+  if (!doc || !doc.querySelector) return "";
+  const og = doc.querySelector('meta[property="og:title"]');
+  const t = (og && og.content) || "";
+  return t.trim();
+}
+
 // --- Live wiring (browser only; the pure helpers above are unit-tested) ---
 
 if (
@@ -95,7 +104,11 @@ if (
     const snapshot = JSON.stringify(videos);
     if (snapshot === lastSent) return;
     lastSent = snapshot;
-    chrome.runtime.sendMessage({ type: "grab-videos-detected", videos });
+    chrome.runtime.sendMessage({
+      type: "grab-videos-detected",
+      videos,
+      title: pageVideoTitle(document),
+    });
   }
 
   let timer = null;
@@ -127,5 +140,5 @@ if (
 
 // Test hook for node:test.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { collectVideos, usableVideoSrc, hostExcluded, DETECT_EXCLUDED_HOSTS, MIN_VIDEO_PX };
+  module.exports = { collectVideos, usableVideoSrc, hostExcluded, DETECT_EXCLUDED_HOSTS, MIN_VIDEO_PX, pageVideoTitle };
 }

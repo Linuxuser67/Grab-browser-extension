@@ -466,8 +466,14 @@ function classifyStream(url, contentType) {
   return null;
 }
 
-/// Menu title for a detected video: the file name, decoded and shortened.
-function videoMenuTitle(url, index) {
+/// Menu title for a detected video: the video's own title when the content
+/// script reported one, otherwise the file name, decoded and shortened.
+function videoMenuTitle(url, index, videoTitle, total) {
+  if (videoTitle) {
+    const t = videoTitle.length > 40 ? videoTitle.slice(0, 40) + "…" : videoTitle;
+    // Number duplicates: several videos share one page title.
+    return total > 1 ? `${t} (${index + 1})` : t;
+  }
   try {
     const name = decodeURIComponent(
       new URL(url).pathname.split("/").filter(Boolean).pop() || "",
@@ -477,6 +483,81 @@ function videoMenuTitle(url, index) {
     // Fall through to the numbered fallback.
   }
   return `Video ${index + 1}`;
+}
+
+// --- Master playlist preference ------------------------------------------
+//
+// HLS serves a master (multivariant) playlist plus per-rendition media
+// playlists. Handing yt-dlp a media playlist directly yields a video-only
+// (or audio-only) download — the master is what ties renditions to their
+// audio tracks. When a master is confirmed among the detected manifests,
+// its child media playlists are hidden from the menu so the only offered
+// entry is the correct one.
+
+/// Cache: url -> true (master) / false (media playlist). Fetch failures
+/// stay uncached so a later rebuild can retry.
+const masterCache = new Map();
+
+/// True when the fetched playlist is a master (multivariant) playlist.
+/// Null when the fetch failed or the content couldn't be read — the caller
+/// treats that as "unknown", never as a media playlist.
+async function isMasterPlaylist(url) {
+  if (masterCache.has(url)) return masterCache.get(url);
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    let text;
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      if (!res.ok) return null;
+      text = await res.text();
+    } finally {
+      clearTimeout(timer);
+    }
+    // The marker lives in the header lines; cap the scan.
+    const isMaster = text.slice(0, 4096).includes("#EXT-X-STREAM-INF");
+    masterCache.set(url, isMaster);
+    return isMaster;
+  } catch {
+    return null;
+  }
+}
+
+/// Origin + directory of a URL, for grouping a master with its children.
+function urlDirectory(u) {
+  try {
+    const p = new URL(u);
+    return p.origin + p.pathname.slice(0, p.pathname.lastIndexOf("/") + 1);
+  } catch {
+    return null;
+  }
+}
+
+const MANIFEST_RE = /\.(m3u8|m3u)([?#]|$)/i;
+
+/// From the detected manifest URLs, drop media playlists that live under a
+/// confirmed master playlist's directory. Masters themselves, non-manifest
+/// URLs, and manifests with no confirmed master nearby are kept as-is.
+async function preferMasterPlaylists(urls) {
+  const manifests = urls.filter((u) => MANIFEST_RE.test(u));
+  if (manifests.length === 0) return urls;
+  const checks = await Promise.all(manifests.map(isMasterPlaylist));
+  const masterDirs = new Set();
+  const masters = new Set();
+  manifests.forEach((u, i) => {
+    if (checks[i] === true) {
+      masters.add(u);
+      const d = urlDirectory(u);
+      if (d) masterDirs.add(d);
+    }
+  });
+  if (masterDirs.size === 0) return urls;
+  return urls.filter((u) => {
+    if (!MANIFEST_RE.test(u)) return true;
+    if (masters.has(u)) return true;
+    const d = urlDirectory(u);
+    return !d || !masterDirs.has(d);
+  });
 }
 
 /// Merge content-script reports (direct sources first) with sniffed stream
@@ -565,6 +646,9 @@ function doRefreshVideoMenu(tabId) {
     // Re-read: the finds may have changed while the remove was in flight.
     let urls = tabId === activeTabId ? mergedVideoUrls(tabId) : [];
     if (urls.length > 0 && (await isExcludedTab(tabId))) urls = [];
+    // Prefer master playlists: hides child media playlists whose direct
+    // download would miss the audio track.
+    urls = await preferMasterPlaylists(urls);
     if (urls.length === 0) return;
     safeMenuCreate({
       id: VIDEO_PARENT_ID,
@@ -575,7 +659,7 @@ function doRefreshVideoMenu(tabId) {
       safeMenuCreate({
         id: `${VIDEO_ITEM_PREFIX}${i}`,
         parentId: VIDEO_PARENT_ID,
-        title: videoMenuTitle(u, i),
+        title: videoMenuTitle(u, i, videoFinds.get(tabId)?.title, urls.length),
         contexts: ["page", "video", "link"],
       });
     });
@@ -651,6 +735,10 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     videoFinds.set(tabId, f);
   }
   f.frames.set(frameId, Array.isArray(msg.videos) ? msg.videos : []);
+  // The video's own title (og:title) for menu labels; first report wins.
+  if (typeof msg.title === "string" && msg.title && !f.title) {
+    f.title = msg.title;
+  }
   onVideoEvent(tabId);
 });
 
@@ -694,6 +782,9 @@ if (typeof module !== "undefined" && module.exports) {
     classifyStream,
     videoMenuTitle,
     mergeVideoFinds,
+    isMasterPlaylist,
+    preferMasterPlaylists,
+    urlDirectory,
     hostExcluded,
     handOffNative,
     NATIVE_HOST,

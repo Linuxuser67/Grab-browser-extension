@@ -7,6 +7,14 @@ const path = require("node:path");
 const BG_PATH = path.join(__dirname, "..", "background.js");
 const CONTENT_PATH = path.join(__dirname, "..", "content.js");
 
+// Default fetch mock: manifests read as plain media playlists (not masters),
+// so the pre-existing menu tests see unchanged behavior. Tests for master
+// detection override this per-test.
+globalThis.fetch = async () => ({
+  ok: true,
+  text: async () => "#EXTM3U\n#EXT-X-TARGETDURATION=6\n",
+});
+
 /// Chrome mock extended for video detection: webRequest,
 /// tabs.onActivated/onRemoved/onUpdated/sendMessage, runtime.onMessage, action badges.
 // (Deliberately no webNavigation: the manifest doesn't request it, so the
@@ -595,6 +603,126 @@ describe("excluded hosts", () => {
     assert.ok(
       chrome._calls.some(([n, id]) => n === "menus.create" && id === "grabVideo:0"),
       "menu shown on ordinary hosts"
+    );
+  });
+});
+
+describe("preferMasterPlaylists", () => {
+  let bg;
+  const MASTER = "https://cdn.example.com/hls/master.m3u8";
+  const VIDEO_PL = "https://cdn.example.com/hls/index-v1.m3u8";
+  const AUDIO_PL = "https://cdn.example.com/hls/index-v1-a1.m3u8";
+  const OTHER_DIR = "https://cdn.example.com/other/clip.m3u8";
+  const MP4 = "https://cdn.example.com/v/clip.mp4";
+
+  const MASTER_BODY = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nindex-v1.m3u8\n";
+  const MEDIA_BODY = "#EXTM3U\n#EXT-X-TARGETDURATION=6\n#EXTINF:6.0,\nseg1.ts\n";
+
+  beforeEach(() => {
+    bg = loadBackground(makeChrome());
+    // Mock fetch: master for MASTER, media playlist for the rest.
+    globalThis.fetch = async (url) => ({
+      ok: true,
+      text: async () => (String(url).includes("master.m3u8") ? MASTER_BODY : MEDIA_BODY),
+    });
+  });
+
+  test("keeps only the master when its children are detected", async () => {
+    const out = await bg.preferMasterPlaylists([MASTER, VIDEO_PL, AUDIO_PL]);
+    assert.deepEqual(out, [MASTER]);
+  });
+
+  test("keeps manifests outside the master directory", async () => {
+    const out = await bg.preferMasterPlaylists([MASTER, VIDEO_PL, OTHER_DIR]);
+    assert.deepEqual(out, [MASTER, OTHER_DIR]);
+  });
+
+  test("keeps non-manifest URLs untouched", async () => {
+    const out = await bg.preferMasterPlaylists([MASTER, VIDEO_PL, MP4]);
+    assert.deepEqual(out, [MASTER, MP4]);
+  });
+
+  test("returns everything when no master is confirmed", async () => {
+    globalThis.fetch = async () => ({ ok: true, text: async () => MEDIA_BODY });
+    // Fresh module so the cache from beforeEach doesn't leak.
+    bg = loadBackground(makeChrome());
+    const out = await bg.preferMasterPlaylists([VIDEO_PL, AUDIO_PL]);
+    assert.deepEqual(out, [VIDEO_PL, AUDIO_PL]);
+  });
+
+  test("returns everything when the fetch fails", async () => {
+    globalThis.fetch = async () => { throw new Error("denied"); };
+    bg = loadBackground(makeChrome());
+    const out = await bg.preferMasterPlaylists([MASTER, VIDEO_PL]);
+    assert.deepEqual(out, [MASTER, VIDEO_PL]);
+  });
+
+  test("isMasterPlaylist caches its result", async () => {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return { ok: true, text: async () => MASTER_BODY };
+    };
+    bg = loadBackground(makeChrome());
+    assert.equal(await bg.isMasterPlaylist(MASTER), true);
+    assert.equal(await bg.isMasterPlaylist(MASTER), true);
+    assert.equal(calls, 1, "second call served from cache");
+  });
+});
+
+describe("pageVideoTitle", () => {
+  let content;
+  beforeEach(() => {
+    content = loadContent();
+  });
+
+  test("reads og:title", () => {
+    const doc = {
+      querySelector: (sel) =>
+        sel === 'meta[property="og:title"]' ? { content: "  My Video  " } : null,
+    };
+    assert.equal(content.pageVideoTitle(doc), "My Video");
+  });
+
+  test("empty when no og:title", () => {
+    const doc = { querySelector: () => null };
+    assert.equal(content.pageVideoTitle(doc), "");
+  });
+
+  test("empty on missing document", () => {
+    assert.equal(content.pageVideoTitle(null), "");
+  });
+});
+
+describe("videoMenuTitle with video title", () => {
+  let bg;
+  beforeEach(() => {
+    bg = loadBackground(makeChrome());
+  });
+
+  test("uses the video title when present", () => {
+    assert.equal(
+      bg.videoMenuTitle("https://cdn.example.com/hls/master.m3u8", 0, "My Video", 1),
+      "My Video"
+    );
+  });
+
+  test("truncates long titles", () => {
+    const long = "A".repeat(50);
+    assert.equal(bg.videoMenuTitle("https://x/y.m3u8", 0, long, 1), "A".repeat(40) + "…");
+  });
+
+  test("numbers duplicates", () => {
+    assert.equal(
+      bg.videoMenuTitle("https://cdn.example.com/a.m3u8", 1, "My Video", 2),
+      "My Video (2)"
+    );
+  });
+
+  test("falls back to filename without a title", () => {
+    assert.equal(
+      bg.videoMenuTitle("https://cdn.example.com/hls/master.m3u8", 0, "", 1),
+      "master.m3u8"
     );
   });
 });
