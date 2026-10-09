@@ -4,6 +4,7 @@ Sends browser downloads and links to the [Grab](https://github.com/Linuxuser67/G
 download manager (MV3, Chromium and Firefox).
 
 [![Get it on FlatPark](assets/get-it-on-flatpark.png)](https://flatpark.org/apps/io.github.linuxuser67.Grab/)
+[![Get it for Firefox](assets/get-it-on-firefox.png)](https://addons.mozilla.org/en-US/firefox/addon/grab-extension/)
 
 _Grab 4.7.1 or newer required — install it from FlatPark via the badge above._
 
