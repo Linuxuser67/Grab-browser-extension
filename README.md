@@ -17,22 +17,9 @@ _Grab 4.7.1 or newer required — install it from FlatPark via the badge above._
    [releases page](https://github.com/Linuxuser67/Grab-browser-extension/releases).
 2. Extract it, then load it in your browser:
    - Chromium/Brave: open `chrome://extensions`, enable **Developer mode**,
-     **Load unpacked** → select the extracted folder. Copy the extension ID
-     shown under its name.
+     **Load unpacked** → select the extracted folder.
    - Firefox: open `about:debugging#/runtime/this-firefox`, **Load Temporary
      Add-on** → select the `manifest.json` inside the extracted folder.
-
-No native host setup needed — the extension hands `grab://` URLs to the
-browser, which routes them to Grab via the OS scheme handler.
-
-### Developer mode (from source)
-
-1. Clone the repo and open `chrome://extensions`, enable **Developer mode**.
-2. **Load unpacked** → select the repo folder.
-
-Grab must be installed with its desktop entry (it registers as the
-`x-scheme-handler/grab` handler). Requires Grab 4.7.1 or newer (the handoff
-carries the original http/https scheme, which older versions don't read).
 
 ## What it does
 
