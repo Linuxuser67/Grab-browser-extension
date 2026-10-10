@@ -99,12 +99,6 @@ function makeChrome(shared) {
       onMessage: capture("runtime.onMessage"),
       onStartup: capture("runtime.onStartup"),
       openOptionsPage: async () => calls.push(["runtime.openOptionsPage"]),
-      sendNativeMessage: async (host, msg) => {
-        calls.push(["runtime.sendNativeMessage", host, msg]);
-        // Simulate missing host by default — tests cover the tab fallback.
-        // Specific tests override this to test native messaging.
-        throw new Error("No such native application");
-      },
     },
     action: {
       onClicked: capture("action.onClicked"),
@@ -124,6 +118,13 @@ function makeChrome(shared) {
 function loadBackground(chrome) {
   delete require.cache[require.resolve(BG_PATH)];
   globalThis.chrome = chrome;
+  // Default: a Grab that accepts every handoff and records the URL it got.
+  // Tests must not depend on a real Grab listening on 127.0.0.1:9412; the HTTP
+  // handoff suite installs its own fetch for failure cases.
+  globalThis.fetch = async (url, opts) => {
+    chrome._calls.push(["handoff", JSON.parse(opts.body).url]);
+    return { status: 200, ok: true };
+  };
   return require(BG_PATH);
 }
 
@@ -242,9 +243,8 @@ describe("size-wait interception", () => {
 
   const intercepted = () =>
     chrome._calls.some(
-      ([name, props]) =>
-        name === "tabs.create" &&
-        props.url === "grab://https/example.com/big.iso"
+      ([name, url]) =>
+        name === "handoff" && url === "https://example.com/big.iso"
     );
   const cancelled = (id) =>
     chrome._calls.some(([name, arg]) => name === "cancel" && arg === id);
@@ -327,9 +327,8 @@ describe("size-wait interception", () => {
       fileSize: { current: 200 * MiB },
     });
     const interceptedB = chromeB._calls.some(
-      ([name, props]) =>
-        name === "tabs.create" &&
-        props.url === "grab://https/example.com/big.iso"
+      ([name, url]) =>
+        name === "handoff" && url === "https://example.com/big.iso"
     );
     assert.equal(interceptedB, true);
   });
@@ -346,9 +345,7 @@ describe("master interception toggle", () => {
     chrome._calls.some(
       ([name, arg]) =>
         (name === "cancel" && arg === id) ||
-        (name === "tabs.create" &&
-          arg.url === "grab://https/example.com/file.zip" &&
-          arg.active === false)
+        (name === "handoff" && arg === "https://example.com/file.zip")
     );
 
   test("onCreated leaves the download in the browser when off", async () => {
@@ -440,7 +437,7 @@ describe("context menu toggle", () => {
 });
 
 describe("handoff tab separation (review fix 1)", () => {
-  test("automatic interception uses grab:// URL in background tab, never the selected tab", async () => {
+  test("automatic interception hands off over HTTP, never navigating any tab", async () => {
     const chrome = makeChrome({
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
@@ -450,20 +447,14 @@ describe("handoff tab separation (review fix 1)", () => {
       url: "https://example.com/big.iso",
       fileSize: -1,
     });
-    const viaBackgroundTab = chrome._calls.some(
-      ([name, props]) =>
-        name === "tabs.create" &&
-        props.url === "grab://https/example.com/big.iso" &&
-        props.active === false
+    const viaHttp = chrome._calls.some(
+      ([name, url]) => name === "handoff" && url === "https://example.com/big.iso"
     );
-    const viaSelectedTab = chrome._calls.some(
-      ([name, arg]) =>
-        name === "tabs.update" &&
-        typeof arg.url === "string" &&
-        arg.url.startsWith("grab:")
+    const anyTab = chrome._calls.some(
+      ([name]) => name === "tabs.update" || name === "tabs.create"
     );
-    assert.equal(viaBackgroundTab, true);
-    assert.equal(viaSelectedTab, false);
+    assert.equal(viaHttp, true);
+    assert.equal(anyTab, false);
   });
 
   test("explicit context-menu send still navigates the active tab", async () => {
@@ -551,7 +542,7 @@ describe("size-wait deadline design (review fixes 2 and 3)", () => {
     state: "in_progress",
   });
   const handedOff = (chrome) =>
-    chrome._calls.some(([name]) => name === "tabs.create");
+    chrome._calls.some(([name]) => name === "handoff");
 
   test("parkForSize stores the deadline the alarm wakes for", async () => {
     const chrome = makeChrome();
@@ -634,10 +625,7 @@ describe("size-wait deadline design (review fixes 2 and 3)", () => {
     // An alarm and a size-change event arriving together.
     await Promise.all([bg.decidePending(14), bg.decidePending(14)]);
     const handoffs = chrome._calls.filter(
-      ([name, props]) =>
-        name === "tabs.create" &&
-        typeof props.url === "string" &&
-        props.url.startsWith("grab:")
+      ([name]) => name === "handoff"
     );
     assert.equal(handoffs.length, 1);
   });
@@ -654,5 +642,105 @@ describe("toolbar opens the popup", () => {
       chrome._listeners["action.onClicked"],
       undefined
     );
+  });
+});
+
+describe("HTTP handoff to Grab", () => {
+  const ENDPOINT = "http://127.0.0.1:9412/add";
+  let chrome, bg, fetchCalls;
+
+  /// Install a fetch that answers each call with the next status in `statuses`
+  /// (the last one repeats); the string "down" rejects like a closed port.
+  function mockFetch(...statuses) {
+    fetchCalls = [];
+    globalThis.fetch = async (url, opts) => {
+      fetchCalls.push({ url, opts });
+      const s = statuses[Math.min(fetchCalls.length - 1, statuses.length - 1)];
+      if (s === "down") throw new Error("connection refused");
+      return { status: s, ok: s >= 200 && s < 300 };
+    };
+  }
+  const tabsCreated = () => chrome._calls.filter(([name]) => name === "tabs.create");
+
+  beforeEach(() => {
+    chrome = makeChrome({
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    });
+    bg = loadBackground(chrome);
+  });
+
+  test("POSTs the unwrapped URL as JSON and opens no tab on success", async () => {
+    mockFetch(200);
+    assert.equal(await bg.handOff("grab://https/example.com/f.zip?x=1"), true);
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].url, ENDPOINT);
+    assert.equal(fetchCalls[0].opts.method, "POST");
+    assert.equal(fetchCalls[0].opts.headers["Content-Type"], "application/json");
+    assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
+      url: "https://example.com/f.zip?x=1",
+    });
+    assert.equal(tabsCreated().length, 0);
+  });
+
+  test("unwraps magnet links", async () => {
+    mockFetch(200);
+    await bg.handOff("grab://magnet:?xt=urn:btih:abc");
+    assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
+      url: "magnet:?xt=urn:btih:abc",
+    });
+  });
+
+  test("Grab not running is a failure and opens no tab", async () => {
+    mockFetch("down");
+    assert.equal(await bg.handOff("grab://https/example.com/f.zip"), false);
+    assert.equal(fetchCalls.length, 1, "no retry when unreachable");
+    assert.equal(tabsCreated().length, 0);
+  });
+
+  for (const status of [400, 403, 414, 500]) {
+    test(`HTTP ${status} is a failure: no retry, no tab`, async () => {
+      mockFetch(status);
+      assert.equal(await bg.handOff("grab://https/example.com/f.zip"), false);
+      assert.equal(fetchCalls.length, 1);
+      assert.equal(tabsCreated().length, 0);
+    });
+  }
+
+  test("429 is retried and succeeds without opening a tab", async () => {
+    mockFetch(429, 200);
+    assert.equal(await bg.handOff("grab://https/example.com/f.zip", [0, 0]), true);
+    assert.equal(fetchCalls.length, 2);
+    assert.equal(tabsCreated().length, 0);
+  });
+
+  test("a queue that stays full gives up after the retries", async () => {
+    mockFetch(429);
+    assert.equal(await bg.handOff("grab://https/example.com/f.zip", [0, 0]), false);
+    assert.equal(fetchCalls.length, 3, "1 attempt + 2 retries");
+    assert.equal(tabsCreated().length, 0);
+  });
+
+  test("automatic interception cancels the browser download after a 200", async () => {
+    mockFetch(200);
+    await chrome._listeners["downloads.onCreated"]({
+      id: 77,
+      url: "https://example.com/big.iso",
+      fileSize: -1,
+    });
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(tabsCreated().length, 0);
+    assert.ok(chrome._calls.some(([name, id]) => name === "cancel" && id === 77));
+  });
+
+  test("automatic interception leaves the download in the browser when Grab is down", async () => {
+    mockFetch("down");
+    await chrome._listeners["downloads.onCreated"]({
+      id: 78,
+      url: "https://example.com/big.iso",
+      fileSize: -1,
+    });
+    assert.equal(tabsCreated().length, 0);
+    assert.equal(chrome._calls.some(([name]) => name === "cancel"), false);
+    assert.equal(chrome._calls.some(([name]) => name === "removeFile"), false);
   });
 });
