@@ -53,10 +53,10 @@ async function save() {
     // Whole megabytes, never negative.
     minSizeMB: Math.max(0, Math.floor(Number(minSizeEl.value) || 0)),
   });
-  savedEl.style.opacity = "1";
+  savedEl.classList.add("show");
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    savedEl.style.opacity = "0";
+    savedEl.classList.remove("show");
   }, 1200);
 }
 
