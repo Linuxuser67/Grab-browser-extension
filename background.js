@@ -61,8 +61,18 @@ function sendToGrab(url, tabId) {
   if (!grabUrl) return;
   // Name the tab the user acted on; without an id the browser picks the
   // "current window", which is the wrong one when several are open.
-  if (tabId != null) chrome.tabs.update(tabId, { url: grabUrl });
-  else chrome.tabs.update({ url: grabUrl });
+  updateTab(tabId, grabUrl);
+}
+
+/// Navigate `tabId` to `url`, falling back to the current window's active tab
+/// when there is no real tab (TAB_ID_NONE is -1: devtools and similar). A tab
+/// that closed in the meantime rejects the promise; nothing to recover.
+function updateTab(tabId, url) {
+  const r =
+    tabId != null && tabId >= 0
+      ? chrome.tabs.update(tabId, { url })
+      : chrome.tabs.update({ url });
+  if (r && typeof r.catch === "function") r.catch(() => {});
 }
 
 /// Native-messaging host name (see native-host/). The host runs outside the
@@ -379,8 +389,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     (u) => typeof u === "string" && u.toLowerCase().startsWith("magnet:"),
   );
   if (magnet) {
-    if (tab && tab.id != null) chrome.tabs.update(tab.id, { url: magnet });
-    else chrome.tabs.update({ url: magnet });
+    updateTab(tab && tab.id, magnet);
     return;
   }
   // Prefer the media/link target, but a blob:/data: media URL can't leave
