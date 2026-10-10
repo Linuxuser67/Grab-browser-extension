@@ -75,21 +75,33 @@ function updateTab(tabId, url) {
   if (r && typeof r.catch === "function") r.catch(() => {});
 }
 
-/// Native-messaging host name. The host launches Grab directly — no tab,
-/// no prompt. Falls back to grab:// URL if the host isn't installed.
-const NATIVE_HOST = "io.github.linuxuser67.grab";
+/// Grab's local HTTP server. The extension POSTs URLs here instead of using
+/// native messaging — no host manifest, no extension IDs, works from Flatpak.
+const GRAB_HTTP_URL = "http://127.0.0.1:9412/add";
 
-/// Try native messaging first (direct launch, no tab). Falls back to
-/// grab:// URL via background tab if the host isn't installed.
+/// Send the URL to Grab via HTTP. Falls back to grab:// URL via background
+/// tab if Grab isn't running.
 async function handOff(grabUrl) {
-  // Try native host first.
+  // Extract the real URL from the grab:// wrapper.
+  // grab://https/example.com/path -> https://example.com/path
+  let url = grabUrl;
+  const m = grabUrl.match(/^grab:\/\/([^/]+)\/(.*)$/);
+  if (m) {
+    url = `${m[1]}://${m[2]}`;
+  } else if (grabUrl.startsWith("grab://magnet:")) {
+    url = grabUrl.slice("grab://".length);
+  }
+
+  // Try HTTP first.
   try {
-    const resp = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
-      url: grabUrl,
+    const resp = await fetch(GRAB_HTTP_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
     });
-    if (resp && resp.success) return true;
+    if (resp.ok) return true;
   } catch {
-    // Host not installed — fall through to URL handoff.
+    // Grab not running — fall through to URL handoff.
   }
   // Fallback: open grab:// URL in background tab.
   try {
