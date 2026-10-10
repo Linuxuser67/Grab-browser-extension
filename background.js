@@ -560,6 +560,102 @@ function urlDirectory(u) {
   }
 }
 
+/// Resolve a possibly-relative playlist URI against the master playlist URL.
+function absoluteUrl(uri, base) {
+  try {
+    return new URL(uri.trim(), base).toString();
+  } catch {
+    return null;
+  }
+}
+
+// --- HLS variant parsing ---------------------------------------------------
+//
+// A master playlist lists its renditions as #EXT-X-STREAM-INF lines, each
+// followed by the variant playlist URI. Parsing them lets the context menu
+// offer per-quality entries ("1080p", "720p") instead of one opaque master
+// URL — the Media Grabber pattern. Variants are cached alongside the master
+// check so the playlist is fetched once.
+
+/// Cache: master url -> [{url, height, bandwidth}] (null when the fetch
+/// failed or no variants were found).
+const variantCache = new Map();
+
+/// Parse HLS variants from master playlist text. Returns [{url, height,
+/// bandwidth}], height/bandwidth null when the attributes are absent.
+function parseHlsVariants(text, baseUrl) {
+  const variants = [];
+  const re = /#EXT-X-STREAM-INF:([^\n\r]*)[\r\n]+([^\s#][^\r\n]*)/g;
+  for (const m of text.matchAll(re)) {
+    const attrs = m[1];
+    const url = absoluteUrl(m[2], baseUrl);
+    if (!url) continue;
+    const res = /RESOLUTION=(\d+)x(\d+)/i.exec(attrs);
+    const bw = /BANDWIDTH=(\d+)/i.exec(attrs);
+    variants.push({
+      url,
+      height: res ? parseInt(res[2], 10) : null,
+      bandwidth: bw ? parseInt(bw[1], 10) : null,
+    });
+  }
+  return variants;
+}
+
+/// Fetch and parse a master playlist's variants. Null on fetch failure,
+/// when no variants are present, or when the master declares separate audio
+/// tracks (EXT-X-MEDIA): handing a variant URL in that case yields
+/// video-only — the master is what ties renditions to their audio.
+async function getHlsVariants(masterUrl) {
+  if (variantCache.has(masterUrl)) return variantCache.get(masterUrl);
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    let text;
+    try {
+      const res = await fetch(masterUrl, { signal: ctrl.signal });
+      if (!res.ok) return null;
+      text = await res.text();
+    } finally {
+      clearTimeout(timer);
+    }
+    // Separate audio tracks: variants are video-only, don't expand.
+    if (/#EXT-X-MEDIA:/i.test(text)) {
+      variantCache.set(masterUrl, null);
+      return null;
+    }
+    const variants = parseHlsVariants(text, masterUrl);
+    const result = variants.length > 0 ? variants : null;
+    variantCache.set(masterUrl, result);
+    if (variantCache.size > 200) {
+      variantCache.delete(variantCache.keys().next().value);
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+/// Menu label for a variant: "1080p", "720p", falling back to bandwidth
+/// ("2.5 Mbps") or the file name when resolution is absent.
+function variantMenuTitle(variant, index) {
+  if (variant.height) return `${variant.height}p`;
+  if (variant.bandwidth) {
+    const mbps = variant.bandwidth / 1_000_000;
+    return mbps >= 1
+      ? `${mbps.toFixed(1)} Mbps`
+      : `${Math.round(variant.bandwidth / 1000)} kbps`;
+  }
+  try {
+    const name = decodeURIComponent(
+      new URL(variant.url).pathname.split("/").filter(Boolean).pop() || "",
+    );
+    if (name) return name.length > 30 ? name.slice(0, 30) + "…" : name;
+  } catch {
+    // Fall through.
+  }
+  return `Variant ${index + 1}`;
+}
+
 const MANIFEST_RE = /\.(m3u8|m3u)([?#]|$)/i;
 
 /// From the detected manifest URLs, drop media playlists that live under a
@@ -679,20 +775,80 @@ function doRefreshVideoMenu(tabId) {
     // Prefer master playlists: hides child media playlists whose direct
     // download would miss the audio track.
     urls = await preferMasterPlaylists(urls);
-    menuUrls = urls;
-    if (urls.length === 0) return;
+    // Expand HLS masters into per-quality variants. Each entry becomes
+    // {url, label, parentLabel}: variants share their master's label as a
+    // submenu parent; non-variant URLs stand alone. Single-variant masters
+    // aren't expanded (a one-item submenu is pointless UI).
+    const items = [];
+    for (const u of urls) {
+      if (MANIFEST_RE.test(u)) {
+        const variants = await getHlsVariants(u);
+        if (variants && variants.length > 1) {
+          // Sort best quality first.
+          variants.sort((a, b) => (b.height || 0) - (a.height || 0));
+          const parentLabel = videoMenuTitle(
+            u,
+            items.length,
+            videoFinds.get(tabId)?.title,
+            urls.length,
+          );
+          variants.forEach((v, vi) => {
+            items.push({
+              url: v.url,
+              label: variantMenuTitle(v, vi),
+              parent: parentLabel,
+              parentId: `${VIDEO_ITEM_PREFIX}parent-${items.length}`,
+            });
+          });
+          continue;
+        }
+      }
+      items.push({
+        url: u,
+        label: videoMenuTitle(
+          u,
+          items.length,
+          videoFinds.get(tabId)?.title,
+          urls.length,
+        ),
+        parent: null,
+      });
+    }
+    menuUrls = items.map((it) => it.url);
+    if (items.length === 0) return;
     safeMenuCreate({
       id: VIDEO_PARENT_ID,
       title: "Videos detected by Grab",
       contexts: ["page", "video", "link"],
     });
-    urls.forEach((u, i) => {
-      safeMenuCreate({
-        id: `${VIDEO_ITEM_PREFIX}${i}`,
-        parentId: VIDEO_PARENT_ID,
-        title: videoMenuTitle(u, i, videoFinds.get(tabId)?.title, urls.length),
-        contexts: ["page", "video", "link"],
-      });
+    // Group variant children under their parent label.
+    let lastParentId = null;
+    items.forEach((it, i) => {
+      if (it.parent) {
+        if (it.parentId !== lastParentId) {
+          safeMenuCreate({
+            id: it.parentId,
+            parentId: VIDEO_PARENT_ID,
+            title: it.parent,
+            contexts: ["page", "video", "link"],
+          });
+          lastParentId = it.parentId;
+        }
+        safeMenuCreate({
+          id: `${VIDEO_ITEM_PREFIX}${i}`,
+          parentId: it.parentId,
+          title: it.label,
+          contexts: ["page", "video", "link"],
+        });
+      } else {
+        lastParentId = null;
+        safeMenuCreate({
+          id: `${VIDEO_ITEM_PREFIX}${i}`,
+          parentId: VIDEO_PARENT_ID,
+          title: it.label,
+          contexts: ["page", "video", "link"],
+        });
+      }
     });
     const badged = chrome.action.setBadgeText({
       tabId,
@@ -829,6 +985,9 @@ if (typeof module !== "undefined" && module.exports) {
     isMasterPlaylist,
     preferMasterPlaylists,
     urlDirectory,
+    parseHlsVariants,
+    getHlsVariants,
+    variantMenuTitle,
     hostExcluded,
     handOffNative,
     NATIVE_HOST,
