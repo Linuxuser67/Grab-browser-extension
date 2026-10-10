@@ -146,6 +146,19 @@ describe("classifyStream", () => {
     assert.equal(bg.classifyStream("https://cdn.example.com/s/a.m3u8?sig=2#x", ""), "manifest");
   });
 
+  test("a click without a real tab falls back to the active tab", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    const L = chrome._listeners;
+    await L["tabs.onActivated"]({ tabId: 5 });
+    L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://a.example.com/a.mp4", responseHeaders: [] });
+    await new Promise((r) => setTimeout(r, 30));
+    L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, { id: -1 });
+    const call = chrome._calls.find(([n]) => n === "tabs.update");
+    assert.ok(call, "navigated");
+    assert.equal(call[2], undefined, "no tab id passed for TAB_ID_NONE");
+  });
+
   test("links carrying credentials are not handed off", () => {
     assert.equal(bg.toGrabUrl("https://u:p@example.com/f.zip"), null);
     assert.equal(bg.toGrabUrl("https://u@example.com/f.zip"), null);
