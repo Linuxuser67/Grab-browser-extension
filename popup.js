@@ -17,13 +17,11 @@ let saveTimer = null;
 
 async function checkGrabStatus() {
   const el = document.getElementById("grabStatus");
+  // GET the root: Grab's router 404s (no route there), but any HTTP response
+  // means it's listening. We avoid POSTing to /add because even an empty URL
+  // would trigger Grab's "Invalid URL" toast.
   try {
-    // Any HTTP response (even 400) means Grab is listening.
-    await fetch("http://127.0.0.1:9412/add", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: "" }),
-    });
+    await fetch("http://127.0.0.1:9412/", { method: "GET" });
     el.textContent = "Grab is running";
     el.className = "status ok";
   } catch {
