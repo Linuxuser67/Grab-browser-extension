@@ -16,7 +16,6 @@
   "host_permissions": ["http://*/*", "https://*/*"],
   "minimum_chrome_version": "102",
   "background": {
-    "scripts": ["background.js"],
     "service_worker": "background.js"
   },
   "content_scripts": [
