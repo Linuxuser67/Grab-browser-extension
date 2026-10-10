@@ -113,10 +113,35 @@
       .footer a:hover {
         text-decoration: underline;
       }
+      .status {
+        font-size: 12px;
+        padding: 6px 10px;
+        border-radius: 6px;
+        margin: 0 0 12px;
+      }
+      .status.ok {
+        background: #e6f4ea;
+        color: #1a7f37;
+      }
+      .status.down {
+        background: #fce8e6;
+        color: #c5221f;
+      }
+      @media (prefers-color-scheme: dark) {
+        .status.ok {
+          background: #1a3a24;
+          color: #4caf50;
+        }
+        .status.down {
+          background: #3a1a1a;
+          color: #f28b82;
+        }
+      }
     </style>
   </head>
   <body>
     <h2><img src="icons/icon32.png" alt="" />Grab</h2>
+    <div id="grabStatus" class="status">Checking Grab…</div>
 
     <label class="checkbox">
       <input type="checkbox" id="interceptDownloads" />
