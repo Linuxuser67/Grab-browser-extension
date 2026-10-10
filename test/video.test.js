@@ -799,3 +799,69 @@ describe("videoMenuTitle with video title", () => {
     );
   });
 });
+
+describe("parseHlsVariants", () => {
+  let bg;
+  const BASE = "https://cdn.example.com/hls/master.m3u8";
+
+  beforeEach(() => {
+    bg = loadBackground(makeChrome());
+  });
+
+  test("extracts resolution and bandwidth per variant", () => {
+    const body = [
+      "#EXTM3U",
+      '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360',
+      "index-v1.m3u8",
+      '#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720',
+      "index-v2.m3u8",
+      '#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080',
+      "index-v3.m3u8",
+    ].join("\n");
+    const out = bg.parseHlsVariants(body, BASE);
+    assert.equal(out.length, 3);
+    assert.equal(out[0].height, 360);
+    assert.equal(out[0].bandwidth, 800000);
+    assert.equal(out[0].url, "https://cdn.example.com/hls/index-v1.m3u8");
+    assert.equal(out[2].height, 1080);
+  });
+
+  test("handles missing resolution gracefully", () => {
+    const body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nindex-v1.m3u8\n";
+    const out = bg.parseHlsVariants(body, BASE);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].height, null);
+    assert.equal(out[0].bandwidth, 800000);
+  });
+
+  test("returns empty for media playlists", () => {
+    const body = "#EXTM3U\n#EXT-X-TARGETDURATION=6\n#EXTINF:6.0,\nseg1.ts\n";
+    assert.deepEqual(bg.parseHlsVariants(body, BASE), []);
+  });
+
+  test("resolves relative URIs against the master", () => {
+    const body = "#EXTM3U\n#EXT-X-STREAM-INF:RESOLUTION=1280x720\n../other/v.m3u8\n";
+    const out = bg.parseHlsVariants(body, BASE);
+    assert.equal(out[0].url, "https://cdn.example.com/other/v.m3u8");
+  });
+});
+
+describe("variantMenuTitle", () => {
+  let bg;
+
+  beforeEach(() => {
+    bg = loadBackground(makeChrome());
+  });
+
+  test("shows height as 720p-style label", () => {
+    assert.equal(bg.variantMenuTitle({ url: "https://x/y.m3u8", height: 720 }, 0), "720p");
+    assert.equal(bg.variantMenuTitle({ url: "https://x/y.m3u8", height: 1080 }, 0), "1080p");
+  });
+
+  test("falls back to bandwidth when height is absent", () => {
+    assert.equal(
+      bg.variantMenuTitle({ url: "https://x/y.m3u8", height: null, bandwidth: 2500000 }, 0),
+      "2.5 Mbps"
+    );
+  });
+});
