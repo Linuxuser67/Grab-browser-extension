@@ -1,7 +1,7 @@
 // Options page: reflects chrome.storage.sync and saves on change.
 
 const DEFAULTS = {
-  interceptDownloads: true,
+  interceptDownloads: false,
   skipTypes: "",
   showContextMenu: true,
   minSizeMB: 0,

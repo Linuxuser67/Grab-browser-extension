@@ -36,7 +36,7 @@ Grab must be installed with its desktop entry (it registers as the
 
 ## What it does
 
-- **Automatic interception** (on by default): downloads started in the browser
+- **Automatic interception** (off by default, enable in settings): downloads started in the browser
   are cancelled and sent to Grab over its local HTTP endpoint. If Grab isn't
   running or doesn't accept the request, the download stays in the browser.
   Grab asks for confirmation unless auto-add is enabled in its preferences.

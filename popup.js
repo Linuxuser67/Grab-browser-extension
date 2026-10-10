@@ -1,7 +1,7 @@
 // Popup: mirrors options.js — reflects chrome.storage.sync, saves on change.
 
 const DEFAULTS = {
-  interceptDownloads: true,
+  interceptDownloads: false,
   skipTypes: "",
   showContextMenu: true,
   minSizeMB: 0,
