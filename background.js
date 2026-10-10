@@ -79,9 +79,31 @@ function updateTab(tabId, url) {
 /// native messaging — no host manifest, no extension IDs, works from Flatpak.
 const GRAB_HTTP_URL = "http://127.0.0.1:9412/add";
 
-/// Send the URL to Grab via HTTP. Falls back to grab:// URL via background
-/// tab if Grab isn't running.
-async function handOff(grabUrl) {
+/// Delays before retrying when Grab answers 429 (its handoff queue is full).
+const HANDOFF_RETRY_DELAYS_MS = [300, 900];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/// POST one URL to Grab. Resolves to the HTTP status, or 0 when Grab can't be
+/// reached (not running).
+async function postToGrab(url) {
+  try {
+    const resp = await fetch(GRAB_HTTP_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    return resp.status;
+  } catch {
+    return 0;
+  }
+}
+
+/// Send the URL to Grab via HTTP. Resolves to true only when Grab accepted it.
+/// A 429 means Grab's queue is momentarily full, so retry briefly first. Any
+/// other outcome (Grab not running, 403, 414, …) is a failure: the caller must
+/// leave the browser's own download alone.
+async function handOff(grabUrl, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
   // Extract the real URL from the grab:// wrapper.
   // grab://https/example.com/path -> https://example.com/path
   let url = grabUrl;
@@ -92,27 +114,13 @@ async function handOff(grabUrl) {
     url = grabUrl.slice("grab://".length);
   }
 
-  // Try HTTP first.
-  try {
-    const resp = await fetch(GRAB_HTTP_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
-    if (resp.ok) return true;
-  } catch {
-    // Grab not running — fall through to URL handoff.
+  let status = await postToGrab(url);
+  for (const delay of retryDelays) {
+    if (status !== 429) break;
+    await sleep(delay);
+    status = await postToGrab(url);
   }
-  // Fallback: open grab:// URL in background tab.
-  try {
-    const tab = await chrome.tabs.create({ url: grabUrl, active: false });
-    setTimeout(() => {
-      if (tab && tab.id) chrome.tabs.remove(tab.id).catch(() => {});
-    }, 1000);
-    return true;
-  } catch {
-    return false;
-  }
+  return status >= 200 && status < 300;
 }
 
 /// True when the URL's file extension is on the user's skip list.
@@ -161,9 +169,8 @@ async function isClaimed(id) {
 async function interceptDownload(item) {
   const grabUrl = toGrabUrl(item.url);
   if (!grabUrl) return;
-  // Hand off via grab:// URL. The browser routes it to Grab through the
-  // .desktop handler. If Grab isn't installed, the browser shows an error
-  // and the download is left alone.
+  // Hand off over Grab's local HTTP endpoint. If Grab isn't running or
+  // refuses the request, the download is left to the browser.
   if (!(await handOff(grabUrl))) return;
 
   await claimDownload(item.id);
@@ -1020,6 +1027,7 @@ if (typeof module !== "undefined" && module.exports) {
     variantMenuTitle,
     hostExcluded,
     handOff,
+    postToGrab,
     YTDLP_EXCLUSIVE_HOSTS,
     DEFAULTS,
     SIZE_WAIT_MS,
