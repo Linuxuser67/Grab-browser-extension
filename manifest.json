@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Grab",
-  "version": "1.3.2",
+  "version": "1.3.8",
   "description": "Send downloads and links to the Grab download manager.",
   "homepage_url": "https://github.com/Linuxuser67/Grab",
   "permissions": [
