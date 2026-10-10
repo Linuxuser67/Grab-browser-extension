@@ -21,31 +21,14 @@ _Grab 4.7.1 or newer required — install it from FlatPark via the badge above._
      shown under its name.
    - Firefox: open `about:debugging#/runtime/this-firefox`, **Load Temporary
      Add-on** → select the `manifest.json` inside the extracted folder.
-3. Install the native messaging host (required for automatic interception).
-   With Grab 5.2.3+, no Python needed:
-   ```
-   grab --install-browser-host --chromium-id <your-extension-id>
-   ```
-   On older Grab, use the bundled installer from the extracted folder:
-   ```
-   cd <extracted-folder>
-   python3 ./native-host/install.py --chromium-id <your-extension-id>
-   ```
-   For Firefox, no ID is needed — the add-on ID is fixed
-   (`grab@linuxuser67.github.io`).
+
+No native host setup needed — the extension hands `grab://` URLs to the
+browser, which routes them to Grab via the OS scheme handler.
 
 ### Developer mode (from source)
 
 1. Clone the repo and open `chrome://extensions`, enable **Developer mode**.
-2. **Load unpacked** → select the repo folder. Copy the extension ID shown
-   under its name (unpacked installs get a generated ID — it stays stable
-   as long as the folder path doesn't change).
-3. Install the native messaging host:
-   - Grab 5.2.3+: `grab --install-browser-host --chromium-id <your-extension-id>`
-   - Older Grab: `python3 ./native-host/install.py --chromium-id <your-extension-id>`
-
-The host script hands `grab://` URLs to the OS directly, bypassing the
-browser's external-protocol prompt.
+2. **Load unpacked** → select the repo folder.
 
 Grab must be installed with its desktop entry (it registers as the
 `x-scheme-handler/grab` handler). Requires Grab 4.7.1 or newer (the handoff
@@ -54,8 +37,8 @@ carries the original http/https scheme, which older versions don't read).
 ## What it does
 
 - **Automatic interception** (on by default): downloads started in the browser
-  are cancelled and opened in Grab instead via the native messaging host.
-  If the host isn't installed, downloads stay in the browser untouched.
+  are cancelled and opened in Grab instead via `grab://` URLs.
+  If Grab isn't installed, the browser shows an error.
   If a tiny download finishes before the cancel lands, the duplicate is
   removed from the browser.
 - **Toolbar button**: opens a popup with the extension settings (adapts to
