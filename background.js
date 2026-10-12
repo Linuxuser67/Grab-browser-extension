@@ -924,8 +924,19 @@ function clearAllVideoUi() {
 
 function onVideoEvent(tabId) {
   if (!detectVideosOn) return;
-  if (tabId !== activeTabId) return;
-  refreshVideoMenu(tabId);
+  if (tabId === activeTabId) {
+    refreshVideoMenu(tabId);
+    return;
+  }
+  // The cached active tab can go stale (worker restarts, window-focus
+  // races): verify against live state instead of silently dropping the
+  // report — otherwise the menu never appears until the next tab switch.
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const liveActive = tabs && tabs[0] && tabs[0].id;
+    if (liveActive == null) return;
+    activeTabId = liveActive; // heal the stale cache
+    if (tabId === liveActive) refreshVideoMenu(tabId);
+  });
 }
 
 chrome.webRequest.onResponseStarted.addListener(
