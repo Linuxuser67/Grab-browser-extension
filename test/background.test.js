@@ -240,10 +240,9 @@ describe("size-wait interception", () => {
 
   const intercepted = () =>
     chrome._calls.some(
-      ([name, host, msg]) =>
-        name === "runtime.sendNativeMessage" &&
-        host === "io.github.linuxuser67.grab" &&
-        msg.url === "grab://https/example.com/big.iso"
+      ([name, props]) =>
+        name === "tabs.create" &&
+        props.url === "grab://https/example.com/big.iso"
     );
   const cancelled = (id) =>
     chrome._calls.some(([name, arg]) => name === "cancel" && arg === id);
@@ -326,10 +325,9 @@ describe("size-wait interception", () => {
       fileSize: { current: 200 * MiB },
     });
     const interceptedB = chromeB._calls.some(
-      ([name, host, msg]) =>
-        name === "runtime.sendNativeMessage" &&
-        host === "io.github.linuxuser67.grab" &&
-        msg.url === "grab://https/example.com/big.iso"
+      ([name, props]) =>
+        name === "tabs.create" &&
+        props.url === "grab://https/example.com/big.iso"
     );
     assert.equal(interceptedB, true);
   });
@@ -440,7 +438,7 @@ describe("context menu toggle", () => {
 });
 
 describe("handoff tab separation (review fix 1)", () => {
-  test("automatic interception uses native messaging, never the selected tab", async () => {
+  test("automatic interception uses grab:// URL in background tab, never the selected tab", async () => {
     const chrome = makeChrome({
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
@@ -450,11 +448,11 @@ describe("handoff tab separation (review fix 1)", () => {
       url: "https://example.com/big.iso",
       fileSize: -1,
     });
-    const viaNative = chrome._calls.some(
-      ([name, host, msg]) =>
-        name === "runtime.sendNativeMessage" &&
-        host === "io.github.linuxuser67.grab" &&
-        msg.url === "grab://https/example.com/big.iso"
+    const viaBackgroundTab = chrome._calls.some(
+      ([name, props]) =>
+        name === "tabs.create" &&
+        props.url === "grab://https/example.com/big.iso" &&
+        props.active === false
     );
     const viaSelectedTab = chrome._calls.some(
       ([name, arg]) =>
@@ -462,36 +460,8 @@ describe("handoff tab separation (review fix 1)", () => {
         typeof arg.url === "string" &&
         arg.url.startsWith("grab:")
     );
-    assert.equal(viaNative, true);
+    assert.equal(viaBackgroundTab, true);
     assert.equal(viaSelectedTab, false);
-  });
-
-  test("leaves the download in the browser when the native host is missing", async () => {
-    const chrome = makeChrome({
-      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
-    });
-    // Simulate a missing native host.
-    chrome.runtime.sendNativeMessage = async () => {
-      throw new Error("No such native application");
-    };
-    loadBackground(chrome);
-    await chrome._listeners["downloads.onCreated"]({
-      id: 32,
-      url: "https://example.com/big.iso",
-      fileSize: -1,
-    });
-    // No tab handoff, no cancel: the browser keeps the download.
-    const viaVisibleTab = chrome._calls.some(
-      ([name, arg]) =>
-        name === "tabs.create" &&
-        typeof arg.url === "string" &&
-        arg.url.startsWith("grab:")
-    );
-    const cancelled = chrome._calls.some(
-      ([name, arg]) => name === "cancel" && arg === 32
-    );
-    assert.equal(viaVisibleTab, false);
-    assert.equal(cancelled, false);
   });
 
   test("explicit context-menu send still navigates the active tab", async () => {
