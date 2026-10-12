@@ -432,11 +432,12 @@ chrome.commands.onCommand.addListener((command) => {
 
 // --- Video detection ------------------------------------------------------
 //
-// FDM-style video menu: the content script reports <video> elements with
-// direct http(s) sources, and webRequest sniffs the HLS/DASH stream
-// manifests (.m3u8/.mpd) that blob:-based MSE players actually fetch.
-// Detections are kept per tab and offered as right-click menu children; a
-// toolbar badge shows the count. Picking an entry hands the URL to the Grab
+// FDM-style video menu: the content script reports <video> elements she
+// started playing (play-event latch; muted autoplay is noise), and webRequest
+// sniffs the HLS/DASH stream manifests (.m3u8/.mpd) that blob:-based MSE
+// players actually fetch. Sniffed manifests surface only alongside a played
+// video. Detections are kept per tab and offered as right-click menu children;
+// a toolbar badge shows the count. Picking an entry hands the URL to the Grab
 // desktop app. Segment traffic (.ts/.m4s/...) is ignored so the menu isn't
 // flooded with fragments.
 
@@ -795,7 +796,13 @@ function safeMenuCreate(props) {
 function doRefreshVideoMenu(tabId) {
   const rebuild = async () => {
     // Re-read: the finds may have changed while the remove was in flight.
-    let urls = tabId === activeTabId ? mergedVideoUrls(tabId) : [];
+    // Played-only menu: the content script reports just videos she started,
+    // and sniffed manifests ride along only then — without a played video
+    // the tab shows no video menu at all.
+    let urls =
+      tabId === activeTabId && domVideosFor(tabId).length > 0
+        ? mergedVideoUrls(tabId)
+        : [];
     // Backstop: collection already filters excluded hosts, but a tab may
     // have navigated there after its videos were recorded.
     if (urls.length > 0 && (await isExcludedTab(tabId))) urls = [];
