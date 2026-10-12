@@ -909,3 +909,45 @@ describe("getHlsVariants muxed-audio filter", () => {
     assert.equal(bg.parseHlsVariants(body2, MASTER)[0].audioGroup, null);
   });
 });
+
+describe("collection-time exclusion", () => {
+  const tick = () => new Promise((r) => setTimeout(r, 30));
+
+  test("webRequest sniffer skips yt-dlp-exclusive hosts", async () => {
+    const chrome = makeChrome();
+    // Mock tabs.get to return a YouTube URL.
+    chrome.tabs.get = async (id) => ({ id, url: "https://www.youtube.com/watch?v=x" });
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    await L["tabs.onActivated"]({ tabId: 5 });
+    // Sniff a manifest on the YouTube tab.
+    await L["webRequest.onResponseStarted"]({
+      tabId: 5,
+      url: "https://cdn.example.com/hls/master.m3u8",
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await tick();
+    await tick();
+    // The URL was never stored: collection-time filter, not just menu-build.
+    assert.equal(bg._videoFinds.has(5), false, "no finds stored for excluded host");
+    const menuCreates = chrome._calls.filter(([n]) => n === "contextMenus.create");
+    assert.equal(menuCreates.length, 0, "no menu items for excluded host");
+  });
+
+  test("content-script reports are dropped on excluded hosts", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    await L["tabs.onActivated"]({ tabId: 5 });
+    // Simulate a content-script message from a YouTube tab.
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: "https://cdn.example.com/v.mp4" }] },
+      { tab: { id: 5, url: "https://www.youtube.com/watch?v=x" }, frameId: 0 }
+    );
+    await tick();
+    await tick();
+    assert.equal(bg._videoFinds.has(5), false, "no finds stored for excluded host");
+    const menuCreates = chrome._calls.filter(([n]) => n === "contextMenus.create");
+    assert.equal(menuCreates.length, 0, "no menu items for excluded host");
+  });
+});
