@@ -26,7 +26,7 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 const DEFAULTS = {
-  interceptDownloads: true,
+  interceptDownloads: false,
   // Comma-separated file extensions the browser keeps handling itself.
   skipTypes: "",
   showContextMenu: true,
