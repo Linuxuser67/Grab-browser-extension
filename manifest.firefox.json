@@ -47,6 +47,7 @@
     "contextMenus",
     "downloads",
     "storage",
+    "nativeMessaging",
     "webRequest"
   ],
   "host_permissions": ["http://*/*", "https://*/*"],

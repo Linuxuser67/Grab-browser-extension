@@ -101,7 +101,9 @@ function makeChrome(shared) {
       openOptionsPage: async () => calls.push(["runtime.openOptionsPage"]),
       sendNativeMessage: async (host, msg) => {
         calls.push(["runtime.sendNativeMessage", host, msg]);
-        return { success: true };
+        // Simulate missing host by default — tests cover the tab fallback.
+        // Specific tests override this to test native messaging.
+        throw new Error("No such native application");
       },
     },
     action: {
@@ -632,14 +634,10 @@ describe("size-wait deadline design (review fixes 2 and 3)", () => {
     // An alarm and a size-change event arriving together.
     await Promise.all([bg.decidePending(14), bg.decidePending(14)]);
     const handoffs = chrome._calls.filter(
-      ([name, host, msg]) =>
-        (name === "runtime.sendNativeMessage" &&
-          host === "io.github.linuxuser67.grab" &&
-          typeof msg.url === "string" &&
-          msg.url.startsWith("grab:")) ||
-        (name === "tabs.create" &&
-          typeof host.url === "string" &&
-          host.url.startsWith("grab:"))
+      ([name, props]) =>
+        name === "tabs.create" &&
+        typeof props.url === "string" &&
+        props.url.startsWith("grab:")
     );
     assert.equal(handoffs.length, 1);
   });
