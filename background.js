@@ -582,7 +582,9 @@ function absoluteUrl(uri, base) {
 const variantCache = new Map();
 
 /// Parse HLS variants from master playlist text. Returns [{url, height,
-/// bandwidth}], height/bandwidth null when the attributes are absent.
+/// bandwidth, audioGroup}], height/bandwidth null when the attributes are
+/// absent, audioGroup null when the variant has muxed audio (no AUDIO=
+/// attribute pointing at an EXT-X-MEDIA group).
 function parseHlsVariants(text, baseUrl) {
   const variants = [];
   const re = /#EXT-X-STREAM-INF:([^\n\r]*)[\r\n]+([^\s#][^\r\n]*)/g;
@@ -592,19 +594,22 @@ function parseHlsVariants(text, baseUrl) {
     if (!url) continue;
     const res = /RESOLUTION=(\d+)x(\d+)/i.exec(attrs);
     const bw = /BANDWIDTH=(\d+)/i.exec(attrs);
+    const audio = /AUDIO="([^"]+)"/i.exec(attrs);
     variants.push({
       url,
       height: res ? parseInt(res[2], 10) : null,
       bandwidth: bw ? parseInt(bw[1], 10) : null,
+      audioGroup: audio ? audio[1] : null,
     });
   }
   return variants;
 }
 
-/// Fetch and parse a master playlist's variants. Null on fetch failure,
-/// when no variants are present, or when the master declares separate audio
-/// tracks (EXT-X-MEDIA): handing a variant URL in that case yields
-/// video-only — the master is what ties renditions to their audio.
+/// Fetch and parse a master playlist's variants, keeping only variants
+/// with bundled (muxed) audio — those without an AUDIO= attribute pointing
+/// at an EXT-X-MEDIA group. Video-only variants are suppressed: handing one
+/// to Grab yields silent video. Null when the fetch fails or no muxed
+/// variants exist — the caller falls back to the master URL.
 async function getHlsVariants(masterUrl) {
   if (variantCache.has(masterUrl)) return variantCache.get(masterUrl);
   try {
@@ -618,13 +623,10 @@ async function getHlsVariants(masterUrl) {
     } finally {
       clearTimeout(timer);
     }
-    // Separate audio tracks: variants are video-only, don't expand.
-    if (/#EXT-X-MEDIA:/i.test(text)) {
-      variantCache.set(masterUrl, null);
-      return null;
-    }
-    const variants = parseHlsVariants(text, masterUrl);
-    const result = variants.length > 0 ? variants : null;
+    const muxed = parseHlsVariants(text, masterUrl).filter(
+      (v) => v.audioGroup === null,
+    );
+    const result = muxed.length > 0 ? muxed : null;
     variantCache.set(masterUrl, result);
     if (variantCache.size > 200) {
       variantCache.delete(variantCache.keys().next().value);
