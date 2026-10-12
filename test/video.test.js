@@ -935,6 +935,55 @@ describe("preferMasterPlaylists", () => {
     const out = await bg.preferMasterPlaylists([MASTER, CROSS_DIR]);
     assert.deepEqual(out, [MASTER]);
   });
+
+  test("drops EXT-X-MEDIA audio playlists outside the master directory", async () => {
+    const body = [
+      "#EXTM3U",
+      '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a1",NAME="English",URI="/audio/en.m3u8"',
+      '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO="a1"',
+      "index-v1.m3u8",
+    ].join("\n");
+    globalThis.fetch = async (url) => ({
+      ok: true,
+      text: async () => (String(url).includes("master.m3u8") ? body : MEDIA_BODY),
+    });
+    bg = loadBackground(makeChrome());
+    const AUDIO_PL = "https://cdn.example.com/audio/en.m3u8";
+    const out = await bg.preferMasterPlaylists([MASTER, VIDEO_PL, AUDIO_PL]);
+    assert.deepEqual(out, [MASTER]);
+  });
+
+  test("collapses to the unfetchable master when its variants are confirmed non-masters", async () => {
+    // The master URL can't be read (expiring token) but its 7 chunklists
+    // can: 5 video + 2 audio, all confirmed media playlists. The failed
+    // fetch among confirmed non-masters marks this as one stream.
+    const DIR = "https://cdn.example.com/s/origin.stream123";
+    const UNFETCHABLE = `${DIR}/llhls.m3u8?token=ABC`;
+    const chunks = Array.from({ length: 7 }, (_, i) => `${DIR}/chunklist_${i}_llhls.m3u8?session=S1`);
+    globalThis.fetch = async (url) => {
+      if (String(url).includes("llhls.m3u8?token=")) throw new Error("403");
+      return { ok: true, text: async () => MEDIA_BODY };
+    };
+    bg = loadBackground(makeChrome());
+    const out = await bg.preferMasterPlaylists([UNFETCHABLE, ...chunks]);
+    assert.deepEqual(out, [UNFETCHABLE]);
+  });
+
+  test("keeps both when the failed fetch wasn't sniffed first", async () => {
+    // A dead video's playlist (failed fetch) sniffed AFTER a working one:
+    // the failure is a different video, not this group's master.
+    const DIR = "https://cdn.example.com/s";
+    const WORKING = `${DIR}/b.m3u8`;
+    const DEAD = `${DIR}/a.m3u8`;
+    globalThis.fetch = async (url) => {
+      if (String(url).endsWith("/a.m3u8")) throw new Error("403");
+      return { ok: true, text: async () => MEDIA_BODY };
+    };
+    bg = loadBackground(makeChrome());
+    const out = await bg.preferMasterPlaylists([WORKING, DEAD]);
+    assert.deepEqual(out, [WORKING, DEAD]);
+  });
+
 });
 
 describe("pageVideoTitle", () => {
@@ -967,22 +1016,27 @@ describe("videoMenuTitle with video title", () => {
     bg = loadBackground(makeChrome());
   });
 
-  test("uses the video title when present", () => {
+  test("uses the first word of the video title", () => {
     assert.equal(
-      bg.videoMenuTitle("https://cdn.example.com/hls/master.m3u8", 0, "My Video", 1),
-      "My Video"
+      bg.videoMenuTitle(
+        "https://cdn.example.com/hls/master.m3u8",
+        0,
+        "Example Video Title",
+        1
+      ),
+      "Example"
     );
   });
 
-  test("truncates long titles", () => {
-    const long = "A".repeat(50);
-    assert.equal(bg.videoMenuTitle("https://x/y.m3u8", 0, long, 1), "A".repeat(40) + "…");
+  test("one word even for long titles", () => {
+    const long = "A".repeat(50) + " rest of title";
+    assert.equal(bg.videoMenuTitle("https://x/y.m3u8", 0, long, 1), "A".repeat(50));
   });
 
-  test("numbers duplicates", () => {
+  test("no duplicate numbering", () => {
     assert.equal(
       bg.videoMenuTitle("https://cdn.example.com/a.m3u8", 1, "My Video", 2),
-      "My Video (2)"
+      "My"
     );
   });
 
@@ -990,6 +1044,27 @@ describe("videoMenuTitle with video title", () => {
     assert.equal(
       bg.videoMenuTitle("https://cdn.example.com/hls/master.m3u8", 0, "", 1),
       "master.m3u8"
+    );
+  });
+});
+
+describe("qualityMenuLabel", () => {
+  let bg;
+  beforeEach(() => {
+    bg = loadBackground(makeChrome());
+  });
+
+  test("prefixes the quality with the one-word title", () => {
+    assert.equal(
+      bg.qualityMenuLabel("Example Video Title", { height: 1080, bandwidth: 8000000, url: "https://x/v.m3u8" }, 0),
+      "Example 1080p"
+    );
+  });
+
+  test("falls back to the bare quality label without a title", () => {
+    assert.equal(
+      bg.qualityMenuLabel("", { height: 720, bandwidth: 4000000, url: "https://x/v.m3u8" }, 0),
+      "720p"
     );
   });
 });
