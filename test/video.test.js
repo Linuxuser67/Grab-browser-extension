@@ -120,10 +120,14 @@ function makeChrome(shared) {
   return chrome;
 }
 
-function loadBackground(chrome) {
-  delete require.cache[require.resolve(BG_PATH)];
+let bgLoadCount = 0;
+async function loadBackground(chrome) {
   globalThis.chrome = chrome;
-  return require(BG_PATH);
+  // Cache-bust for fresh background.js state per test; sub-modules
+  // are shared so reset their state explicitly.
+  const bg = await import(BG_PATH + `?t=${++bgLoadCount}`);
+  bg.__resetForTests();
+  return bg;
 }
 
 function loadContent() {
@@ -135,11 +139,11 @@ function loadContent() {
 
 describe("classifyStream", () => {
   let bg;
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
+  beforeEach(async () => {
+    bg = await loadBackground(makeChrome());
   });
 
-  test("an extension in the query string is not a media file", () => {
+  test("an extension in the query string is not a media file", async () => {
     assert.equal(bg.classifyStream("https://example.com/page?file=a.mp4", ""), null);
     assert.equal(bg.classifyStream("https://example.com/watch?u=x.m3u8#t", ""), null);
     assert.equal(bg.classifyStream("https://cdn.example.com/v/clip.mp4?token=1", ""), "media");
@@ -148,7 +152,7 @@ describe("classifyStream", () => {
 
   test("a click without a real tab falls back to the active tab", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const L = chrome._listeners;
     await L["tabs.onActivated"]({ tabId: 5 });
     L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://a.example.com/a.mp4", responseHeaders: [] });
@@ -164,20 +168,20 @@ describe("classifyStream", () => {
     assert.equal(call[2], undefined, "no tab id passed for TAB_ID_NONE");
   });
 
-  test("links carrying credentials are not handed off", () => {
+  test("links carrying credentials are not handed off", async () => {
     assert.equal(bg.toGrabUrl("https://u:p@example.com/f.zip"), null);
     assert.equal(bg.toGrabUrl("https://u@example.com/f.zip"), null);
     // An @ later in the path or query is not userinfo.
     assert.equal(bg.toGrabUrl("https://example.com/a@b?x=y@z"), "grab://https/example.com/a@b?x=y@z");
   });
 
-  test("manifest extensions classify without a content type", () => {
+  test("manifest extensions classify without a content type", async () => {
     assert.equal(bg.classifyStream("https://cdn.example.com/s/manifest.m3u8", ""), "manifest");
     assert.equal(bg.classifyStream("https://cdn.example.com/s/manifest.m3u", ""), "manifest");
     assert.equal(bg.classifyStream("https://cdn.example.com/s/manifest.mpd", ""), "manifest");
   });
 
-  test("manifest content types classify without an extension", () => {
+  test("manifest content types classify without an extension", async () => {
     assert.equal(
       bg.classifyStream("https://cdn.example.com/s/playlist", "application/vnd.apple.mpegurl"),
       "manifest"
@@ -188,17 +192,17 @@ describe("classifyStream", () => {
     );
   });
 
-  test("direct video extensions classify as media", () => {
+  test("direct video extensions classify as media", async () => {
     for (const ext of ["mp4", "m4v", "webm", "ogv", "mov", "mkv"]) {
       assert.equal(bg.classifyStream(`https://cdn.example.com/v/clip.${ext}`, ""), "media", ext);
     }
   });
 
-  test("extension matching is case-insensitive and ignores query strings", () => {
+  test("extension matching is case-insensitive and ignores query strings", async () => {
     assert.equal(bg.classifyStream("https://cdn.example.com/v/CLIP.MP4?token=abc", ""), "media");
   });
 
-  test("segments, audio, images and junk classify as null", () => {
+  test("segments, audio, images and junk classify as null", async () => {
     assert.equal(bg.classifyStream("https://cdn.example.com/s/seg1.ts", "video/mp2t"), null);
     assert.equal(bg.classifyStream("https://cdn.example.com/s/seg1.m4s", "video/mp4"), null);
     assert.equal(bg.classifyStream("https://cdn.example.com/a/song.mp3", "audio/mpeg"), null);
@@ -206,11 +210,11 @@ describe("classifyStream", () => {
     assert.equal(bg.classifyStream("https://cdn.example.com/page", "text/html"), null);
   });
 
-  test("extensionless video content types are not guessed (DASH segments look like this)", () => {
+  test("extensionless video content types are not guessed (DASH segments look like this)", async () => {
     assert.equal(bg.classifyStream("https://cdn.example.com/s/seg", "video/mp4"), null);
   });
 
-  test("garbage URLs classify as null", () => {
+  test("garbage URLs classify as null", async () => {
     assert.equal(bg.classifyStream("not a url", ""), null);
     assert.equal(bg.classifyStream("", ""), null);
   });
@@ -218,11 +222,11 @@ describe("classifyStream", () => {
 
 describe("mergeVideoFinds", () => {
   let bg;
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
+  beforeEach(async () => {
+    bg = await loadBackground(makeChrome());
   });
 
-  test("direct sources come first, then sniffed manifests, deduped", () => {
+  test("direct sources come first, then sniffed manifests, deduped", async () => {
     const merged = bg.mergeVideoFinds(
       [{ src: "https://a.example/1.mp4", blob: false }],
       ["https://a.example/1.mp4", "https://a.example/s.m3u8"]
@@ -230,7 +234,7 @@ describe("mergeVideoFinds", () => {
     assert.deepEqual(merged, ["https://a.example/1.mp4", "https://a.example/s.m3u8"]);
   });
 
-  test("blob-only videos fall back to the sniffed manifests", () => {
+  test("blob-only videos fall back to the sniffed manifests", async () => {
     const merged = bg.mergeVideoFinds(
       [{ src: null, blob: true }],
       ["https://a.example/s.m3u8"]
@@ -238,7 +242,7 @@ describe("mergeVideoFinds", () => {
     assert.deepEqual(merged, ["https://a.example/s.m3u8"]);
   });
 
-  test("empty finds merge to empty", () => {
+  test("empty finds merge to empty", async () => {
     assert.deepEqual(bg.mergeVideoFinds([], []), []);
     assert.deepEqual(bg.mergeVideoFinds(null, null), []);
   });
@@ -246,7 +250,7 @@ describe("mergeVideoFinds", () => {
 
 describe("collectVideos (content script)", () => {
   let content;
-  beforeEach(() => {
+  beforeEach(async () => {
     content = loadContent();
   });
 
@@ -262,7 +266,7 @@ describe("collectVideos (content script)", () => {
     querySelectorAll: (sel) => (sel === "video" ? videos : []),
   });
 
-  test("collects direct http(s) sources", () => {
+  test("collects direct http(s) sources", async () => {
     const videos = content.collectVideos(
       fakeDoc([fakeVideo({ src: "https://cdn.example.com/v.mp4", w: 640, h: 360 })]),
       () => true
@@ -270,7 +274,7 @@ describe("collectVideos (content script)", () => {
     assert.deepEqual(videos, [{ src: "https://cdn.example.com/v.mp4", blob: false, height: 360 }]);
   });
 
-  test("prefers currentSrc and scans <source> children", () => {
+  test("prefers currentSrc and scans <source> children", async () => {
     const withSource = {
       ...fakeVideo({ w: 640, h: 360 }),
       currentSrc: "",
@@ -282,7 +286,7 @@ describe("collectVideos (content script)", () => {
     assert.deepEqual(videos, [{ src: "https://cdn.example.com/s.webm", blob: false, height: 360 }]);
   });
 
-  test("blob: sources are flagged, not collected", () => {
+  test("blob: sources are flagged, not collected", async () => {
     const videos = content.collectVideos(
       fakeDoc([fakeVideo({ src: "blob:https://example.com/uuid", w: 640, h: 360 })]),
       () => true
@@ -290,7 +294,7 @@ describe("collectVideos (content script)", () => {
     assert.deepEqual(videos, [{ src: null, blob: true, height: 360 }]);
   });
 
-  test("tiny players are ignored (ads, trackers)", () => {
+  test("tiny players are ignored (ads, trackers)", async () => {
     const videos = content.collectVideos(
       fakeDoc([fakeVideo({ src: "https://cdn.example.com/ad.mp4", w: 60, h: 40 })]),
       () => true
@@ -298,12 +302,12 @@ describe("collectVideos (content script)", () => {
     assert.deepEqual(videos, []);
   });
 
-  test("no videos gives an empty list", () => {
+  test("no videos gives an empty list", async () => {
     assert.deepEqual(content.collectVideos(fakeDoc([]), () => true), []);
     assert.deepEqual(content.collectVideos(null, () => true), []);
   });
 
-  test("unstarted videos are excluded by the played predicate", () => {
+  test("unstarted videos are excluded by the played predicate", async () => {
     const started = {
       ...fakeVideo({ src: "https://cdn.example.com/a.mp4", w: 640, h: 360 }),
       _started: true,
@@ -319,7 +323,7 @@ describe("collectVideos (content script)", () => {
     assert.deepEqual(videos, [{ src: "https://cdn.example.com/a.mp4", blob: false, height: 360 }]);
   });
 
-  test("a video with no decoded height yet reports none", () => {
+  test("a video with no decoded height yet reports none", async () => {
     const videos = content.collectVideos(
       fakeDoc([{ ...fakeVideo({ src: "https://cdn.example.com/n.mp4", w: 640, h: 360 }), videoHeight: 0 }]),
       () => true
@@ -330,7 +334,7 @@ describe("collectVideos (content script)", () => {
 
 describe("isStartedVideo (content script)", () => {
   let content;
-  beforeEach(() => {
+  beforeEach(async () => {
     content = loadContent();
   });
 
@@ -347,26 +351,26 @@ describe("isStartedVideo (content script)", () => {
     ...opts,
   });
 
-  test("latched videos count even when paused (pause to right-click)", () => {
+  test("latched videos count even when paused (pause to right-click)", async () => {
     const video = pv({ paused: true, currentTime: 42 });
     assert.equal(content.isStartedVideo(video, playedSet([video])), true);
   });
 
-  test("muted videos never count, latched or not", () => {
+  test("muted videos never count, latched or not", async () => {
     const latched = pv({ muted: true, paused: true, currentTime: 42 });
     assert.equal(content.isStartedVideo(latched, playedSet([latched])), false);
     const autoplaying = pv({ muted: true, paused: false, currentTime: 5 });
     assert.equal(content.isStartedVideo(autoplaying, playedSet([])), false);
   });
 
-  test("audibly playing videos count without a latch (autoplay)", () => {
+  test("audibly playing videos count without a latch (autoplay)", async () => {
     assert.equal(
       content.isStartedVideo(pv({ paused: false, currentTime: 5 }), playedSet([])),
       true
     );
   });
 
-  test("paused, ended, or unstarted videos do not count", () => {
+  test("paused, ended, or unstarted videos do not count", async () => {
     const empty = playedSet([]);
     assert.equal(content.isStartedVideo(pv({ paused: true, currentTime: 0 }), empty), false);
     assert.equal(
@@ -383,7 +387,7 @@ describe("detection wiring", () => {
 
   test("a sniffed manifest appears in the menu and badge once a video is played, and clicks hand off", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const L = chrome._listeners;
 
     await L["tabs.onActivated"]({ tabId: 5 });
@@ -429,7 +433,7 @@ describe("detection wiring", () => {
 
   test("a click resolves against the list the menu was built from (other window focused)", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const L = chrome._listeners;
     await L["tabs.onActivated"]({ tabId: 5 });
     L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://a.example.com/a.mp4", responseHeaders: [] });
@@ -459,7 +463,7 @@ describe("detection wiring", () => {
 
   test("a click after master-playlist filtering sends the master, not the hidden child", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     globalThis.fetch = async (url) => ({
       ok: true,
       text: async () =>
@@ -489,7 +493,7 @@ describe("detection wiring", () => {
 
   test("content-script reports reach the menu", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const L = chrome._listeners;
 
     await L["tabs.onActivated"]({ tabId: 7 });
@@ -514,7 +518,7 @@ describe("detection wiring", () => {
 
   test("reports from two frames merge instead of overwriting", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const L = chrome._listeners;
 
     await L["tabs.onActivated"]({ tabId: 11 });
@@ -549,7 +553,7 @@ describe("detection wiring", () => {
 
   test("a blob: video is paired with the tab's sniffed manifest", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const L = chrome._listeners;
 
     await L["tabs.onActivated"]({ tabId: 9 });
@@ -574,7 +578,7 @@ describe("detection wiring", () => {
 
   test("detection off stays silent", async () => {
     const chrome = makeChrome({ syncSettings: { detectVideos: false } });
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const L = chrome._listeners;
     await L["storage.onChanged"]({ detectVideos: { newValue: false } }, "sync");
 
@@ -605,7 +609,7 @@ describe("detection wiring", () => {
 
   test("navigation clears the tab's finds", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const L = chrome._listeners;
 
     await L["tabs.onActivated"]({ tabId: 5 });
@@ -634,7 +638,7 @@ describe("detection wiring", () => {
 });
 
 describe("manifest permission mirror", () => {
-  test("worker starts using only permitted chrome namespaces", () => {
+  test("worker starts using only permitted chrome namespaces", async () => {
     // Regression: 1.0.5 called chrome.webNavigation.onCommitted at the top
     // level without declaring the permission. In a real browser that namespace
     // is undefined, so the whole service worker died on startup — no context
@@ -669,15 +673,15 @@ describe("manifest permission mirror", () => {
         return Reflect.get(target, prop, receiver);
       },
     });
-    assert.doesNotThrow(() => loadBackground(guarded));
+    assert.doesNotThrow(async () => await loadBackground(guarded));
   });
 });
 
 describe("excluded hosts", () => {
   const tick = () => new Promise((r) => setTimeout(r, 30));
 
-  test("hostExcluded matches hosts and subdomains only", () => {
-    const bg = loadBackground(makeChrome());
+  test("hostExcluded matches hosts and subdomains only", async () => {
+    const bg = await loadBackground(makeChrome());
     for (const h of [
       "instagram.com",
       "www.tiktok.com",
@@ -710,8 +714,8 @@ describe("excluded hosts", () => {
     assert.equal(bg.hostExcluded(null), false);
   });
 
-  test("content script hostExcluded agrees with the worker's", () => {
-    const bg = loadBackground(makeChrome());
+  test("content script hostExcluded agrees with the worker's", async () => {
+    const bg = await loadBackground(makeChrome());
     const content = loadContent();
     assert.deepEqual(
       [...content.DETECT_EXCLUDED_HOSTS].sort(),
@@ -728,7 +732,7 @@ describe("excluded hosts", () => {
     // The tab lives on TikTok: direct sources and sniffed manifests exist,
     // but nothing may be shown.
     chrome.tabs.get = async (id) => ({ id, url: "https://www.tiktok.com/@u/video/1" });
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const L = chrome._listeners;
 
     await L["tabs.onActivated"]({ tabId: 7 });
@@ -753,7 +757,7 @@ describe("excluded hosts", () => {
 
   test("non-excluded hosts still get the menu", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const L = chrome._listeners;
 
     await L["tabs.onActivated"]({ tabId: 9 });
@@ -780,7 +784,7 @@ describe("excluded hosts", () => {
     // onActivated fired), but the tab is live. The old code dropped the
     // report and the menu never appeared until the next tab switch.
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const L = chrome._listeners;
     chrome.tabs.query = (q, cb) => cb([{ id: 5 }]);
 
@@ -801,7 +805,7 @@ describe("excluded hosts", () => {
 
   test("a report from a background tab stays silent with a stale cache", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const L = chrome._listeners;
     chrome.tabs.query = (q, cb) => cb([{ id: 9 }]);
 
@@ -833,8 +837,8 @@ describe("preferMasterPlaylists", () => {
   const MASTER_BODY = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nindex-v1.m3u8\n";
   const MEDIA_BODY = "#EXTM3U\n#EXT-X-TARGETDURATION=6\n#EXTINF:6.0,\nseg1.ts\n";
 
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
+  beforeEach(async () => {
+    bg = await loadBackground(makeChrome());
     // Mock fetch: master for MASTER, media playlist for the rest.
     globalThis.fetch = async (url) => ({
       ok: true,
@@ -860,14 +864,14 @@ describe("preferMasterPlaylists", () => {
   test("returns everything when no master is confirmed", async () => {
     globalThis.fetch = async () => ({ ok: true, text: async () => MEDIA_BODY });
     // Fresh module so the cache from beforeEach doesn't leak.
-    bg = loadBackground(makeChrome());
+    bg = await loadBackground(makeChrome());
     const out = await bg.preferMasterPlaylists([VIDEO_PL, AUDIO_PL]);
     assert.deepEqual(out, [VIDEO_PL, AUDIO_PL]);
   });
 
   test("returns everything when the fetch fails", async () => {
     globalThis.fetch = async () => { throw new Error("denied"); };
-    bg = loadBackground(makeChrome());
+    bg = await loadBackground(makeChrome());
     const out = await bg.preferMasterPlaylists([MASTER, VIDEO_PL]);
     assert.deepEqual(out, [MASTER, VIDEO_PL]);
   });
@@ -878,7 +882,7 @@ describe("preferMasterPlaylists", () => {
       calls++;
       return { ok: true, text: async () => MASTER_BODY };
     };
-    bg = loadBackground(makeChrome());
+    bg = await loadBackground(makeChrome());
     assert.equal(await bg.isMasterPlaylist(MASTER), true);
     assert.equal(await bg.isMasterPlaylist(MASTER), true);
     assert.equal(calls, 1, "second call served from cache");
@@ -891,7 +895,7 @@ describe("preferMasterPlaylists", () => {
       ok: true,
       text: async () => (String(url).includes("master.m3u8") ? body : MEDIA_BODY),
     });
-    bg = loadBackground(makeChrome());
+    bg = await loadBackground(makeChrome());
     const CROSS_DIR = "https://cdn.example.com/videos/v1.m3u8";
     const out = await bg.preferMasterPlaylists([MASTER, CROSS_DIR]);
     assert.deepEqual(out, [MASTER]);
@@ -906,7 +910,7 @@ describe("preferMasterPlaylists", () => {
       ok: true,
       text: async () => (String(url).includes("master.m3u8") ? body : MEDIA_BODY),
     });
-    bg = loadBackground(makeChrome());
+    bg = await loadBackground(makeChrome());
     const ROTATED = "https://cdn.example.com/videos/v1.m3u8?session=BBB";
     const out = await bg.preferMasterPlaylists([MASTER, ROTATED]);
     assert.deepEqual(out, [MASTER]);
@@ -924,7 +928,7 @@ describe("preferMasterPlaylists", () => {
       ok: true,
       text: async () => (String(url).includes("master.m3u8") ? body : MEDIA_BODY),
     });
-    bg = loadBackground(makeChrome());
+    bg = await loadBackground(makeChrome());
     const CROSS_DIR = "https://cdn.example.com/videos/v1.m3u8";
     const out = await bg.preferMasterPlaylists([MASTER, CROSS_DIR]);
     assert.deepEqual(out, [MASTER]);
@@ -941,7 +945,7 @@ describe("preferMasterPlaylists", () => {
       ok: true,
       text: async () => (String(url).includes("master.m3u8") ? body : MEDIA_BODY),
     });
-    bg = loadBackground(makeChrome());
+    bg = await loadBackground(makeChrome());
     const AUDIO_PL = "https://cdn.example.com/audio/en.m3u8";
     const out = await bg.preferMasterPlaylists([MASTER, VIDEO_PL, AUDIO_PL]);
     assert.deepEqual(out, [MASTER]);
@@ -958,7 +962,7 @@ describe("preferMasterPlaylists", () => {
       if (String(url).includes("llhls.m3u8?token=")) throw new Error("403");
       return { ok: true, text: async () => MEDIA_BODY };
     };
-    bg = loadBackground(makeChrome());
+    bg = await loadBackground(makeChrome());
     const out = await bg.preferMasterPlaylists([UNFETCHABLE, ...chunks]);
     assert.deepEqual(out, [UNFETCHABLE]);
   });
@@ -973,7 +977,7 @@ describe("preferMasterPlaylists", () => {
       if (String(url).endsWith("/a.m3u8")) throw new Error("403");
       return { ok: true, text: async () => MEDIA_BODY };
     };
-    bg = loadBackground(makeChrome());
+    bg = await loadBackground(makeChrome());
     const out = await bg.preferMasterPlaylists([WORKING, DEAD]);
     assert.deepEqual(out, [WORKING, DEAD]);
   });
@@ -982,11 +986,11 @@ describe("preferMasterPlaylists", () => {
 
 describe("pageVideoTitle", () => {
   let content;
-  beforeEach(() => {
+  beforeEach(async () => {
     content = loadContent();
   });
 
-  test("reads og:title", () => {
+  test("reads og:title", async () => {
     const doc = {
       querySelector: (sel) =>
         sel === 'meta[property="og:title"]' ? { content: "  My Video  " } : null,
@@ -994,12 +998,12 @@ describe("pageVideoTitle", () => {
     assert.equal(content.pageVideoTitle(doc), "My Video");
   });
 
-  test("empty when no og:title", () => {
+  test("empty when no og:title", async () => {
     const doc = { querySelector: () => null };
     assert.equal(content.pageVideoTitle(doc), "");
   });
 
-  test("empty on missing document", () => {
+  test("empty on missing document", async () => {
     assert.equal(content.pageVideoTitle(null), "");
   });
 });
@@ -1008,11 +1012,11 @@ describe("parseHlsVariants", () => {
   let bg;
   const BASE = "https://cdn.example.com/hls/master.m3u8";
 
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
+  beforeEach(async () => {
+    bg = await loadBackground(makeChrome());
   });
 
-  test("extracts resolution and bandwidth per variant", () => {
+  test("extracts resolution and bandwidth per variant", async () => {
     const body = [
       "#EXTM3U",
       '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360',
@@ -1030,7 +1034,7 @@ describe("parseHlsVariants", () => {
     assert.equal(out[2].height, 1080);
   });
 
-  test("handles missing resolution gracefully", () => {
+  test("handles missing resolution gracefully", async () => {
     const body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nindex-v1.m3u8\n";
     const out = bg.parseHlsVariants(body, BASE);
     assert.equal(out.length, 1);
@@ -1038,12 +1042,12 @@ describe("parseHlsVariants", () => {
     assert.equal(out[0].bandwidth, 800000);
   });
 
-  test("returns empty for media playlists", () => {
+  test("returns empty for media playlists", async () => {
     const body = "#EXTM3U\n#EXT-X-TARGETDURATION=6\n#EXTINF:6.0,\nseg1.ts\n";
     assert.deepEqual(bg.parseHlsVariants(body, BASE), []);
   });
 
-  test("resolves relative URIs against the master", () => {
+  test("resolves relative URIs against the master", async () => {
     const body = "#EXTM3U\n#EXT-X-STREAM-INF:RESOLUTION=1280x720\n../other/v.m3u8\n";
     const out = bg.parseHlsVariants(body, BASE);
     assert.equal(out[0].url, "https://cdn.example.com/other/v.m3u8");
@@ -1053,16 +1057,16 @@ describe("parseHlsVariants", () => {
 describe("variantMenuTitle", () => {
   let bg;
 
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
+  beforeEach(async () => {
+    bg = await loadBackground(makeChrome());
   });
 
-  test("shows height as 720p-style label", () => {
+  test("shows height as 720p-style label", async () => {
     assert.equal(bg.variantMenuTitle({ url: "https://x/y.m3u8", height: 720 }, 0), "720p");
     assert.equal(bg.variantMenuTitle({ url: "https://x/y.m3u8", height: 1080 }, 0), "1080p");
   });
 
-  test("combines height, bitrate and fps", () => {
+  test("combines height, bitrate and fps", async () => {
     assert.equal(
       bg.variantMenuTitle(
         { url: "https://x/y.m3u8", height: 1080, bandwidth: 8000000, fps: 60 },
@@ -1072,7 +1076,7 @@ describe("variantMenuTitle", () => {
     );
   });
 
-  test("falls back to bandwidth when height is absent", () => {
+  test("falls back to bandwidth when height is absent", async () => {
     assert.equal(
       bg.variantMenuTitle({ url: "https://x/y.m3u8", height: null, bandwidth: 2500000 }, 0),
       "2.50 Mbps"
@@ -1084,11 +1088,11 @@ describe("HLS variant parsing", () => {
   let bg;
   const MASTER = "https://cdn.example.com/hls/master.m3u8";
 
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
+  beforeEach(async () => {
+    bg = await loadBackground(makeChrome());
   });
 
-  test("parseHlsVariants captures the audio group", () => {
+  test("parseHlsVariants captures the audio group", async () => {
     const body = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=640x360,AUDIO="a1"\nv.m3u8\n';
     const out = bg.parseHlsVariants(body, MASTER);
     assert.equal(out[0].audioGroup, "a1");
@@ -1104,7 +1108,7 @@ describe("collection-time exclusion", () => {
     const chrome = makeChrome();
     // Mock tabs.get to return a YouTube URL.
     chrome.tabs.get = async (id) => ({ id, url: "https://www.youtube.com/watch?v=x" });
-    const bg = loadBackground(chrome);
+    const bg = await loadBackground(chrome);
     const L = chrome._listeners;
     await L["tabs.onActivated"]({ tabId: 5 });
     // Sniff a manifest on the YouTube tab.
@@ -1123,7 +1127,7 @@ describe("collection-time exclusion", () => {
 
   test("content-script reports are dropped on excluded hosts", async () => {
     const chrome = makeChrome();
-    const bg = loadBackground(chrome);
+    const bg = await loadBackground(chrome);
     const L = chrome._listeners;
     await L["tabs.onActivated"]({ tabId: 5 });
     // Simulate a content-script message from a YouTube tab.
@@ -1141,27 +1145,27 @@ describe("collection-time exclusion", () => {
 
 describe("videoName", () => {
   let bg;
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
+  beforeEach(async () => {
+    bg = await loadBackground(makeChrome());
   });
 
-  test("a direct file is named by its file name, whatever the page title", () => {
+  test("a direct file is named by its file name, whatever the page title", async () => {
     assert.equal(bg.videoName("https://cdn.example.com/v/clip.mp4?t=1", 0, "Some Page Title", null), "clip.mp4");
     assert.equal(bg.videoName("https://cdn.example.com/v/clip.mp4", 0, "", null), "clip.mp4");
   });
 
-  test("decodes escapes and survives a malformed one", () => {
+  test("decodes escapes and survives a malformed one", async () => {
     assert.equal(bg.videoName("https://cdn.example.com/v/my%20clip.mp4", 0, "", null), "my clip.mp4");
     assert.equal(bg.videoName("https://cdn.example.com/v/bad%E0%A4%A.mp4", 0, "", null), "bad%E0%A4%A.mp4");
   });
 
-  test("truncates long names with an ellipsis", () => {
+  test("truncates long names with an ellipsis", async () => {
     const name = bg.videoName(`https://cdn.example.com/v/${"a".repeat(60)}.mp4`, 0, "", null);
     assert.ok(name.length <= 41);
     assert.ok(name.endsWith("…"));
   });
 
-  test("a stream is named by the whole page video title", () => {
+  test("a stream is named by the whole page video title", async () => {
     assert.equal(
       bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, "  Example   Video Title ", "hls"),
       "Example Video Title"
@@ -1172,16 +1176,16 @@ describe("videoName", () => {
     );
   });
 
-  test("a stream without a title falls back to its file name", () => {
+  test("a stream without a title falls back to its file name", async () => {
     assert.equal(bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, "", "hls"), "master.m3u8");
   });
 
-  test("Video N is the last resort", () => {
+  test("Video N is the last resort", async () => {
     assert.equal(bg.videoName("https://cdn.example.com/", 2, "", null), "Video 3");
     assert.equal(bg.videoName("not a url", 0, "", null), "Video 1");
   });
 
-  test("menuRowTitle joins name and quality and escapes %", () => {
+  test("menuRowTitle joins name and quality and escapes %", async () => {
     assert.equal(bg.menuRowTitle("clip.mp4", "1080p"), "clip.mp4 • 1080p");
     assert.equal(bg.menuRowTitle("clip.mp4", ""), "clip.mp4");
     assert.equal(bg.menuRowTitle("100%s", ""), "100%%s");
@@ -1202,8 +1206,8 @@ describe("menu rows", () => {
     }
   };
 
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
+  beforeEach(async () => {
+    bg = await loadBackground(makeChrome());
   });
 
   test("muxed HLS renditions hand their own URL, best first", async () => {
@@ -1281,7 +1285,7 @@ describe("menu rows", () => {
       await withFetch("#EXTM3U\n#EXT-X-TARGETDURATION=6\n", () => bg.hlsMenuRows(MASTER)),
       plain
     );
-    bg = loadBackground(makeChrome());
+    bg = await loadBackground(makeChrome());
     assert.deepEqual(await withFetch(null, () => bg.hlsMenuRows(MASTER)), plain);
   });
 
@@ -1302,7 +1306,7 @@ describe("menu rows", () => {
   </AdaptationSet>
 </Period></MPD>`;
 
-  test("parseDashRepresentations keeps video only, best first, deduplicated", () => {
+  test("parseDashRepresentations keeps video only, best first, deduplicated", async () => {
     assert.deepEqual(bg.parseDashRepresentations(MPD), [
       { height: 1080, bandwidth: 5000000, fps: 29.97 },
       { height: 360, bandwidth: 800000, fps: 29.97 },
@@ -1315,11 +1319,11 @@ describe("menu rows", () => {
     assert.deepEqual(await withFetch(MPD, () => bg.dashMenuRows(url)), [
       { quality: "1080p / 360p • pick in Grab", url },
     ]);
-    bg = loadBackground(makeChrome());
+    bg = await loadBackground(makeChrome());
     assert.deepEqual(await withFetch(null, () => bg.dashMenuRows(url)), [{ quality: "", url }]);
   });
 
-  test("direct files carry the reported height", () => {
+  test("direct files carry the reported height", async () => {
     assert.deepEqual(bg.directMenuRow("https://c.example.com/clip.mp4", 1080), {
       quality: "1080p",
       url: "https://c.example.com/clip.mp4",
@@ -1346,7 +1350,7 @@ describe("menu rows", () => {
     );
   });
 
-  test("uniqueLabels numbers repeats only", () => {
+  test("uniqueLabels numbers repeats only", async () => {
     assert.deepEqual(bg.uniqueLabels(["Show", "Clip", "Show", "Show"]), [
       "Show",
       "Clip",
@@ -1388,7 +1392,7 @@ describe("context menu: one flat submenu, one click to Grab", () => {
         created.set(props.id, props);
         return orig(props);
       };
-      loadBackground(chrome);
+      await loadBackground(chrome);
       const L = chrome._listeners;
       await L["tabs.onActivated"]({ tabId: 3 });
       L["runtime.onMessage"](
