@@ -773,6 +773,8 @@ function doRefreshVideoMenu(tabId) {
   const rebuild = async () => {
     // Re-read: the finds may have changed while the remove was in flight.
     let urls = tabId === activeTabId ? mergedVideoUrls(tabId) : [];
+    // Backstop: collection already filters excluded hosts, but a tab may
+    // have navigated there after its videos were recorded.
     if (urls.length > 0 && (await isExcludedTab(tabId))) urls = [];
     // Prefer master playlists: hides child media playlists whose direct
     // download would miss the audio track.
@@ -897,9 +899,13 @@ function onVideoEvent(tabId) {
 }
 
 chrome.webRequest.onResponseStarted.addListener(
-  (details) => {
+  async (details) => {
     if (!detectVideosOn) return;
     if (details.tabId == null || details.tabId < 0) return;
+    // Skip yt-dlp-exclusive hosts at collection time: their players use
+    // auth-gated URLs, so sniffed manifests are unusable noise. Filtering
+    // here (not just at menu-build) keeps videoFinds clean.
+    if (await isExcludedTab(details.tabId)) return;
     const kind = classifyStream(
       details.url,
       sniffedHeader(details.responseHeaders, "content-type"),
@@ -912,11 +918,17 @@ chrome.webRequest.onResponseStarted.addListener(
   ["responseHeaders"],
 );
 
-chrome.runtime.onMessage.addListener((msg, sender) => {
+chrome.runtime.onMessage.addListener(async (msg, sender) => {
   if (!msg || msg.type !== "grab-videos-detected") return;
   if (!detectVideosOn) return;
   const tabId = sender && sender.tab && sender.tab.id;
   if (tabId == null || tabId < 0) return;
+  // Same collection-time filter: sender.tab.url is available synchronously.
+  try {
+    if (sender.tab.url && hostExcluded(new URL(sender.tab.url).hostname)) return;
+  } catch {
+    // Unparseable URL: fall through and let the menu-build check decide.
+  }
   const frameId = sender && sender.frameId != null ? sender.frameId : 0;
   let f = videoFinds.get(tabId);
   if (!f) {
@@ -997,5 +1009,7 @@ if (typeof module !== "undefined" && module.exports) {
     DEFAULTS,
     SIZE_WAIT_MS,
     GRAB_SCHEME,
+    // Test hook: inspect per-tab detections.
+    _videoFinds: videoFinds,
   };
 }
