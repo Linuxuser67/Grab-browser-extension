@@ -795,6 +795,52 @@ describe("excluded hosts", () => {
       "menu shown on ordinary hosts"
     );
   });
+
+  test("a report with a stale active-tab cache still builds the menu", async () => {
+    // Simulates a worker restart: the in-memory activeTabId is gone (no
+    // onActivated fired), but the tab is live. The old code dropped the
+    // report and the menu never appeared until the next tab switch.
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    const L = chrome._listeners;
+    chrome.tabs.query = (q, cb) => cb([{ id: 5 }]);
+
+    L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }],
+      },
+      { tab: { id: 5 } }
+    );
+    await tick();
+    await tick();
+    assert.ok(
+      chrome._calls.some(([n, id]) => n === "menus.create" && id === "grabVideo:0"),
+      "menu built after live verification, no tab switch needed"
+    );
+  });
+
+  test("a report from a background tab stays silent with a stale cache", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    const L = chrome._listeners;
+    chrome.tabs.query = (q, cb) => cb([{ id: 9 }]);
+
+    L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }],
+      },
+      { tab: { id: 5 } }
+    );
+    await tick();
+    await tick();
+    assert.equal(
+      chrome._calls.some(([n, id]) => n === "menus.create" && String(id).startsWith("grabVideo")),
+      false,
+      "no menu for a tab that is not live-active"
+    );
+  });
 });
 
 describe("preferMasterPlaylists", () => {
