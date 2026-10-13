@@ -424,9 +424,13 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     // user picked this tab), not the background-tab interception channel.
     // Resolve against the list the menu was built from: it was filtered
     // (master playlists) and may belong to another window's tab.
-    // Parent items (master playlists) resolve via parentUrls; children via
-    // menuUrls.
-    const url = parentUrls.get(id) || menuUrls[Number(id.slice(VIDEO_ITEM_PREFIX.length))];
+    // Parent items encode their menuUrls index: grabVideo:parent-<idx>.
+    // Children use grabVideo:<idx> directly.
+    const suffix = id.slice(VIDEO_ITEM_PREFIX.length);
+    const idx = suffix.startsWith("parent-")
+      ? Number(suffix.slice("parent-".length))
+      : Number(suffix);
+    const url = menuUrls[idx];
     if (url) sendToGrab(url, tab && tab.id);
     return;
   }
@@ -865,9 +869,6 @@ let activeTabId = null;
 /// The URLs behind the submenu items as last built (after filtering): a
 /// click index resolves here, never against a fresh, differently-ordered list.
 let menuUrls = [];
-/// Parent menu item ids -> master playlist URL: clicking a parent sends the
-/// master (its id doesn't parse to a menuUrls index).
-let parentUrls = new Map();
 let detectVideosOn = DEFAULTS.detectVideos;
 
 getSettings().then((s) => {
@@ -993,34 +994,32 @@ function doRefreshVideoMenu(tabId) {
           continue;
         }
       }
-      // Single entry (no quality submenu): for masters, show the best
-      // variant's quality in the label using media-bridge's format.
-      let singleLabel;
-      if (MANIFEST_RE.test(u)) {
-        const allVariants = await fetchAllVariants(u);
-        if (allVariants && allVariants.length > 0) {
-          const best = [...allVariants].sort((a, b) => (b.height || 0) - (a.height || 0))[0];
-          const pageTitle = videoFinds.get(tabId)?.title;
-          singleLabel = qualityMenuLabel(pageTitle, best, 0);
-        }
-      }
-      if (!singleLabel) {
-        singleLabel = videoMenuTitle(
+      items.push({
+        url: u,
+        label: videoMenuTitle(
           u,
           items.length,
           videoFinds.get(tabId)?.title,
           urls.length,
-        );
-      }
-      items.push({
-        url: u,
-        label: singleLabel,
+        ),
         parent: null,
       });
     }
     menuUrls = items.map((it) => it.url);
-    parentUrls = new Map();
     if (items.length === 0) return;
+    // Parents encode their master URL's menuUrls index: the master isn't in
+    // items (only variants are), so append it and rewrite the parent ID.
+    const parentToMasterIdx = new Map();
+    for (const it of items) {
+      if (it.parent && it.masterUrl && !parentToMasterIdx.has(it.parentId)) {
+        parentToMasterIdx.set(it.parentId, menuUrls.push(it.masterUrl) - 1);
+      }
+    }
+    for (const it of items) {
+      if (it.parent && parentToMasterIdx.has(it.parentId)) {
+        it.parentId = `${VIDEO_ITEM_PREFIX}parent-${parentToMasterIdx.get(it.parentId)}`;
+      }
+    }
     safeMenuCreate({
       id: VIDEO_PARENT_ID,
       title: "Videos detected by Grab",
@@ -1028,13 +1027,6 @@ function doRefreshVideoMenu(tabId) {
     });
     // Group variant children under their parent label.
     let lastParentId = null;
-    const parentMasterUrls = new Map();
-    // Collect parent -> master URL from the items.
-    for (const it of items) {
-      if (it.parent && it.masterUrl) {
-        parentMasterUrls.set(it.parentId, it.masterUrl);
-      }
-    }
     items.forEach((it, i) => {
       if (it.parent) {
         if (it.parentId !== lastParentId) {
@@ -1045,8 +1037,6 @@ function doRefreshVideoMenu(tabId) {
             contexts: ["page", "video", "link"],
           });
           lastParentId = it.parentId;
-          const masterUrl = parentMasterUrls.get(it.parentId);
-          if (masterUrl) parentUrls.set(it.parentId, masterUrl);
         }
         safeMenuCreate({
           id: `${VIDEO_ITEM_PREFIX}${i}`,
