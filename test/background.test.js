@@ -124,8 +124,8 @@ function makeChrome(shared) {
 }
 
 /// Load a fresh copy of background.js against the given chrome mock.
-function loadBackground(chrome) {
-  delete require.cache[require.resolve(BG_PATH)];
+let bgLoadCount = 0;
+async function loadBackground(chrome) {
   globalThis.chrome = chrome;
   // Default: a Grab that accepts every handoff and records the URL it got.
   // Tests must not depend on a real Grab listening on 127.0.0.1:9412; the HTTP
@@ -134,46 +134,50 @@ function loadBackground(chrome) {
     chrome._calls.push(["handoff", JSON.parse(opts.body).url]);
     return { status: 200, ok: true };
   };
-  return require(BG_PATH);
+  // Cache-bust for fresh background.js state per test; sub-modules
+  // are shared so reset their state explicitly.
+  const bg = await import(BG_PATH + `?t=${++bgLoadCount}`);
+  bg.__resetForTests();
+  return bg;
 }
 
 const MiB = 1024 * 1024;
 
 describe("toGrabUrl", () => {
   let bg;
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
+  beforeEach(async () => {
+    bg = await loadBackground(makeChrome());
   });
 
-  test("preserves the https scheme", () => {
+  test("preserves the https scheme", async () => {
     assert.equal(
       bg.toGrabUrl("https://example.com/file.zip"),
       "grab://https/example.com/file.zip"
     );
   });
 
-  test("preserves the http scheme instead of upgrading it", () => {
+  test("preserves the http scheme instead of upgrading it", async () => {
     assert.equal(
       bg.toGrabUrl("http://example.com/file.zip"),
       "grab://http/example.com/file.zip"
     );
   });
 
-  test("lowercases an uppercase scheme marker", () => {
+  test("lowercases an uppercase scheme marker", async () => {
     assert.equal(
       bg.toGrabUrl("HTTPS://example.com/A.zip"),
       "grab://https/example.com/A.zip"
     );
   });
 
-  test("keeps query and fragment", () => {
+  test("keeps query and fragment", async () => {
     assert.equal(
       bg.toGrabUrl("https://example.com/f.zip?x=1#frag"),
       "grab://https/example.com/f.zip?x=1#frag"
     );
   });
 
-  test("rejects non-http(s) URLs", () => {
+  test("rejects non-http(s) URLs", async () => {
     for (const url of [
       "blob:https://example.com/uuid",
       "data:text/plain,hi",
@@ -184,7 +188,7 @@ describe("toGrabUrl", () => {
     }
   });
 
-  test("rejects non-strings and bare schemes", () => {
+  test("rejects non-strings and bare schemes", async () => {
     assert.equal(bg.toGrabUrl(null), null);
     assert.equal(bg.toGrabUrl(undefined), null);
     assert.equal(bg.toGrabUrl("https://"), null);
@@ -193,24 +197,24 @@ describe("toGrabUrl", () => {
 
 describe("isSkipped", () => {
   let bg;
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
+  beforeEach(async () => {
+    bg = await loadBackground(makeChrome());
   });
 
-  test("matches extensions case-insensitively", () => {
+  test("matches extensions case-insensitively", async () => {
     assert.equal(bg.isSkipped("https://example.com/a.ZIP", "zip"), true);
     assert.equal(bg.isSkipped("https://example.com/a.zip", "ZIP"), true);
   });
 
-  test("tolerates dots and whitespace in the list", () => {
+  test("tolerates dots and whitespace in the list", async () => {
     assert.equal(bg.isSkipped("https://example.com/a.rar", " .zip, rar "), true);
   });
 
-  test("does not match other extensions", () => {
+  test("does not match other extensions", async () => {
     assert.equal(bg.isSkipped("https://example.com/a.iso", "zip, rar"), false);
   });
 
-  test("empty list skips nothing; bad URLs are not skipped", () => {
+  test("empty list skips nothing; bad URLs are not skipped", async () => {
     assert.equal(bg.isSkipped("https://example.com/a.zip", ""), false);
     assert.equal(bg.isSkipped("not a url", "zip"), false);
   });
@@ -218,11 +222,11 @@ describe("isSkipped", () => {
 
 describe("minSizeBytes", () => {
   let bg;
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
+  beforeEach(async () => {
+    bg = await loadBackground(makeChrome());
   });
 
-  test("converts MiB to bytes, floors negatives and missing values at 0", () => {
+  test("converts MiB to bytes, floors negatives and missing values at 0", async () => {
     assert.equal(bg.minSizeBytes({ minSizeMB: 0 }), 0);
     assert.equal(bg.minSizeBytes({ minSizeMB: 5 }), 5 * MiB);
     assert.equal(bg.minSizeBytes({ minSizeMB: -3 }), 0);
@@ -241,12 +245,12 @@ describe("size-wait interception", () => {
     fileSize: -1,
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     const shared = {
       syncSettings: { interceptDownloads: true, minSizeMB: 100, skipTypes: "" },
     };
     chrome = makeChrome(shared);
-    bg = loadBackground(chrome);
+    bg = await loadBackground(chrome);
     listeners = chrome._listeners;
   });
 
@@ -329,7 +333,7 @@ describe("size-wait interception", () => {
     };
     shared.downloads.set(7, { ...bigItem(7), fileSize: 200 * MiB });
     const chromeB = makeChrome(shared);
-    loadBackground(chromeB);
+    await loadBackground(chromeB);
 
     await chromeB._listeners["downloads.onChanged"]({
       id: 7,
@@ -361,7 +365,7 @@ describe("master interception toggle", () => {
     const chrome = makeChrome({
       syncSettings: { interceptDownloads: false },
     });
-    const bg = loadBackground(chrome);
+    const bg = await loadBackground(chrome);
     void bg;
     await chrome._listeners["downloads.onCreated"](item(9));
     assert.equal(intercepted(chrome, 9), false);
@@ -372,7 +376,7 @@ describe("master interception toggle", () => {
     const chrome = makeChrome({
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
-    const bg = loadBackground(chrome);
+    const bg = await loadBackground(chrome);
     void bg;
     // Simulate a browser restart: startup time moves to now.
     chrome._listeners["runtime.onStartup"]();
@@ -389,7 +393,7 @@ describe("master interception toggle", () => {
     const chrome = makeChrome({
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
-    const bg = loadBackground(chrome);
+    const bg = await loadBackground(chrome);
     void bg;
     const newItem = {
       ...item(9),
@@ -406,7 +410,7 @@ describe("master interception toggle", () => {
       syncSettings: { interceptDownloads: true, minSizeMB: 100, skipTypes: "" },
     };
     const chrome = makeChrome(shared);
-    const bg = loadBackground(chrome);
+    const bg = await loadBackground(chrome);
 
     chrome._downloads.set(9, { ...item(9), fileSize: -1, state: "in_progress" });
     await chrome._listeners["downloads.onCreated"]({ ...item(9), fileSize: -1 });
@@ -427,7 +431,7 @@ describe("master interception toggle", () => {
 describe("context menu toggle", () => {
   test("rapid toggles stay idempotent (removeAll before create)", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const onChanged = chrome._listeners["storage.onChanged"];
     await onChanged({ showContextMenu: { newValue: false } }, "sync");
     await onChanged({ showContextMenu: { newValue: true } }, "sync");
@@ -450,7 +454,7 @@ describe("handoff tab separation (review fix 1)", () => {
     const chrome = makeChrome({
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
-    loadBackground(chrome);
+    await loadBackground(chrome);
     await chrome._listeners["downloads.onCreated"]({
       id: 31,
       url: "https://example.com/big.iso",
@@ -468,7 +472,7 @@ describe("handoff tab separation (review fix 1)", () => {
 
   test("explicit context-menu send still navigates the active tab", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     chrome._listeners["menus.onClicked"](
       { menuItemId: "sendToGrab", linkUrl: "https://example.com/f.zip" },
       null
@@ -486,7 +490,7 @@ describe("handoff tab separation (review fix 1)", () => {
 
   test("a blob: media URL falls back to the page URL for extraction", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     chrome._listeners["menus.onClicked"](
       {
         menuItemId: "sendToGrab",
@@ -505,7 +509,7 @@ describe("handoff tab separation (review fix 1)", () => {
 
   test("a usable media URL is still preferred over the page URL", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     chrome._listeners["menus.onClicked"](
       {
         menuItemId: "sendToGrab",
@@ -523,7 +527,7 @@ describe("handoff tab separation (review fix 1)", () => {
 
   test("a magnet link passes through unwrapped", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     chrome._listeners["menus.onClicked"](
       {
         menuItemId: "sendToGrab",
@@ -555,7 +559,7 @@ describe("size-wait deadline design (review fixes 2 and 3)", () => {
 
   test("parkForSize stores the deadline the alarm wakes for", async () => {
     const chrome = makeChrome();
-    const bg = loadBackground(chrome);
+    const bg = await loadBackground(chrome);
     const before = Date.now();
     await bg.parkForSize({ id: 21, url: "https://example.com/x" });
     const deadline = chrome._session.get("pendingSize:21");
@@ -566,7 +570,7 @@ describe("size-wait deadline design (review fixes 2 and 3)", () => {
 
   test("a download finishing during parkForSize is left alone", async () => {
     const chrome = makeChrome(settings());
-    loadBackground(chrome);
+    await loadBackground(chrome);
     chrome._downloads.set(11, item(11));
     // Race: the download completes while the pending state is being written.
     const origSet = chrome.storage.session.set;
@@ -588,7 +592,7 @@ describe("size-wait deadline design (review fixes 2 and 3)", () => {
 
   test("the alarm does not intercept an already-completed download", async () => {
     const chrome = makeChrome(settings());
-    const bg = loadBackground(chrome);
+    const bg = await loadBackground(chrome);
     chrome._downloads.set(12, item(12));
     await chrome._listeners["downloads.onCreated"](item(12));
     assert.equal(chrome._session.has("pendingSize:12"), true);
@@ -614,7 +618,7 @@ describe("size-wait deadline design (review fixes 2 and 3)", () => {
 
   test("an early decidePending re-parks instead of intercepting", async () => {
     const chrome = makeChrome(settings());
-    const bg = loadBackground(chrome);
+    const bg = await loadBackground(chrome);
     chrome._downloads.set(13, item(13));
     await chrome._listeners["downloads.onCreated"](item(13));
     // A stray call before the deadline with the size still unknown must not
@@ -627,7 +631,7 @@ describe("size-wait deadline design (review fixes 2 and 3)", () => {
 
   test("concurrent decidePending calls hand off only once (review finding)", async () => {
     const chrome = makeChrome(settings());
-    const bg = loadBackground(chrome);
+    const bg = await loadBackground(chrome);
     chrome._downloads.set(14, item(14));
     // Deadline already past, so decidePending intercepts instead of re-parking.
     chrome._session.set("pendingSize:14", Date.now() - 1000);
@@ -643,7 +647,7 @@ describe("size-wait deadline design (review fixes 2 and 3)", () => {
 describe("toolbar opens the popup", () => {
   test("no onClicked handler: the manifest popup hosts settings now", async () => {
     const chrome = makeChrome();
-    loadBackground(chrome);
+    await loadBackground(chrome);
     // With default_popup set, action.onClicked never fires; the popup UI
     // (popup.html) owns the settings. There must be no grab: navigation
     // from a toolbar click path.
@@ -699,11 +703,11 @@ describe("HTTP handoff to Grab", () => {
   }
   const pair = () => chrome.storage.local.set({ pairingCode: SECRET });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     chrome = makeChrome({
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
-    bg = loadBackground(chrome);
+    bg = await loadBackground(chrome);
   });
 
   test("POSTs the URL as JSON and opens no tab on success", async () => {
@@ -942,8 +946,8 @@ describe("HTTP handoff to Grab", () => {
 
 describe("worker fetch hardening", () => {
   let bg;
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
+  beforeEach(async () => {
+    bg = await loadBackground(makeChrome());
   });
 
   const refused = [
@@ -964,7 +968,7 @@ describe("worker fetch hardening", () => {
     "not a url",
   ];
   for (const url of refused) {
-    test(`refuses ${url}`, () => assert.equal(bg.isFetchAllowed(url), false));
+    test(`refuses ${url}`, async () => assert.equal(bg.isFetchAllowed(url), false));
   }
 
   for (const url of [
@@ -974,7 +978,7 @@ describe("worker fetch hardening", () => {
     "http://10.0.0.5/a.m3u8",
     "https://[2606:4700::1111]/a.m3u8",
   ]) {
-    test(`allows ${url}`, () => assert.equal(bg.isFetchAllowed(url), true));
+    test(`allows ${url}`, async () => assert.equal(bg.isFetchAllowed(url), true));
   }
 
   test("fetchText never issues a request for a refused host", async () => {
@@ -1006,7 +1010,7 @@ describe("interception across worker restarts and fast downloads", () => {
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     };
     const first = makeChrome(shared);
-    loadBackground(first);
+    await loadBackground(first);
     first._listeners["runtime.onStartup"]();
     await wait(5);
     const startTime = new Date().toISOString(); // the download begins
@@ -1014,7 +1018,7 @@ describe("interception across worker restarts and fast downloads", () => {
     // The idle worker is gone; the download event wakes a new one that
     // starts after the download did, sharing the same session storage.
     const second = makeChrome(shared);
-    loadBackground(second);
+    await loadBackground(second);
     await second._listeners["downloads.onCreated"]({
       id: 4,
       url: "https://example.com/a.iso",
@@ -1028,7 +1032,7 @@ describe("interception across worker restarts and fast downloads", () => {
     const chrome = makeChrome({
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
-    loadBackground(chrome);
+    await loadBackground(chrome);
     const done = {
       id: 5,
       url: "https://example.com/tiny.bin",
@@ -1046,7 +1050,7 @@ describe("interception across worker restarts and fast downloads", () => {
 describe("P2/P3 regression tests", () => {
   test("removeAllContextMenus works with callback-style API", async () => {
     const chrome = makeChrome();
-    const bg = loadBackground(chrome);
+    const bg = await loadBackground(chrome);
     // Mock returns undefined (old Chrome), invokes callback.
     let callbackInvoked = false;
     chrome.contextMenus.removeAll = (cb) => {
@@ -1060,7 +1064,7 @@ describe("P2/P3 regression tests", () => {
 
   test("removeContextMenu works with callback-style API", async () => {
     const chrome = makeChrome();
-    const bg = loadBackground(chrome);
+    const bg = await loadBackground(chrome);
     let callbackInvoked = false;
     chrome.contextMenus.remove = (id, cb) => {
       callbackInvoked = true;
@@ -1075,7 +1079,7 @@ describe("P2/P3 regression tests", () => {
     const chrome = makeChrome({
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
-    const bg = loadBackground(chrome);
+    const bg = await loadBackground(chrome);
     const item = { id: 7, url: "https://example.com/file.bin" };
     const originalDeadline = Date.now() + 5000;
     await bg.parkForSize(item, originalDeadline);
