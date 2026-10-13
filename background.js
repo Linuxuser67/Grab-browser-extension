@@ -75,14 +75,25 @@ function updateTab(tabId, url) {
   if (r && typeof r.catch === "function") r.catch(() => {});
 }
 
-/// Open the grab:// URL via the OS handler. The browser routes it to Grab
-/// through the .desktop file's x-scheme-handler/grab entry. No native host
-/// needed — works with Flatpak automatically.
-async function handOffUrl(grabUrl) {
+/// Native-messaging host name. The host launches Grab directly — no tab,
+/// no prompt. Falls back to grab:// URL if the host isn't installed.
+const NATIVE_HOST = "io.github.linuxuser67.grab";
+
+/// Try native messaging first (direct launch, no tab). Falls back to
+/// grab:// URL via background tab if the host isn't installed.
+async function handOff(grabUrl) {
+  // Try native host first.
+  try {
+    const resp = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
+      url: grabUrl,
+    });
+    if (resp && resp.success) return true;
+  } catch {
+    // Host not installed — fall through to URL handoff.
+  }
+  // Fallback: open grab:// URL in background tab.
   try {
     const tab = await chrome.tabs.create({ url: grabUrl, active: false });
-    // Close the handoff tab after the OS has had a moment to pick up the
-    // grab:// URL. The tab is just a vehicle — Grab handles the URL.
     setTimeout(() => {
       if (tab && tab.id) chrome.tabs.remove(tab.id).catch(() => {});
     }, 1000);
@@ -141,7 +152,7 @@ async function interceptDownload(item) {
   // Hand off via grab:// URL. The browser routes it to Grab through the
   // .desktop handler. If Grab isn't installed, the browser shows an error
   // and the download is left alone.
-  if (!(await handOffUrl(grabUrl))) return;
+  if (!(await handOff(grabUrl))) return;
 
   await claimDownload(item.id);
   try {
@@ -996,7 +1007,7 @@ if (typeof module !== "undefined" && module.exports) {
     getHlsVariants,
     variantMenuTitle,
     hostExcluded,
-    handOffUrl,
+    handOff,
     YTDLP_EXCLUSIVE_HOSTS,
     DEFAULTS,
     SIZE_WAIT_MS,
