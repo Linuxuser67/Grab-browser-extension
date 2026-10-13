@@ -1161,8 +1161,8 @@ describe("videoName", () => {
 
   test("truncates long names with an ellipsis", async () => {
     const name = bg.videoName(`https://cdn.example.com/v/${"a".repeat(60)}.mp4`, 0, "", null);
-    assert.ok(name.length <= 41);
-    assert.ok(name.endsWith("…"));
+    assert.ok(name.length <= 25);
+    assert.ok(name.endsWith(".mp4"));
   });
 
   test("a stream is named by the whole page video title", async () => {
@@ -1231,7 +1231,7 @@ describe("menu rows", () => {
   test("a lone muxed rendition hands the master", async () => {
     const body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720\nv720.m3u8\n";
     const rows = await withFetch(body, () => bg.hlsMenuRows(MASTER));
-    assert.deepEqual(rows, [{ quality: "720p • 2.00 Mbps", url: MASTER }]);
+    assert.deepEqual(rows, [{ quality: "720p • 2.00 Mbps", height: 720, url: MASTER }]);
   });
 
   test("separate-audio HLS is one row listing the qualities, handing the master", async () => {
@@ -1244,7 +1244,7 @@ describe("menu rows", () => {
       "v720.m3u8",
     ].join("\n");
     const rows = await withFetch(body, () => bg.hlsMenuRows(MASTER));
-    assert.deepEqual(rows, [{ quality: "720p / 360p • pick in Grab", url: MASTER }]);
+    assert.deepEqual(rows, [{ quality: "720p / 360p • pick in Grab", height: 720, url: MASTER }]);
   });
 
   test("mixed master: muxed rows plus one pick row for the taller split ones", async () => {
@@ -1261,9 +1261,9 @@ describe("menu rows", () => {
     ].join("\n");
     const rows = await withFetch(body, () => bg.hlsMenuRows(MASTER));
     assert.deepEqual(rows, [
-      { quality: "720p • 1.50 Mbps", url: "https://cdn.example.com/hls/m720.m3u8" },
-      { quality: "360p • 0.80 Mbps", url: "https://cdn.example.com/hls/m360.m3u8" },
-      { quality: "1080p • pick in Grab", url: MASTER },
+      { quality: "720p • 1.50 Mbps", height: 720, url: "https://cdn.example.com/hls/m720.m3u8" },
+      { quality: "360p • 0.80 Mbps", height: 360, url: "https://cdn.example.com/hls/m360.m3u8" },
+      { quality: "1080p • pick in Grab", height: 1080, url: MASTER },
     ]);
   });
 
@@ -1276,11 +1276,11 @@ describe("menu rows", () => {
       "v720.m3u8",
     ].join("\n");
     const rows = await withFetch(body, () => bg.hlsMenuRows(MASTER));
-    assert.deepEqual(rows, [{ quality: "720p • 2.00 Mbps", url: MASTER }]);
+    assert.deepEqual(rows, [{ quality: "720p • 2.00 Mbps", height: 720, url: MASTER }]);
   });
 
   test("a media playlist or unreadable master is one plain row", async () => {
-    const plain = [{ quality: "", url: MASTER }];
+    const plain = [{ quality: "", url: MASTER, height: 0 }];
     assert.deepEqual(
       await withFetch("#EXTM3U\n#EXT-X-TARGETDURATION=6\n", () => bg.hlsMenuRows(MASTER)),
       plain
@@ -1317,16 +1317,17 @@ describe("menu rows", () => {
   test("DASH is one row listing the qualities, handing the MPD", async () => {
     const url = "https://cdn.example.com/d/manifest.mpd";
     assert.deepEqual(await withFetch(MPD, () => bg.dashMenuRows(url)), [
-      { quality: "1080p / 360p • pick in Grab", url },
+      { quality: "1080p30 / 360p30 • pick in Grab", url, height: 1080 },
     ]);
     bg = await loadBackground(makeChrome());
-    assert.deepEqual(await withFetch(null, () => bg.dashMenuRows(url)), [{ quality: "", url }]);
+    assert.deepEqual(await withFetch(null, () => bg.dashMenuRows(url)), [{ quality: "", url, height: 0 }]);
   });
 
   test("direct files carry the reported height", async () => {
     assert.deepEqual(bg.directMenuRow("https://c.example.com/clip.mp4", 1080), {
       quality: "1080p",
       url: "https://c.example.com/clip.mp4",
+      height: 1080,
     });
     assert.equal(bg.directMenuRow("https://c.example.com/clip.mp4", 0).quality, "");
   });
