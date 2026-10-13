@@ -86,8 +86,13 @@ function classifyStream(url, contentType) {
   return null;
 }
 
-const shorten = (text) =>
-  text.length > NAME_MAX ? text.slice(0, NAME_MAX) + "…" : text;
+const shorten = (text, max = NAME_MAX) => {
+  if (text.length <= max) return text;
+  const dot = text.lastIndexOf(".");
+  const ext = dot > 0 && text.length - dot <= 5 ? text.slice(dot) : "";
+  const head = text.slice(0, max - ext.length - 1);
+  return head + "…" + ext;
+};
 
 /// Last path segment of a URL, decoded ("my%20clip.mp4" -> "my clip.mp4").
 /// Empty when there is none.
@@ -341,7 +346,7 @@ function variantMenuTitle(variant, index) {
     const name = decodeURIComponent(
       new URL(variant.url).pathname.split("/").filter(Boolean).pop() || "",
     );
-    if (name) return name.length > 30 ? name.slice(0, 30) + "…" : name;
+    if (name) return shorten(name);
   } catch {
     // Fall through.
   }
@@ -446,11 +451,17 @@ const byQuality = (a, b) =>
 /// "1080p / 720p / 360p" from variants already sorted best first; at most
 /// five heights, "…" when there are more. Empty when none has a height.
 function heightList(variants) {
-  const heights = [
-    ...new Set(variants.map((v) => v.height).filter((h) => h > 0)),
-  ];
-  const shown = heights.slice(0, 5).map((h) => `${h}p`);
-  if (heights.length > 5) shown.push("…");
+  const seen = new Map();
+  for (const v of variants) {
+    if (v.height > 0) {
+      const key = `${v.height}p${v.fps ? Math.round(v.fps) : ""}`;
+      if (!seen.has(key)) seen.set(key, v);
+    }
+  }
+  const shown = [...seen.values()]
+    .slice(0, 5)
+    .map((v) => `${v.height}p${v.fps ? Math.round(v.fps) : ""}`);
+  if (seen.size > 5) shown.push("…");
   return shown.join(" / ");
 }
 
@@ -461,7 +472,7 @@ const pickRowQuality = (variants) =>
 /// plain row.
 async function hlsMenuRows(url) {
   const all = await fetchAllVariants(url);
-  const plain = [{ quality: "", url }];
+  const plain = [{ quality: "", url, height: 0 }];
   if (!all) return plain;
   const video = all.filter((v) => !v.audioOnly);
   const muxed = video.filter((v) => v.audioGroup === null).sort(byQuality);
@@ -475,22 +486,26 @@ async function hlsMenuRows(url) {
   // A lone rendition hands the master: it is what ties the video to its audio.
   const rows =
     muxed.length === 1 && split.length === 0
-      ? [{ quality: variantMenuTitle(muxed[0], 0), url }]
-      : muxed.map((v, i) => ({ quality: variantMenuTitle(v, i), url: v.url }));
-  if (split.length > 0) rows.push({ quality: pickRowQuality(split), url });
+      ? [{ quality: variantMenuTitle(muxed[0], 0), url, height: muxed[0].height || 0 }]
+      : muxed.map((v, i) => ({ quality: variantMenuTitle(v, i), url: v.url, height: v.height || 0 }));
+  if (split.length > 0) {
+    const bestSplit = Math.max(...split.map((v) => v.height || 0), 0);
+    rows.push({ quality: pickRowQuality(split), url, height: bestSplit });
+  }
   return rows.length > 0 ? rows : plain;
 }
 
 /// One row for a DASH manifest: its qualities, handing the MPD to Grab.
 async function dashMenuRows(url) {
   const reps = await fetchDashRepresentations(url);
-  if (!reps) return [{ quality: "", url }];
-  return [{ quality: pickRowQuality(reps), url }];
+  if (!reps) return [{ quality: "", url, height: 0 }];
+  const bestHeight = Math.max(...reps.map((r) => r.height || 0), 0);
+  return [{ quality: pickRowQuality(reps), url, height: bestHeight }];
 }
 
 /// Row for a direct file: the height the player reported, when known.
 function directMenuRow(url, height) {
-  return { quality: height > 0 ? `${height}p` : "", url };
+  return { quality: height > 0 ? `${height}p` : "", url, height: height || 0 };
 }
 
 /// Text of one menu row. "%" is doubled: menu titles treat "%s" as the
@@ -527,7 +542,8 @@ async function buildVideoEntry(url, ctx = {}) {
   if (kind === "hls") rows = await hlsMenuRows(url);
   else if (kind === "dash") rows = await dashMenuRows(url);
   else rows = [directMenuRow(url, ctx.height)];
-  return { url, kind, rows };
+  const bestHeight = Math.max(...rows.map((r) => r.height || 0), ctx.height || 0);
+  return { url, kind, rows, bestHeight };
 }
 
 /// Two videos can share a label (same page title word): number the repeats.
@@ -768,8 +784,12 @@ async function doRefreshVideoMenu(tabId) {
         }),
       );
     }
+    // Quality-order the menu: best height first, so the 8-item cap keeps the
+    // best videos, not the first ones found.
+    entries.sort((a, b) => (b.bestHeight || 0) - (a.bestHeight || 0));
+    const capped = entries.slice(0, MAX_VIDEO_ITEMS);
     const names = uniqueLabels(
-      entries.map((e, i) =>
+      capped.map((e, i) =>
         videoName(e.url, i, finds && finds.title, e.kind),
       ),
     );

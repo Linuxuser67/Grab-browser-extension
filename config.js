@@ -54,7 +54,7 @@ export const YTDLP_EXCLUSIVE_HOSTS = [
   "twitch.tv",
 ];
 
-export const NAME_MAX = 40;
+export const NAME_MAX = 24;
 export const PLAYLIST_TEXT_CAP = 256 * 1024;
 export const MANIFEST_RE = /\.(m3u8|m3u)([?#]|$)/i;
 export const DASH_TEXT_CAP = 2 * 1024 * 1024;
