@@ -406,14 +406,24 @@ chrome.storage.onChanged.addListener(async (changes, area) => {
   }
 });
 
-chrome.contextMenus.onClicked.addListener((info, tab) => {
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const id = info.menuItemId;
   if (typeof id === "string" && id.startsWith(VIDEO_ITEM_PREFIX)) {
     // A detected video: same explicit-send channel as the main item (the
     // user picked this tab), not the background-tab interception channel.
     // Resolve against the list the menu was built from: it was filtered
     // (master playlists) and may belong to another window's tab.
-    const url = menuUrls[Number(id.slice(VIDEO_ITEM_PREFIX.length))];
+    // menuUrls is in-memory; after a worker restart, read the persisted copy.
+    let urls = menuUrls;
+    if (urls.length === 0) {
+      try {
+        const stored = await chrome.storage.session.get("menuUrls");
+        if (Array.isArray(stored.menuUrls)) urls = stored.menuUrls;
+      } catch {
+        // Fall through with the empty list.
+      }
+    }
+    const url = urls[Number(id.slice(VIDEO_ITEM_PREFIX.length))];
     if (url) sendToGrab(url, tab && tab.id);
     return;
   }
@@ -1186,6 +1196,9 @@ function doRefreshVideoMenu(tabId) {
         });
       }
     });
+    // Persist for worker restarts: menuUrls is in-memory and MV3 suspends
+    // the worker; a click after a restart must still resolve.
+    chrome.storage.session.set({ menuUrls }).catch(() => {});
     const badged = chrome.action.setBadgeText({
       tabId,
       text: String(urls.length),
