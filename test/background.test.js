@@ -1,6 +1,7 @@
 // Tests for the Grab browser extension's background service worker.
 // Run with: node --test test/   (Node's built-in runner, no dependencies)
 const { test, describe, beforeEach } = require("node:test");
+const nodeCrypto = require("node:crypto");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 
@@ -15,6 +16,7 @@ function makeChrome(shared) {
   const session = shared.session || (shared.session = new Map());
   const downloads = shared.downloads || (shared.downloads = new Map());
   const syncSettings = shared.syncSettings || (shared.syncSettings = {});
+  const localSettings = shared.localSettings || (shared.localSettings = {});
   const alarms = new Map();
   const calls = [];
 
@@ -77,6 +79,10 @@ function makeChrome(shared) {
       onChanged: capture("storage.onChanged"),
       sync: {
         get: async (defaults) => ({ ...defaults, ...syncSettings }),
+      },
+      local: {
+        get: async (defaults) => ({ ...defaults, ...localSettings }),
+        set: async (obj) => Object.assign(localSettings, obj),
       },
       session: {
         get: async (key) => {
@@ -649,7 +655,7 @@ describe("toolbar opens the popup", () => {
 });
 
 describe("HTTP handoff to Grab", () => {
-  const ENDPOINT = "http://127.0.0.1:9412/add";
+  const ENDPOINT = "http://127.0.0.1:9412/add?confirm=1";
   let chrome, bg, fetchCalls;
 
   /// Install a fetch that answers each call with the next status in `statuses`
@@ -664,6 +670,34 @@ describe("HTTP handoff to Grab", () => {
     };
   }
   const tabsCreated = () => chrome._calls.filter(([name]) => name === "tabs.create");
+  const SECRET = "ab".repeat(32);
+  const hmac = (context, message) =>
+    nodeCrypto
+      .createHmac("sha256", Buffer.from(SECRET, "hex"))
+      .update(context + message)
+      .digest("hex");
+  const posts = () => fetchCalls.filter((c) => c.opts.method === "POST");
+  const hellos = () => fetchCalls.filter((c) => c.url.includes("/hello"));
+
+  /// A Grab that answers GET /hello like the real one (a proof computed from
+  /// the shared secret) unless told otherwise, and POST /add with `addStatus`.
+  function mockPairedGrab({ proof, helloStatus = 200, helloDown = false, addStatus = 200 } = {}) {
+    fetchCalls = [];
+    globalThis.fetch = async (url, opts = {}) => {
+      fetchCalls.push({ url, opts });
+      if (url.includes("/hello")) {
+        if (helloDown) throw new Error("connection refused");
+        const nonce = new URL(url).searchParams.get("n");
+        return {
+          status: helloStatus,
+          ok: helloStatus >= 200 && helloStatus < 300,
+          json: async () => ({ proof: proof ?? hmac("grab-server\u0000", nonce) }),
+        };
+      }
+      return { status: addStatus, ok: addStatus >= 200 && addStatus < 300 };
+    };
+  }
+  const pair = () => chrome.storage.local.set({ pairingCode: SECRET });
 
   beforeEach(() => {
     chrome = makeChrome({
@@ -770,9 +804,10 @@ describe("HTTP handoff to Grab", () => {
         // No expirationDate: session cookie.
       },
     ];
-    mockFetch(200);
+    await pair();
+    mockPairedGrab();
     assert.equal(await bg.handOff("https://videos.example.com/watch/1"), true);
-    assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
+    assert.deepEqual(JSON.parse(posts()[0].opts.body), {
       url: "https://videos.example.com/watch/1",
       cookies: [
         {
@@ -801,12 +836,165 @@ describe("HTTP handoff to Grab", () => {
     chrome.cookies.getAll = async () => {
       throw new Error("permission denied");
     };
-    mockFetch(200);
+    await pair();
+    mockPairedGrab();
     assert.equal(await bg.handOff("https://example.com/f.zip"), true);
-    assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
+    assert.deepEqual(JSON.parse(posts()[0].opts.body), {
       url: "https://example.com/f.zip",
       cookies: [],
     });
+  });
+
+  // --- pairing -----------------------------------------------------------
+
+  test("unpaired: URL only, no cookie read, no handshake, no token", async () => {
+    let cookieReads = 0;
+    chrome.cookies.getAll = async () => {
+      cookieReads += 1;
+      return [{ name: "s", value: "v", domain: "example.com", path: "/" }];
+    };
+    mockFetch(200);
+    assert.equal(await bg.handOff("https://example.com/f.zip"), true);
+    assert.equal(cookieReads, 0, "cookies must not be read without pairing");
+    assert.equal(fetchCalls.length, 1, "no /hello without a pairing code");
+    assert.equal(fetchCalls[0].opts.headers["X-Grab-Token"], undefined);
+    assert.deepEqual(JSON.parse(fetchCalls[0].opts.body).cookies, []);
+  });
+
+  test("paired: Grab proves itself first, then the signed body carries the cookies", async () => {
+    chrome.cookies.getAll = async () => [
+      { name: "s", value: "v", domain: "example.com", hostOnly: true, path: "/", secure: true },
+    ];
+    await pair();
+    mockPairedGrab();
+    assert.equal(await bg.handOff("https://example.com/f.zip"), true);
+    assert.equal(fetchCalls.length, 2);
+    assert.match(fetchCalls[0].url, /^http:\/\/127\.0\.0\.1:9412\/hello\?n=[0-9a-f]{32}$/);
+    const post = posts()[0];
+    assert.equal(post.url, ENDPOINT);
+    const token = post.opts.headers["X-Grab-Token"];
+    assert.equal(token, hmac("grab-client\u0000", post.opts.body), "token signs the exact body");
+    assert.equal(JSON.parse(post.opts.body).cookies.length, 1);
+  });
+
+  test("every handshake uses a fresh nonce", async () => {
+    await pair();
+    mockPairedGrab();
+    await bg.handOff("https://example.com/a.zip");
+    await bg.handOff("https://example.com/b.zip");
+    const nonces = hellos().map((c) => new URL(c.url).searchParams.get("n"));
+    assert.equal(new Set(nonces).size, 2);
+  });
+
+  test("an impostor that cannot prove the code gets nothing: no cookies, no POST", async () => {
+    let cookieReads = 0;
+    chrome.cookies.getAll = async () => {
+      cookieReads += 1;
+      return [{ name: "s", value: "v", domain: "example.com", path: "/" }];
+    };
+    await pair();
+    mockPairedGrab({ proof: "00".repeat(32) });
+    assert.equal(await bg.handOff("https://example.com/f.zip"), false);
+    assert.equal(cookieReads, 0, "cookies must never be read for an unverified listener");
+    assert.equal(posts().length, 0, "nothing may be sent to an unverified listener");
+  });
+
+  test("a /hello without a usable answer is a failure with no POST", async () => {
+    await pair();
+    for (const opts of [{ helloStatus: 503 }, { helloStatus: 403 }, { helloDown: true }]) {
+      mockPairedGrab(opts);
+      assert.equal(await bg.handOff("https://example.com/f.zip"), false, JSON.stringify(opts));
+      assert.equal(posts().length, 0);
+    }
+  });
+
+  test("a malformed stored code counts as unpaired", async () => {
+    await chrome.storage.local.set({ pairingCode: "not-a-code" });
+    mockFetch(200);
+    assert.equal(await bg.handOff("https://example.com/f.zip"), true);
+    assert.equal(fetchCalls.length, 1, "no handshake");
+    assert.equal(fetchCalls[0].opts.headers["X-Grab-Token"], undefined);
+  });
+
+  // --- confirm=1 outcomes ------------------------------------------------
+
+  for (const status of [408, 409]) {
+    test(`HTTP ${status} (declined / no answer) keeps the browser download`, async () => {
+      mockFetch(status);
+      await chrome._listeners["downloads.onCreated"]({
+        id: 90,
+        url: "https://example.com/big.iso",
+        fileSize: -1,
+      });
+      assert.equal(fetchCalls.length, 1, "no retry");
+      assert.equal(chrome._calls.some(([name]) => name === "cancel"), false);
+      assert.equal(chrome._calls.some(([name]) => name === "removeFile"), false);
+    });
+  }
+
+  test("requests the confirm=1 answer and allows time for the dialog", async () => {
+    mockFetch(200);
+    await bg.handOff("https://example.com/f.zip");
+    assert.ok(fetchCalls[0].url.endsWith("/add?confirm=1"));
+    assert.ok(fetchCalls[0].opts.signal, "the wait is bounded by an abort signal");
+  });
+});
+
+describe("worker fetch hardening", () => {
+  let bg;
+  beforeEach(() => {
+    bg = loadBackground(makeChrome());
+  });
+
+  const refused = [
+    "http://localhost/a.m3u8",
+    "http://foo.localhost/a.m3u8",
+    "http://127.0.0.1:9412/a.m3u8",
+    "http://127.1.2.3/a.m3u8",
+    "http://0x7f.1/a.m3u8", // normalized to 127.0.0.1 by the URL parser
+    "http://2130706433/a.m3u8", // decimal 127.0.0.1
+    "http://0.0.0.0/a.m3u8",
+    "http://169.254.169.254/latest/meta-data",
+    "http://[::1]/a.m3u8",
+    "http://[::]/a.m3u8",
+    "http://[::ffff:127.0.0.1]/a.m3u8",
+    "http://[fe80::1]/a.m3u8",
+    "file:///etc/passwd",
+    "ftp://example.com/a.m3u8",
+    "not a url",
+  ];
+  for (const url of refused) {
+    test(`refuses ${url}`, () => assert.equal(bg.isFetchAllowed(url), false));
+  }
+
+  for (const url of [
+    "https://cdn.example.com/a.m3u8",
+    "http://example.com:8080/a.mpd",
+    "http://192.168.1.20:8096/Videos/1/master.m3u8", // home media server
+    "http://10.0.0.5/a.m3u8",
+    "https://[2606:4700::1111]/a.m3u8",
+  ]) {
+    test(`allows ${url}`, () => assert.equal(bg.isFetchAllowed(url), true));
+  }
+
+  test("fetchText never issues a request for a refused host", async () => {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return { ok: true, text: async () => "#EXTM3U" };
+    };
+    assert.equal(await bg.fetchText("http://127.0.0.1:9412/x.m3u8", 1000), null);
+    assert.equal(calls, 0);
+  });
+
+  test("fetchText sends no credentials", async () => {
+    let seen;
+    globalThis.fetch = async (url, opts) => {
+      seen = opts;
+      return { ok: true, text: async () => "#EXTM3U" };
+    };
+    assert.equal(await bg.fetchText("https://cdn.example.com/a.m3u8", 1000), "#EXTM3U");
+    assert.equal(seen.credentials, "omit");
   });
 });
 

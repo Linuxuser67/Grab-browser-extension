@@ -74,6 +74,22 @@
       Offered qualities appear in the right-click menu under “Videos detected
       by Grab”.
     </p>
+    <h3>Pairing</h3>
+    <label for="pairingCode">Pairing code from Grab</label>
+    <input
+      type="text"
+      id="pairingCode"
+      autocomplete="off"
+      spellcheck="false"
+      placeholder="Grab → Preferences → Browser extension"
+    />
+    <p class="hint">
+      With a code, the extension checks that it is talking to Grab, signs what
+      it sends, and shares the site's cookies so Grab can download pages that
+      need them. Without one, only links are sent. Leave empty to unpair.
+    </p>
+    <button type="button" id="savePairing">Pair</button>
+    <span id="pairingStatus" class="hint" role="status"></span>
     <p id="saved">Saved</p>
     <script src="settings.js"></script>
     <script src="options.js"></script>
