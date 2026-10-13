@@ -15,6 +15,23 @@ const savedEl = document.getElementById("saved");
 
 let saveTimer = null;
 
+async function checkGrabStatus() {
+  const el = document.getElementById("grabStatus");
+  try {
+    // Any HTTP response (even 400) means Grab is listening.
+    await fetch("http://127.0.0.1:9412/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "" }),
+    });
+    el.textContent = "Grab is running";
+    el.className = "status ok";
+  } catch {
+    el.textContent = "Grab isn't running — downloads will stay in the browser";
+    el.className = "status down";
+  }
+}
+
 async function load() {
   const settings = await chrome.storage.sync.get(DEFAULTS);
   interceptEl.checked = settings.interceptDownloads;
@@ -54,3 +71,4 @@ document.getElementById("openOptions").addEventListener("click", (e) => {
 });
 
 load();
+checkGrabStatus();
