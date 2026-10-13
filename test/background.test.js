@@ -392,6 +392,29 @@ describe("master interception toggle", () => {
     assert.equal(intercepted(chrome, 9), true);
   });
 
+  test("cold wake: download started after browser start but before worker restart is intercepted", async () => {
+    // Browser started an hour ago; the worker just restarted (fresh
+    // loadBackground) with the persisted session. A download created a
+    // second ago postdates the browser start and must be intercepted —
+    // the old worker-eval timestamp would have wrongly skipped it.
+    const session = new Map();
+    session.set("browserStartTime", Date.now() - 3600000);
+    const chrome = makeChrome({
+      session,
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    });
+    const bg = loadBackground(chrome);
+    void bg;
+    const newItem = {
+      ...item(9),
+      url: "https://example.com/cold-wake.iso",
+      fileSize: 100,
+      startTime: new Date(Date.now() - 1000).toISOString(),
+    };
+    await chrome._listeners["downloads.onCreated"](newItem);
+    assert.equal(intercepted(chrome, 9), true);
+  });
+
   test("the size-wait decision respects a toggle flipped off mid-wait", async () => {
     const shared = {
       syncSettings: { interceptDownloads: true, minSizeMB: 100, skipTypes: "" },
@@ -669,9 +692,9 @@ describe("HTTP handoff to Grab", () => {
     bg = loadBackground(chrome);
   });
 
-  test("POSTs the unwrapped URL as JSON and opens no tab on success", async () => {
+  test("POSTs the raw URL as JSON and opens no tab on success", async () => {
     mockFetch(200);
-    assert.equal(await bg.handOff("grab://https/example.com/f.zip?x=1"), true);
+    assert.equal(await bg.handOff("https://example.com/f.zip?x=1"), true);
     assert.equal(fetchCalls.length, 1);
     assert.equal(fetchCalls[0].url, ENDPOINT);
     assert.equal(fetchCalls[0].opts.method, "POST");
@@ -682,17 +705,16 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(tabsCreated().length, 0);
   });
 
-  test("unwraps magnet links", async () => {
-    mockFetch(200);
-    await bg.handOff("grab://magnet:?xt=urn:btih:abc");
-    assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
-      url: "magnet:?xt=urn:btih:abc",
-    });
+  test("isHandable rejects non-http(s) and credentialed URLs", async () => {
+    assert.equal(bg.isHandable("magnet:?xt=urn:btih:abc"), false);
+    assert.equal(bg.isHandable("blob:https://example.com/123"), false);
+    assert.equal(bg.isHandable("https://user:pass@example.com/f.zip"), false);
+    assert.equal(bg.isHandable("https://example.com/f.zip"), true);
   });
 
   test("Grab not running is a failure and opens no tab", async () => {
     mockFetch("down");
-    assert.equal(await bg.handOff("grab://https/example.com/f.zip"), false);
+    assert.equal(await bg.handOff("https://example.com/f.zip"), false);
     assert.equal(fetchCalls.length, 1, "no retry when unreachable");
     assert.equal(tabsCreated().length, 0);
   });
@@ -700,7 +722,7 @@ describe("HTTP handoff to Grab", () => {
   for (const status of [400, 403, 414, 500]) {
     test(`HTTP ${status} is a failure: no retry, no tab`, async () => {
       mockFetch(status);
-      assert.equal(await bg.handOff("grab://https/example.com/f.zip"), false);
+      assert.equal(await bg.handOff("https://example.com/f.zip"), false);
       assert.equal(fetchCalls.length, 1);
       assert.equal(tabsCreated().length, 0);
     });
@@ -708,14 +730,14 @@ describe("HTTP handoff to Grab", () => {
 
   test("429 is retried and succeeds without opening a tab", async () => {
     mockFetch(429, 200);
-    assert.equal(await bg.handOff("grab://https/example.com/f.zip", [0, 0]), true);
+    assert.equal(await bg.handOff("https://example.com/f.zip", [0, 0]), true);
     assert.equal(fetchCalls.length, 2);
     assert.equal(tabsCreated().length, 0);
   });
 
   test("a queue that stays full gives up after the retries", async () => {
     mockFetch(429);
-    assert.equal(await bg.handOff("grab://https/example.com/f.zip", [0, 0]), false);
+    assert.equal(await bg.handOff("https://example.com/f.zip", [0, 0]), false);
     assert.equal(fetchCalls.length, 3, "1 attempt + 2 retries");
     assert.equal(tabsCreated().length, 0);
   });
