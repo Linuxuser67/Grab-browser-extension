@@ -131,8 +131,14 @@ async function verifyGrab(secret) {
   if (!resp.ok) return false;
   const body = await resp.json();
   const expected = await hmacHex(secret, SERVER_CONTEXT, nonce);
-  return constantTimeEqual(body && body.proof, expected);
+  if (!constantTimeEqual(body && body.proof, expected)) return false;
+  // Remember whether this Grab supports async confirm for this session.
+  grabSupportsAsync = body && body.confirm_async === true;
+  return true;
 }
+
+// Whether the verified Grab supports ?confirm=async (set by verifyGrab).
+let grabSupportsAsync = false;
 
 /// The site's cookies in the shape Grab expects. Needs the optional `cookies`
 /// permission; without it (or on any failure) the handoff is URL-only.
@@ -155,18 +161,71 @@ async function readCookies(url) {
 
 const MAX_COOKIES = 100;
 
+const STATUS_TIMEOUT_MS = 25_000; // below the worker's 30s fetch threshold
+const POLL_BACKOFF_MS = [250, 500, 1000, 2000];
+const DECISION_ID_RE = /^[0-9a-f]{32}$/;
+
+/// One status request. Resolves to a state string, or null when the id is
+/// unknown, Grab is unreachable, or the answer is malformed.
+async function fetchStatus(id) {
+  try {
+    const resp = await fetchWithTimeout(
+      `${GRAB_BASE_URL}/status?id=${id}`,
+      { method: "GET" },
+      STATUS_TIMEOUT_MS,
+    );
+    if (!resp.ok) return null;
+    const { state } = await resp.json();
+    return typeof state === "string" ? state : null;
+  } catch {
+    return null;
+  }
+}
+
+/// Waits for Grab's decision on an async handoff. Resolves to the same status
+/// codes the blocking path returns, so callers do not change.
+async function awaitDecision(id, deadline) {
+  if (!DECISION_ID_RE.test(id)) return 0;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    const started = Date.now();
+    const state = await fetchStatus(id);
+    if (state === null) return 0; // gone or unreachable: leave the browser download alone
+    if (state === "approved") return 200;
+    if (state === "declined") return 409;
+    if (state === "timeout") return 408;
+    // Still pending. Grab normally holds the request, so back off only when
+    // it answered early.
+    if (Date.now() - started < 1000) {
+      const delay = POLL_BACKOFF_MS[Math.min(attempt, POLL_BACKOFF_MS.length - 1)];
+      attempt += 1;
+      await sleep(delay);
+    }
+  }
+  return 408;
+}
+
 /// POST one body to Grab. Resolves to the HTTP status.
 async function postBody(url, cookies, secret) {
   const body = JSON.stringify({ url, cookies });
   const headers = { "Content-Type": "application/json" };
   if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
-  // confirm=1: Grab answers only once the user has approved or declined, so
-  // the browser's own download is cancelled only when Grab really took over.
+  // confirm=async: Grab returns 202 immediately; we poll /status. Falls back
+  // to confirm=1 (blocking) when the Grab is too old to advertise support.
+  // Either way the browser's download is cancelled only when Grab took over.
+  const mode = grabSupportsAsync ? "async" : "1";
   const resp = await fetchWithTimeout(
-    `${GRAB_HTTP_URL}?confirm=1`,
+    `${GRAB_HTTP_URL}?confirm=${mode}`,
     { method: "POST", headers, body },
-    CONFIRM_TIMEOUT_MS,
+    grabSupportsAsync ? HELLO_TIMEOUT_MS : CONFIRM_TIMEOUT_MS,
   );
+  if (grabSupportsAsync && resp.status === 202) {
+    const { id } = await resp.json();
+    if (typeof id === "string") {
+      return awaitDecision(id, Date.now() + CONFIRM_TIMEOUT_MS);
+    }
+    return 0;
+  }
   return resp.status;
 }
 
@@ -422,6 +481,7 @@ function removeContextMenu(id) {
 /// Reset module state for tests (worker restart simulation).
 function __resetHandoffState() {
   deciding.clear();
+  grabSupportsAsync = false;
 }
 
 export {
@@ -438,6 +498,8 @@ export {
   verifyGrab,
   readCookies,
   postToGrab,
+  awaitDecision,
+  fetchStatus,
   handOff,
   isSkipped,
   getSettings,
