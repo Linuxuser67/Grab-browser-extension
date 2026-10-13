@@ -1,6 +1,6 @@
 // Grab video detector (content script, isolated world, all frames).
 //
-// Reports <video> elements she started playing (play-event latch; pause never
+// Reports <video> elements the user started playing (play-event latch; pause never
 // unlatches, a media reset does; muted autoplay is noise) that have usable
 // http(s) sources, to the background worker, which offers them in the
 // right-click menu ("Download video with Grab"). Videos whose source is a
@@ -10,31 +10,9 @@
 
 const MIN_VIDEO_PX = 120; // ignore tiny players (ads, trackers)
 
-// Video platforms yt-dlp extracts (auth-gated/expiring CDN URLs or DRM):
-// detection only produces noise there. Keep in sync with
-// YTDLP_EXCLUSIVE_HOSTS in background.js — the worker gates the menu too,
-// for manifests sniffed without a page report.
-const DETECT_EXCLUDED_HOSTS = [
-  "youtube.com",
-  "youtu.be",
-  "vimeo.com",
-  "dailymotion.com",
-  "dai.ly",
-  "tiktok.com",
-  "instagram.com",
-  "facebook.com",
-  "fb.com",
-  "fb.watch",
-  "twitter.com",
-  "x.com",
-  "twitch.tv",
-];
-
-/// True for the host itself and any subdomain, never for lookalikes.
-function hostExcluded(host) {
-  const h = String(host || "").toLowerCase();
-  return DETECT_EXCLUDED_HOSTS.some((d) => h === d || h.endsWith("." + d));
-}
+// The worker gates reports by sender.tab.url against YTDLP_EXCLUSIVE_HOSTS,
+// so the content script reports unconditionally — no host list to keep in
+// sync here.
 
 /// First http(s) candidate among currentSrc, src and <source> children.
 function usableVideoSrc(video) {
@@ -103,25 +81,22 @@ function pageVideoTitle(doc) {
 
 // --- Live wiring (browser only; the pure helpers above are unit-tested) ---
 //
-// Played-only detection: the menu offers a video only once she started it.
+// Played-only detection: the menu offers a video only once the user started it.
 // A WeakSet latches each <video> on its first play event and never unlatches
-// on pause — she pauses to right-click. A media reset (emptied) unlatches:
-// the new load is a video she hasn't started. Muted videos are filtered at
+// on pause — the user pauses to right-click. A media reset (emptied) unlatches:
+// the new load is a video the user hasn't started. Muted videos are filtered at
 // collect time (muted autoplay is ad/preview noise); unmuting re-reports via
 // volumechange.
 
 if (
   typeof chrome !== "undefined" &&
   chrome.runtime &&
-  typeof document !== "undefined" &&
-  // No reporting where detection can't produce a downloadable URL; the
-  // worker applies the same gate to sniffed manifests.
-  (typeof location === "undefined" || !hostExcluded(location.hostname))
+  typeof document !== "undefined"
 ) {
   const played = new WeakSet();
   let lastSent = "";
 
-  function report() {
+  const report = () => {
     const videos = collectVideos(document, (v) => isStartedVideo(v, played));
     const snapshot = JSON.stringify(videos);
     if (snapshot === lastSent) return;
@@ -131,30 +106,30 @@ if (
       videos,
       title: pageVideoTitle(document),
     });
-  }
+  };
 
   let timer = null;
-  function scheduleReport() {
+  const scheduleReport = () => {
     if (timer) clearTimeout(timer);
     timer = setTimeout(report, 400);
-  }
+  };
 
-  function onPlay(e) {
+  const onPlay = (e) => {
     const t = e && e.target;
-    // Latch regardless of mute: a muted autoplay that she later unmutes
+    // Latch regardless of mute: a muted autoplay that the user later unmutes
     // must already count as started when volumechange re-reports.
     if (t && t.tagName === "VIDEO") {
       played.add(t);
       scheduleReport();
     }
-  }
-  function onEmptied(e) {
+  };
+  const onEmptied = (e) => {
     const t = e && e.target;
     if (t && t.tagName === "VIDEO") {
       played.delete(t);
       scheduleReport();
     }
-  }
+  };
 
   // play/playing don't bubble; capture at the document.
   document.addEventListener("play", onPlay, true);
@@ -184,5 +159,5 @@ if (
 
 // Test hook for node:test.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { collectVideos, usableVideoSrc, hostExcluded, DETECT_EXCLUDED_HOSTS, MIN_VIDEO_PX, pageVideoTitle, isStartedVideo };
+  module.exports = { collectVideos, usableVideoSrc, MIN_VIDEO_PX, pageVideoTitle, isStartedVideo };
 }
