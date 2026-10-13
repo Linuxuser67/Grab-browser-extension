@@ -748,6 +748,66 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(chrome._calls.some(([name]) => name === "cancel"), false);
     assert.equal(chrome._calls.some(([name]) => name === "removeFile"), false);
   });
+
+  test("sends full cookie attributes so Grab preserves browser scope", async () => {
+    chrome.cookies.getAll = async () => [
+      {
+        name: "sess",
+        value: "s3cr3t",
+        domain: "videos.example.com",
+        hostOnly: true,
+        path: "/watch",
+        secure: true,
+        expirationDate: 1893456000,
+      },
+      {
+        name: "prefs",
+        value: "dark",
+        domain: ".example.com",
+        hostOnly: false,
+        path: "/",
+        secure: false,
+        // No expirationDate: session cookie.
+      },
+    ];
+    mockFetch(200);
+    assert.equal(await bg.handOff("https://videos.example.com/watch/1"), true);
+    assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
+      url: "https://videos.example.com/watch/1",
+      cookies: [
+        {
+          name: "sess",
+          value: "s3cr3t",
+          domain: "videos.example.com",
+          host_only: true,
+          path: "/watch",
+          secure: true,
+          expiration_date: 1893456000,
+        },
+        {
+          name: "prefs",
+          value: "dark",
+          domain: ".example.com",
+          host_only: false,
+          path: "/",
+          secure: false,
+          // No expiration_date: session cookie; JSON.stringify omits it.
+        },
+      ],
+    });
+  });
+
+  test("cookie read failure falls back to a URL-only handoff", async () => {
+    chrome.cookies.getAll = async () => {
+      throw new Error("permission denied");
+    };
+    mockFetch(200);
+    assert.equal(await bg.handOff("https://example.com/f.zip"), true);
+    assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
+      url: "https://example.com/f.zip",
+      cookies: [],
+    });
+  });
 });
 
 describe("interception across worker restarts and fast downloads", () => {

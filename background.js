@@ -90,11 +90,21 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function postToGrab(url) {
   try {
     // Include the site's cookies so Grab's yt-dlp can pass bot challenges
-    // (Cloudflare etc.). Scoped to the URL's domain only.
+    // (Cloudflare etc.). Scoped to the URL's domain only. Full attributes
+    // preserve the browser's scope (host-only vs subdomain, path, secure,
+    // expiry); Grab falls back gracefully when they're absent.
     let cookies = [];
     try {
       const all = await chrome.cookies.getAll({ url });
-      cookies = all.map((c) => ({ name: c.name, value: c.value }));
+      cookies = all.map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        host_only: c.hostOnly,
+        path: c.path,
+        secure: c.secure,
+        expiration_date: c.expirationDate,
+      }));
     } catch {
       // Cookies unavailable (permission denied): send URL alone.
     }
