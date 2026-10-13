@@ -9,7 +9,6 @@
     "alarms",
     "contextMenus",
     "downloads",
-    "nativeMessaging",
     "storage",
     "webRequest"
   ],
