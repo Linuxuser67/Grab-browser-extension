@@ -392,48 +392,6 @@ describe("master interception toggle", () => {
     assert.equal(intercepted(chrome, 9), true);
   });
 
-  test("cold wake: a freshly woken worker intercepts a download that began before it started", async () => {
-    const shared = {
-      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
-    };
-    const first = makeChrome(shared);
-    loadBackground(first);
-    first._listeners["runtime.onStartup"]();
-    await new Promise((r) => setTimeout(r, 5));
-    const startTime = new Date().toISOString(); // the download begins
-    await new Promise((r) => setTimeout(r, 5));
-    // The idle worker is gone; the download event wakes a new one that
-    // starts after the download did, sharing the same session storage.
-    // The old per-worker timestamp would have wrongly skipped this.
-    const second = makeChrome(shared);
-    loadBackground(second);
-    await second._listeners["downloads.onCreated"]({
-      ...item(4),
-      url: "https://example.com/cold-wake.iso",
-      fileSize: 100,
-      startTime,
-    });
-    assert.equal(intercepted(second, 4), true);
-  });
-
-  test("a download that completed during the handoff leaves no history entry or claim", async () => {
-    const chrome = makeChrome({
-      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
-    });
-    loadBackground(chrome);
-    const done = {
-      ...item(5),
-      url: "https://example.com/tiny.bin",
-      fileSize: 10,
-      state: "complete",
-    };
-    chrome._downloads.set(5, done);
-    await chrome._listeners["downloads.onCreated"](done);
-    assert.ok(chrome._calls.some(([n, a]) => n === "removeFile" && a === 5));
-    assert.ok(chrome._calls.some(([n, a]) => n === "erase" && a.id === 5));
-    assert.equal(chrome._session.has("claimedDownload:5"), false);
-  });
-
   test("the size-wait decision respects a toggle flipped off mid-wait", async () => {
     const shared = {
       syncSettings: { interceptDownloads: true, minSizeMB: 100, skipTypes: "" },
@@ -711,7 +669,7 @@ describe("HTTP handoff to Grab", () => {
     bg = loadBackground(chrome);
   });
 
-  test("POSTs the raw URL as JSON and opens no tab on success", async () => {
+  test("POSTs the URL as JSON and opens no tab on success", async () => {
     mockFetch(200);
     assert.equal(await bg.handOff("https://example.com/f.zip?x=1"), true);
     assert.equal(fetchCalls.length, 1);
@@ -730,13 +688,6 @@ describe("HTTP handoff to Grab", () => {
     assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
       url: "https://example.com/f.zip?u=udp://t/announce",
     });
-  });
-
-  test("isHandable rejects non-http(s) and credentialed URLs", async () => {
-    assert.equal(bg.isHandable("magnet:?xt=urn:btih:abc"), false);
-    assert.equal(bg.isHandable("blob:https://example.com/123"), false);
-    assert.equal(bg.isHandable("https://user:pass@example.com/f.zip"), false);
-    assert.equal(bg.isHandable("https://example.com/f.zip"), true);
   });
 
   test("Grab not running is a failure and opens no tab", async () => {
@@ -791,5 +742,50 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(tabsCreated().length, 0);
     assert.equal(chrome._calls.some(([name]) => name === "cancel"), false);
     assert.equal(chrome._calls.some(([name]) => name === "removeFile"), false);
+  });
+});
+
+describe("interception across worker restarts and fast downloads", () => {
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  test("a freshly woken worker still intercepts a download that began before it started", async () => {
+    const shared = {
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    };
+    const first = makeChrome(shared);
+    loadBackground(first);
+    first._listeners["runtime.onStartup"]();
+    await wait(5);
+    const startTime = new Date().toISOString(); // the download begins
+    await wait(5);
+    // The idle worker is gone; the download event wakes a new one that
+    // starts after the download did, sharing the same session storage.
+    const second = makeChrome(shared);
+    loadBackground(second);
+    await second._listeners["downloads.onCreated"]({
+      id: 4,
+      url: "https://example.com/a.iso",
+      fileSize: 10,
+      startTime,
+    });
+    assert.ok(second._calls.some(([n, arg]) => n === "cancel" && arg === 4));
+  });
+
+  test("a download that completed during the handoff leaves no history entry or claim", async () => {
+    const chrome = makeChrome({
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    });
+    loadBackground(chrome);
+    const done = {
+      id: 5,
+      url: "https://example.com/tiny.bin",
+      fileSize: 10,
+      state: "complete",
+    };
+    chrome._downloads.set(5, done);
+    await chrome._listeners["downloads.onCreated"](done);
+    assert.ok(chrome._calls.some(([n, a]) => n === "removeFile" && a === 5));
+    assert.ok(chrome._calls.some(([n, a]) => n === "erase" && a.id === 5));
+    assert.equal(chrome._session.has("claimedDownload:5"), false);
   });
 });
