@@ -517,12 +517,26 @@ function classifyStream(url, contentType) {
 
 /// Menu title for a detected video: the video's own title when the content
 /// script reported one, otherwise the file name, decoded and shortened.
+/// First word of the video's page title ("Example" from
+/// "Example Video Title"). Null when there is no title.
+function titleWord(videoTitle) {
+  const w = String(videoTitle || "").trim().split(/\s+/)[0];
+  return w || null;
+}
+
+/// Label for a quality variant entry: one-word title, then the quality
+/// ("Example 1080p"). Falls back to the bare quality label when there
+/// is no page title.
+function qualityMenuLabel(pageTitle, variant, index) {
+  const quality = variantMenuTitle(variant, index);
+  const word = titleWord(pageTitle);
+  return word ? `${word} ${quality}` : quality;
+}
+
 function videoMenuTitle(url, index, videoTitle, total) {
-  if (videoTitle) {
-    const t = videoTitle.length > 40 ? videoTitle.slice(0, 40) + "…" : videoTitle;
-    // Number duplicates: several videos share one page title.
-    return total > 1 ? `${t} (${index + 1})` : t;
-  }
+  // One word: the menu stays scannable when a page holds several videos.
+  const word = titleWord(videoTitle);
+  if (word) return word;
   try {
     const name = decodeURIComponent(
       new URL(url).pathname.split("/").filter(Boolean).pop() || "",
@@ -637,6 +651,54 @@ async function fetchAllVariants(masterUrl) {
   }
 }
 
+/// Cache: master url -> EXT-X-MEDIA playlist URIs [url] (null when the fetch
+/// failed or none were found).
+const allMediaUrisCache = new Map();
+
+/// Fetch and parse the EXT-X-MEDIA playlist URIs (audio, subtitles) a
+/// master playlist references, resolved absolute. Cached. Null when the
+/// fetch fails or none are found.
+async function fetchAllMediaUris(masterUrl) {
+  if (allMediaUrisCache.has(masterUrl)) return allMediaUrisCache.get(masterUrl);
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    let text;
+    try {
+      const res = await fetch(masterUrl, { signal: ctrl.signal });
+      if (!res.ok) {
+        allMediaUrisCache.set(masterUrl, null);
+        return null;
+      }
+      text = await res.text();
+    } finally {
+      clearTimeout(timer);
+    }
+    const uris = parseHlsMediaUris(text, masterUrl);
+    const result = uris.length > 0 ? uris : null;
+    allMediaUrisCache.set(masterUrl, result);
+    if (allMediaUrisCache.size > 200) {
+      allMediaUrisCache.delete(allMediaUrisCache.keys().next().value);
+    }
+    return result;
+  } catch {
+    allMediaUrisCache.set(masterUrl, null);
+    return null;
+  }
+}
+
+/// Parse EXT-X-MEDIA URI attributes from master playlist text. Returns
+/// [url], resolved absolute against the master URL.
+function parseHlsMediaUris(text, baseUrl) {
+  const uris = [];
+  const re = /#EXT-X-MEDIA:[^\r\n]*?URI="([^"]+)"/g;
+  for (const m of text.matchAll(re)) {
+    const url = absoluteUrl(m[1], baseUrl);
+    if (url) uris.push(url);
+  }
+  return uris;
+}
+
 /// Muxed variants for the quality submenu: getHlsVariants filters out
 /// variants with an AUDIO= attribute pointing at an EXT-X-MEDIA group.
 /// Video-only variants are suppressed: handing one to Grab yields silent
@@ -709,22 +771,65 @@ async function preferMasterPlaylists(urls) {
   // Renditions a confirmed master references: dropped even when they live
   // outside the master's directory (CDN-split deployments).
   const childUrls = new Set();
+  // Manifests whose fetch failed: they may be masters the worker couldn't
+  // read (expiring tokens), so a directory group with a failed fetch among
+  // confirmed non-masters is probably one stream, not several.
+  const fetchFailed = new Set();
   for (let i = 0; i < manifests.length; i++) {
-    if (checks[i] !== true) continue;
     const u = manifests[i];
-    masters.add(u);
-    const d = urlDirectory(u);
-    if (d) masterDirs.add(d);
-    const variants = await fetchAllVariants(u);
-    for (const v of variants || []) childUrls.add(v.url);
+    if (checks[i] === true) {
+      masters.add(u);
+      const d = urlDirectory(u);
+      if (d) masterDirs.add(d);
+      const variants = await fetchAllVariants(u);
+      for (const v of variants || []) childUrls.add(v.url);
+      const mediaUris = await fetchAllMediaUris(u);
+      for (const m of mediaUris || []) childUrls.add(m);
+    } else if (checks[i] === null) {
+      fetchFailed.add(u);
+    }
   }
-  if (masters.size === 0) return urls;
+  // Group manifests by directory, in sniff order.
+  const byDir = new Map();
+  for (const u of manifests) {
+    const d = urlDirectory(u);
+    if (!d) continue;
+    if (!byDir.has(d)) byDir.set(d, []);
+    byDir.get(d).push(u);
+  }
+  // Fallback directories: several manifests, no confirmed master, but the
+  // earliest-sniffed fetch failed among confirmed non-masters. The player
+  // must fetch the master before its variants, so a failed fetch that
+  // wasn't first is a different (dead) video, not this group's master.
+  const fallbackKeep = new Set();
+  for (const [, group] of byDir) {
+    if (group.length < 2) continue;
+    if (group.some((u) => masters.has(u))) continue;
+    if (!fetchFailed.has(group[0])) continue;
+    if (!group.slice(1).some((u) => !fetchFailed.has(u) && !masters.has(u))) {
+      continue;
+    }
+    fallbackKeep.add(group[0]);
+  }
+  // The rest of each fallback group is dropped.
+  const fallbackDrop = new Set();
+  for (const [, group] of byDir) {
+    const keeper = [...fallbackKeep].find((k) => group.includes(k));
+    if (!keeper) continue;
+    for (const u of group) {
+      if (u !== keeper) fallbackDrop.add(u);
+    }
+  }
   return urls.filter((u) => {
     if (!MANIFEST_RE.test(u)) return true;
     if (masters.has(u)) return true;
     if (childUrls.has(u)) return false;
+    if (fallbackKeep.has(u)) return true;
+    if (fallbackDrop.has(u)) return false;
     const d = urlDirectory(u);
-    return !d || !masterDirs.has(d);
+    if (!d) return true;
+    if (masterDirs.has(d)) return false;
+    return true;
   });
 }
 
@@ -839,16 +944,17 @@ function doRefreshVideoMenu(tabId) {
         if (variants && variants.length > 1) {
           // Sort best quality first.
           variants.sort((a, b) => (b.height || 0) - (a.height || 0));
+          const pageTitle = videoFinds.get(tabId)?.title;
           const parentLabel = videoMenuTitle(
             u,
             items.length,
-            videoFinds.get(tabId)?.title,
+            pageTitle,
             urls.length,
           );
           variants.forEach((v, vi) => {
             items.push({
               url: v.url,
-              label: variantMenuTitle(v, vi),
+              label: qualityMenuLabel(pageTitle, v, vi),
               parent: parentLabel,
               parentId: `${VIDEO_ITEM_PREFIX}parent-${items.length}`,
             });
@@ -1062,6 +1168,7 @@ if (typeof module !== "undefined" && module.exports) {
     parseHlsVariants,
     getHlsVariants,
     variantMenuTitle,
+    qualityMenuLabel,
     hostExcluded,
     handOff,
     postToGrab,
