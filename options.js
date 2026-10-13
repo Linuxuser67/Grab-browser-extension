@@ -1,40 +1,31 @@
 // Options page: reflects chrome.storage.sync and saves on change.
-
-const DEFAULTS = {
-  interceptDownloads: false,
-  skipTypes: "",
-  showContextMenu: true,
-  minSizeMB: 0,
-};
+// DEFAULTS, loadSettings and saveSettings come from settings.js.
 
 const interceptEl = document.getElementById("interceptDownloads");
 const skipEl = document.getElementById("skipTypes");
 const menuEl = document.getElementById("showContextMenu");
+const detectEl = document.getElementById("detectVideos");
 const minSizeEl = document.getElementById("minSizeMB");
 const savedEl = document.getElementById("saved");
 
 let saveTimer = null;
 
 async function load() {
-  const settings = await chrome.storage.sync.get(DEFAULTS);
+  const settings = await loadSettings();
   interceptEl.checked = settings.interceptDownloads;
   skipEl.value = settings.skipTypes;
   menuEl.checked = settings.showContextMenu;
+  detectEl.checked = settings.detectVideos !== false;
   minSizeEl.value = settings.minSizeMB;
 }
 
 async function save() {
-  await chrome.storage.sync.set({
+  await saveSettings({
     interceptDownloads: interceptEl.checked,
-    // Normalize the skip list once, on the way in.
-    skipTypes: skipEl.value
-      .split(",")
-      .map((s) => s.trim().toLowerCase().replace(/^\./, ""))
-      .filter((s) => s !== "")
-      .join(", "),
+    skipTypes: skipEl.value,
     showContextMenu: menuEl.checked,
-    // Whole megabytes, never negative.
-    minSizeMB: Math.max(0, Math.floor(Number(minSizeEl.value) || 0)),
+    detectVideos: detectEl.checked,
+    minSizeMB: minSizeEl.value,
   });
   savedEl.style.opacity = "1";
   clearTimeout(saveTimer);
@@ -46,6 +37,7 @@ async function save() {
 interceptEl.addEventListener("change", save);
 skipEl.addEventListener("change", save);
 menuEl.addEventListener("change", save);
+detectEl.addEventListener("change", save);
 minSizeEl.addEventListener("change", save);
 
 load();

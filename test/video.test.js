@@ -731,17 +731,14 @@ describe("excluded hosts", () => {
     assert.equal(bg.hostExcluded(null), false);
   });
 
-  test("content script hostExcluded agrees with the worker's", () => {
+  // The content script no longer keeps its own exclusion list; the worker
+  // gates reports by sender.tab.url (single source of truth).
+  test("worker drops reports from yt-dlp-exclusive hosts", () => {
     const bg = loadBackground(makeChrome());
-    const content = loadContent();
-    assert.deepEqual(
-      [...content.DETECT_EXCLUDED_HOSTS].sort(),
-      [...bg.YTDLP_EXCLUSIVE_HOSTS].sort(),
-      "the two exclusion lists must stay in sync"
-    );
-    for (const h of ["instagram.com", "www.tiktok.com", "youtube.com", "x.com", "example.com"]) {
-      assert.equal(content.hostExcluded(h), bg.hostExcluded(h), h);
+    for (const h of ["instagram.com", "www.tiktok.com", "youtube.com", "x.com"]) {
+      assert.equal(bg.hostExcluded(h), true, h);
     }
+    assert.equal(bg.hostExcluded("example.com"), false);
   });
 
   test("no menu or badge on excluded hosts, even with finds", async () => {
