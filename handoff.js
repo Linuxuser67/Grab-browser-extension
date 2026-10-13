@@ -153,6 +153,23 @@ async function readCookies(url) {
   }
 }
 
+const MAX_COOKIES = 100;
+
+/// POST one body to Grab. Resolves to the HTTP status.
+async function postBody(url, cookies, secret) {
+  const body = JSON.stringify({ url, cookies });
+  const headers = { "Content-Type": "application/json" };
+  if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
+  // confirm=1: Grab answers only once the user has approved or declined, so
+  // the browser's own download is cancelled only when Grab really took over.
+  const resp = await fetchWithTimeout(
+    `${GRAB_HTTP_URL}?confirm=1`,
+    { method: "POST", headers, body },
+    CONFIRM_TIMEOUT_MS,
+  );
+  return resp.status;
+}
+
 /// POST one URL to Grab and wait for its answer to the confirm dialog.
 /// Resolves to the HTTP status, 0 when Grab can't be reached (not running),
 /// or STATUS_UNVERIFIED when the listener could not prove it is Grab.
@@ -164,19 +181,14 @@ async function postToGrab(url) {
       if (!(await verifyGrab(secret))) return STATUS_UNVERIFIED;
       // Cookies let Grab's yt-dlp pass bot challenges (Cloudflare etc.).
       // They go only to a Grab that has proven it holds the pairing code.
-      cookies = await readCookies(url);
+      cookies = (await readCookies(url)).slice(0, MAX_COOKIES);
     }
-    const body = JSON.stringify({ url, cookies });
-    const headers = { "Content-Type": "application/json" };
-    if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
-    // confirm=1: Grab answers only once the user has approved or declined, so
-    // the browser's own download is cancelled only when Grab really took over.
-    const resp = await fetchWithTimeout(
-      `${GRAB_HTTP_URL}?confirm=1`,
-      { method: "POST", headers, body },
-      CONFIRM_TIMEOUT_MS,
-    );
-    return resp.status;
+    let status = await postBody(url, cookies, secret);
+    // Cookies are an extra: a rejected body must not lose the handoff.
+    if ((status === 400 || status === 413) && cookies.length > 0) {
+      status = await postBody(url, [], secret);
+    }
+    return status;
   } catch {
     return 0;
   }
