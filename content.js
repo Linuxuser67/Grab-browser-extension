@@ -10,9 +10,31 @@
 
 const MIN_VIDEO_PX = 120; // ignore tiny players (ads, trackers)
 
-// The worker gates reports by sender.tab.url against YTDLP_EXCLUSIVE_HOSTS,
-// so the content script reports unconditionally — no host list to keep in
-// sync here.
+// Video platforms yt-dlp extracts (auth-gated/expiring CDN URLs or DRM):
+// detection only produces noise there. Keep in sync with
+// YTDLP_EXCLUSIVE_HOSTS in background.js — the worker gates the menu too,
+// for manifests sniffed without a page report.
+const DETECT_EXCLUDED_HOSTS = [
+  "youtube.com",
+  "youtu.be",
+  "vimeo.com",
+  "dailymotion.com",
+  "dai.ly",
+  "tiktok.com",
+  "instagram.com",
+  "facebook.com",
+  "fb.com",
+  "fb.watch",
+  "twitter.com",
+  "x.com",
+  "twitch.tv",
+];
+
+/// True for the host itself and any subdomain, never for lookalikes.
+function hostExcluded(host) {
+  const h = String(host || "").toLowerCase();
+  return DETECT_EXCLUDED_HOSTS.some((d) => h === d || h.endsWith("." + d));
+}
 
 /// First http(s) candidate among currentSrc, src and <source> children.
 function usableVideoSrc(video) {
@@ -53,7 +75,7 @@ function isStartedVideo(v, played) {
   return !v.paused && !v.ended && (v.currentTime || 0) > 0;
 }
 
-/// Pure over a document-like: [{src, blob}] for each qualifying <video>.
+/// Pure over a document-like: [{src, blob, height?}] for each qualifying <video>.
 /// `isPlayed` decides which videos count as started by the user; the live
 /// wiring passes `(v) => isStartedVideo(v, played)`. Tests pass explicit
 /// predicates.
@@ -65,7 +87,10 @@ function collectVideos(doc, isPlayed) {
     if (!isBigEnough(v)) continue;
     if (isPlayed && !isPlayed(v)) continue;
     const src = usableVideoSrc(v);
-    out.push({ src, blob: !src && isBlobVideo(v) });
+    const entry = { src, blob: !src && isBlobVideo(v) };
+    // Decoded height (known after metadata loads): labels direct files.
+    if (v.videoHeight > 0) entry.height = v.videoHeight;
+    out.push(entry);
   }
   return out;
 }
@@ -91,12 +116,15 @@ function pageVideoTitle(doc) {
 if (
   typeof chrome !== "undefined" &&
   chrome.runtime &&
-  typeof document !== "undefined"
+  typeof document !== "undefined" &&
+  // No reporting where detection can't produce a downloadable URL; the
+  // worker applies the same gate to sniffed manifests.
+  (typeof location === "undefined" || !hostExcluded(location.hostname))
 ) {
   const played = new WeakSet();
   let lastSent = "";
 
-  const report = () => {
+  function report() {
     const videos = collectVideos(document, (v) => isStartedVideo(v, played));
     const snapshot = JSON.stringify(videos);
     if (snapshot === lastSent) return;
@@ -106,15 +134,15 @@ if (
       videos,
       title: pageVideoTitle(document),
     });
-  };
+  }
 
   let timer = null;
-  const scheduleReport = () => {
+  function scheduleReport() {
     if (timer) clearTimeout(timer);
     timer = setTimeout(report, 400);
-  };
+  }
 
-  const onPlay = (e) => {
+  function onPlay(e) {
     const t = e && e.target;
     // Latch regardless of mute: a muted autoplay that the user later unmutes
     // must already count as started when volumechange re-reports.
@@ -122,20 +150,22 @@ if (
       played.add(t);
       scheduleReport();
     }
-  };
-  const onEmptied = (e) => {
+  }
+  function onEmptied(e) {
     const t = e && e.target;
     if (t && t.tagName === "VIDEO") {
       played.delete(t);
       scheduleReport();
     }
-  };
+  }
 
   // play/playing don't bubble; capture at the document.
   document.addEventListener("play", onPlay, true);
   document.addEventListener("playing", onPlay, true);
   document.addEventListener("emptied", onEmptied, true);
   document.addEventListener("volumechange", () => scheduleReport(), true);
+  // The decoded height only exists once metadata has loaded.
+  document.addEventListener("loadedmetadata", () => scheduleReport(), true);
 
   // Initial sweep: latch videos already playing when this script ran; the
   // audible check happens at collect time.
@@ -159,5 +189,5 @@ if (
 
 // Test hook for node:test.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { collectVideos, usableVideoSrc, MIN_VIDEO_PX, pageVideoTitle, isStartedVideo };
+  module.exports = { collectVideos, usableVideoSrc, hostExcluded, DETECT_EXCLUDED_HOSTS, MIN_VIDEO_PX, pageVideoTitle, isStartedVideo };
 }
