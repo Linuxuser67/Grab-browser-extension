@@ -691,6 +691,80 @@ function parseHlsMediaUris(text, baseUrl) {
   return uris;
 }
 
+// --- DASH parsing ----------------------------------------------------------
+
+/// Cache: MPD url -> parsed video representations (null when unreadable).
+const dashCache = new Map();
+const DASH_TEXT_CAP = 2 * 1024 * 1024;
+
+/// Value of attribute `name` inside one tag's attribute text, or null.
+function xmlAttr(attrs, name) {
+  const m = new RegExp(`(?:^|\\s)${name}="([^"]*)"`).exec(attrs || "");
+  return m ? m[1] : null;
+}
+
+/// "30000/1001" -> 29.97, "25" -> 25, junk -> null.
+function parseFrameRate(value) {
+  if (!value) return null;
+  const [n, d] = String(value).split("/");
+  const num = parseFloat(n);
+  const den = d === undefined ? 1 : parseFloat(d);
+  if (!(num > 0) || !(den > 0)) return null;
+  return Math.round((num / den) * 100) / 100;
+}
+
+/// Video representations of an MPD, best first: [{height, bandwidth, fps}].
+function parseDashRepresentations(text) {
+  const out = [];
+  const seen = new Set();
+  const sets = String(text).matchAll(
+    /<AdaptationSet\b([^>]*)>([\s\S]*?)<\/AdaptationSet>/gi,
+  );
+  for (const set of sets) {
+    const setAttrs = set[1];
+    for (const rep of set[2].matchAll(/<Representation\b([^>]*)>/gi)) {
+      const a = rep[1];
+      const mime =
+        xmlAttr(a, "mimeType") ||
+        xmlAttr(setAttrs, "mimeType") ||
+        xmlAttr(setAttrs, "contentType") ||
+        "";
+      const height = parseInt(
+        xmlAttr(a, "height") || xmlAttr(setAttrs, "height"),
+        10,
+      );
+      if (!(/^video/i.test(mime) || (!mime && height > 0))) continue;
+      const bandwidth = parseInt(xmlAttr(a, "bandwidth"), 10);
+      const key = `${height}:${bandwidth}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        height: height > 0 ? height : null,
+        bandwidth: bandwidth > 0 ? bandwidth : null,
+        fps: parseFrameRate(
+          xmlAttr(a, "frameRate") || xmlAttr(setAttrs, "frameRate"),
+        ),
+      });
+    }
+  }
+  return out.sort(
+    (a, b) => (b.height || 0) - (a.height || 0) || (b.bandwidth || 0) - (a.bandwidth || 0),
+  );
+}
+
+/// Fetch and parse an MPD once. Null when the fetch fails or no video
+/// representation is found.
+async function fetchDashRepresentations(url) {
+  if (dashCache.has(url)) return dashCache.get(url);
+  const text = await fetchPlaylistText(url);
+  if (text === null) return null;
+  const reps = parseDashRepresentations(text.slice(0, DASH_TEXT_CAP));
+  const result = reps.length > 0 ? reps : null;
+  dashCache.set(url, result);
+  if (dashCache.size > 200) dashCache.delete(dashCache.keys().next().value);
+  return result;
+}
+
 /// Muxed variants for the quality submenu: getHlsVariants filters out
 /// variants with an AUDIO= attribute pointing at an EXT-X-MEDIA group.
 /// Video-only variants are suppressed: handing one to Grab yields silent
@@ -756,6 +830,7 @@ function variantMenuTitle(variant, index) {
 }
 
 const MANIFEST_RE = /\.(m3u8|m3u)([?#]|$)/i;
+const DASH_RE = /\.mpd([?#]|$)/i;
 
 /// From the detected manifest URLs, drop media playlists that belong to a
 /// confirmed master playlist: renditions the master references (wherever
@@ -994,6 +1069,38 @@ function doRefreshVideoMenu(tabId) {
           continue;
         }
       }
+      // DASH: one submenu with quality entries (info) and a Download row
+      // handing the MPD.
+      if (DASH_RE.test(u)) {
+        const reps = await fetchDashRepresentations(u);
+        if (reps && reps.length > 0) {
+          const pageTitle = videoFinds.get(tabId)?.title;
+          const parentLabel = videoMenuTitle(
+            u,
+            items.length,
+            pageTitle,
+            urls.length,
+          );
+          const parentId = `${VIDEO_ITEM_PREFIX}parent-${items.length}`;
+          reps.forEach((r, ri) => {
+            items.push({
+              url: null,
+              label: qualityMenuLabel(pageTitle, r, ri),
+              parent: parentLabel,
+              parentId,
+              info: true,
+            });
+          });
+          items.push({
+            url: u,
+            label: "Download",
+            parent: parentLabel,
+            parentId,
+            masterUrl: u,
+          });
+          continue;
+        }
+      }
       items.push({
         url: u,
         label: videoMenuTitle(
@@ -1005,7 +1112,7 @@ function doRefreshVideoMenu(tabId) {
         parent: null,
       });
     }
-    menuUrls = items.map((it) => it.url);
+    menuUrls = [];
     if (items.length === 0) return;
     // Parents encode their master URL's menuUrls index: the master isn't in
     // items (only variants are), so append it and rewrite the parent ID.
@@ -1027,7 +1134,8 @@ function doRefreshVideoMenu(tabId) {
     });
     // Group variant children under their parent label.
     let lastParentId = null;
-    items.forEach((it, i) => {
+    let menuIdx = 0;
+    items.forEach((it) => {
       if (it.parent) {
         if (it.parentId !== lastParentId) {
           safeMenuCreate({
@@ -1038,16 +1146,29 @@ function doRefreshVideoMenu(tabId) {
           });
           lastParentId = it.parentId;
         }
-        safeMenuCreate({
-          id: `${VIDEO_ITEM_PREFIX}${i}`,
-          parentId: it.parentId,
-          title: it.label,
-          contexts: ["page", "video", "link"],
-        });
+        if (it.info) {
+          safeMenuCreate({
+            id: `${VIDEO_ITEM_PREFIX}info-${menuIdx}`,
+            parentId: it.parentId,
+            title: it.label,
+            enabled: false,
+            contexts: ["page", "video", "link"],
+          });
+        } else {
+          const idx = menuUrls.push(it.url) - 1;
+          safeMenuCreate({
+            id: `${VIDEO_ITEM_PREFIX}${idx}`,
+            parentId: it.parentId,
+            title: it.label,
+            contexts: ["page", "video", "link"],
+          });
+        }
+        menuIdx++;
       } else {
         lastParentId = null;
+        const idx = menuUrls.push(it.url) - 1;
         safeMenuCreate({
-          id: `${VIDEO_ITEM_PREFIX}${i}`,
+          id: `${VIDEO_ITEM_PREFIX}${idx}`,
           parentId: VIDEO_PARENT_ID,
           title: it.label,
           contexts: ["page", "video", "link"],
@@ -1215,6 +1336,8 @@ if (typeof module !== "undefined" && module.exports) {
     parseHlsVariants,
     getHlsVariants,
     variantMenuTitle,
+    parseDashRepresentations,
+    fetchDashRepresentations,
     qualityMenuLabel,
     hostExcluded,
     handOff,
