@@ -152,6 +152,11 @@ describe("classifyStream", () => {
     const L = chrome._listeners;
     await L["tabs.onActivated"]({ tabId: 5 });
     L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://a.example.com/a.mp4", responseHeaders: [] });
+    // Played-only menu: the sniffed URL needs a started video to surface.
+    L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: "https://a.example.com/v.mp4", blob: false }] },
+      { tab: { id: 5 } }
+    );
     await new Promise((r) => setTimeout(r, 30));
     L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, { id: -1 });
     const call = chrome._calls.find(([n]) => n === "tabs.update");
@@ -289,7 +294,8 @@ describe("collectVideos (content script)", () => {
 
   test("collects direct http(s) sources", () => {
     const videos = content.collectVideos(
-      fakeDoc([fakeVideo({ src: "https://cdn.example.com/v.mp4", w: 640, h: 360 })])
+      fakeDoc([fakeVideo({ src: "https://cdn.example.com/v.mp4", w: 640, h: 360 })]),
+      () => true
     );
     assert.deepEqual(videos, [{ src: "https://cdn.example.com/v.mp4", blob: false }]);
   });
@@ -302,34 +308,102 @@ describe("collectVideos (content script)", () => {
       querySelectorAll: (sel) =>
         sel === "source" ? [{ src: "https://cdn.example.com/s.webm" }] : [],
     };
-    const videos = content.collectVideos(fakeDoc([withSource]));
+    const videos = content.collectVideos(fakeDoc([withSource]), () => true);
     assert.deepEqual(videos, [{ src: "https://cdn.example.com/s.webm", blob: false }]);
   });
 
   test("blob: sources are flagged, not collected", () => {
     const videos = content.collectVideos(
-      fakeDoc([fakeVideo({ src: "blob:https://example.com/uuid", w: 640, h: 360 })])
+      fakeDoc([fakeVideo({ src: "blob:https://example.com/uuid", w: 640, h: 360 })]),
+      () => true
     );
     assert.deepEqual(videos, [{ src: null, blob: true }]);
   });
 
   test("tiny players are ignored (ads, trackers)", () => {
     const videos = content.collectVideos(
-      fakeDoc([fakeVideo({ src: "https://cdn.example.com/ad.mp4", w: 60, h: 40 })])
+      fakeDoc([fakeVideo({ src: "https://cdn.example.com/ad.mp4", w: 60, h: 40 })]),
+      () => true
     );
     assert.deepEqual(videos, []);
   });
 
   test("no videos gives an empty list", () => {
-    assert.deepEqual(content.collectVideos(fakeDoc([])), []);
-    assert.deepEqual(content.collectVideos(null), []);
+    assert.deepEqual(content.collectVideos(fakeDoc([]), () => true), []);
+    assert.deepEqual(content.collectVideos(null, () => true), []);
+  });
+
+  test("unstarted videos are excluded by the played predicate", () => {
+    const started = {
+      ...fakeVideo({ src: "https://cdn.example.com/a.mp4", w: 640, h: 360 }),
+      _started: true,
+    };
+    const idle = {
+      ...fakeVideo({ src: "https://cdn.example.com/b.mp4", w: 640, h: 360 }),
+      _started: false,
+    };
+    const videos = content.collectVideos(
+      fakeDoc([started, idle]),
+      (v) => v._started === true
+    );
+    assert.deepEqual(videos, [{ src: "https://cdn.example.com/a.mp4", blob: false }]);
+  });
+});
+
+describe("isStartedVideo (content script)", () => {
+  let content;
+  beforeEach(() => {
+    content = loadContent();
+  });
+
+  const playedSet = (videos) => {
+    const s = new WeakSet();
+    for (const v of videos) s.add(v);
+    return s;
+  };
+  const pv = (opts) => ({
+    muted: false,
+    paused: true,
+    ended: false,
+    currentTime: 0,
+    ...opts,
+  });
+
+  test("latched videos count even when paused (pause to right-click)", () => {
+    const video = pv({ paused: true, currentTime: 42 });
+    assert.equal(content.isStartedVideo(video, playedSet([video])), true);
+  });
+
+  test("muted videos never count, latched or not", () => {
+    const latched = pv({ muted: true, paused: true, currentTime: 42 });
+    assert.equal(content.isStartedVideo(latched, playedSet([latched])), false);
+    const autoplaying = pv({ muted: true, paused: false, currentTime: 5 });
+    assert.equal(content.isStartedVideo(autoplaying, playedSet([])), false);
+  });
+
+  test("audibly playing videos count without a latch (autoplay)", () => {
+    assert.equal(
+      content.isStartedVideo(pv({ paused: false, currentTime: 5 }), playedSet([])),
+      true
+    );
+  });
+
+  test("paused, ended, or unstarted videos do not count", () => {
+    const empty = playedSet([]);
+    assert.equal(content.isStartedVideo(pv({ paused: true, currentTime: 0 }), empty), false);
+    assert.equal(
+      content.isStartedVideo(pv({ paused: false, ended: true, currentTime: 5 }), empty),
+      false
+    );
+    assert.equal(content.isStartedVideo(pv({ paused: false, currentTime: 0 }), empty), false);
+    assert.equal(content.isStartedVideo(null, empty), false);
   });
 });
 
 describe("detection wiring", () => {
   const tick = () => new Promise((r) => setTimeout(r, 30));
 
-  test("a sniffed manifest appears in the menu and badge, and clicks hand off", async () => {
+  test("a sniffed manifest appears in the menu and badge once a video is played, and clicks hand off", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
     const L = chrome._listeners;
@@ -341,15 +415,31 @@ describe("detection wiring", () => {
       responseHeaders: [],
     });
     await tick();
+    // Sniffing alone shows nothing: no video was started.
+    assert.equal(
+      chrome._calls.some(([n, id]) => n === "menus.create" && String(id).startsWith("grabVideo")),
+      false,
+      "no menu from sniffing alone"
+    );
+    // She presses play: the content script reports the started video.
+    L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }],
+      },
+      { tab: { id: 5 } }
+    );
+    await tick();
 
     const created = chrome._calls.filter(([n]) => n === "menus.create").map(([, id]) => id);
     assert.ok(created.includes("grabVideos"), "parent menu created");
     assert.ok(created.includes("grabVideo:0"), "child menu created");
+    assert.ok(created.includes("grabVideo:1"), "sniffed manifest rides along");
 
     const badge = chrome._calls.find(([n]) => n === "action.setBadgeText");
-    assert.deepEqual(badge[1], { tabId: 5, text: "1" });
+    assert.deepEqual(badge[1], { tabId: 5, text: "2" });
 
-    L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, null);
+    L["menus.onClicked"]({ menuItemId: "grabVideo:1" }, null);
     assert.ok(
       chrome._calls.some(
         ([n, arg]) => n === "tabs.update" && arg.url === "grab://https/cdn.example.com/s/stream.m3u8"
@@ -364,17 +454,27 @@ describe("detection wiring", () => {
     const L = chrome._listeners;
     await L["tabs.onActivated"]({ tabId: 5 });
     L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://a.example.com/a.mp4", responseHeaders: [] });
+    // Played-only menu: the sniffed URL needs a started video to surface.
+    L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: "https://a.example.com/v.mp4", blob: false }] },
+      { tab: { id: 5 } }
+    );
     await tick();
     // Second window: its active tab becomes the menu's tab.
     await L["tabs.onActivated"]({ tabId: 6 });
     L["webRequest.onResponseStarted"]({ tabId: 6, url: "https://b.example.com/b.mp4", responseHeaders: [] });
     L["webRequest.onResponseStarted"]({ tabId: 6, url: "https://b.example.com/c.mp4", responseHeaders: [] });
+    L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: "https://b.example.com/v.mp4", blob: false }] },
+      { tab: { id: 6 } }
+    );
     await tick();
     // Right-click lands in tab 5 (window 1 focused again, no onActivated fired).
-    L["menus.onClicked"]({ menuItemId: "grabVideo:1" }, { id: 5 });
+    // The menu was built from tab 6: [v.mp4, b.mp4, c.mp4], so index 2 is c.mp4.
+    L["menus.onClicked"]({ menuItemId: "grabVideo:2" }, { id: 5 });
     assert.ok(
       chrome._calls.some(([n, arg]) => n === "tabs.update" && arg.url === "grab://https/b.example.com/c.mp4"),
-      "the labelled item (second entry of the menu) is what gets sent"
+      "the labelled item (third entry of the menu) is what gets sent"
     );
   });
 
@@ -392,9 +492,16 @@ describe("detection wiring", () => {
     await L["tabs.onActivated"]({ tabId: 5 });
     L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://cdn.example.com/v/index.m3u8", responseHeaders: [] });
     L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://cdn.example.com/v/master.m3u8", responseHeaders: [] });
+    // Played-only menu: the sniffed manifests need a started video to surface.
+    L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }] },
+      { tab: { id: 5 } }
+    );
     await tick();
     await tick();
-    L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, { id: 5 });
+    // Menu is [clip.mp4, master.m3u8]: the direct source first, then the
+    // filtered master.
+    L["menus.onClicked"]({ menuItemId: "grabVideo:1" }, { id: 5 });
     assert.ok(
       chrome._calls.some(([n, arg]) => n === "tabs.update" && arg.url === "grab://https/cdn.example.com/v/master.m3u8"),
       "master playlist is sent"
@@ -528,6 +635,11 @@ describe("detection wiring", () => {
       url: "https://cdn.example.com/s/stream.m3u8",
       responseHeaders: [],
     });
+    // Played-only menu: the sniffed manifest needs a started video to surface.
+    L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }] },
+      { tab: { id: 5 } }
+    );
     await tick();
     assert.ok(chrome._calls.some(([n, id]) => n === "menus.create" && id === "grabVideo:0"));
 
@@ -671,6 +783,11 @@ describe("excluded hosts", () => {
       url: "https://cdn.example.com/s/stream.m3u8",
       responseHeaders: [],
     });
+    // Played-only menu: the sniffed manifest needs a started video to surface.
+    L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }] },
+      { tab: { id: 9 } }
+    );
     await tick();
     await tick();
     assert.ok(
