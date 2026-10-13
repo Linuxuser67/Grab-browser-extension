@@ -586,6 +586,10 @@ function videoMenuTitle(url, index, videoTitle, total) {
 /// parsing so each playlist is fetched once.
 const playlistTextCache = new Map();
 
+/// Cap on cached playlist text: master playlists are KBs; this bounds
+/// memory if a huge media playlist is ever sniffed.
+const PLAYLIST_TEXT_CAP = 256 * 1024;
+
 /// Fetch an HLS playlist's text (cached). Null when the fetch failed or the
 /// content couldn't be read.
 async function fetchPlaylistText(url) {
@@ -597,7 +601,7 @@ async function fetchPlaylistText(url) {
     try {
       const res = await fetch(url, { signal: ctrl.signal });
       if (!res.ok) return null;
-      text = await res.text();
+      text = (await res.text()).slice(0, PLAYLIST_TEXT_CAP);
     } finally {
       clearTimeout(timer);
     }
