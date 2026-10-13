@@ -865,3 +865,47 @@ describe("variantMenuTitle", () => {
     );
   });
 });
+
+describe("getHlsVariants muxed-audio filter", () => {
+  let bg;
+  const MASTER = "https://cdn.example.com/hls/master.m3u8";
+
+  beforeEach(() => {
+    bg = loadBackground(makeChrome());
+  });
+
+  test("keeps only variants without an AUDIO group", async () => {
+    const body = [
+      "#EXTM3U",
+      '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a1",NAME="English",DEFAULT=YES,URI="audio.m3u8"',
+      '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO="a1"',
+      "index-v1.m3u8",
+      '#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720',
+      "index-v2.m3u8",
+    ].join("\n");
+    globalThis.fetch = async () => ({ ok: true, text: async () => body });
+    const out = await bg.getHlsVariants(MASTER);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].height, 720);
+    assert.equal(out[0].url, "https://cdn.example.com/hls/index-v2.m3u8");
+  });
+
+  test("returns null when all variants use separate audio", async () => {
+    const body = [
+      "#EXTM3U",
+      '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a1",NAME="English",URI="audio.m3u8"',
+      '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO="a1"',
+      "index-v1.m3u8",
+    ].join("\n");
+    globalThis.fetch = async () => ({ ok: true, text: async () => body });
+    assert.equal(await bg.getHlsVariants(MASTER), null);
+  });
+
+  test("parseHlsVariants captures the audio group", () => {
+    const body = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=640x360,AUDIO="a1"\nv.m3u8\n';
+    const out = bg.parseHlsVariants(body, MASTER);
+    assert.equal(out[0].audioGroup, "a1");
+    const body2 = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=640x360\nv.m3u8\n";
+    assert.equal(bg.parseHlsVariants(body2, MASTER)[0].audioGroup, null);
+  });
+});
