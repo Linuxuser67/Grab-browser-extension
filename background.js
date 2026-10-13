@@ -724,26 +724,34 @@ function parseHlsVariants(text, baseUrl) {
     const res = /RESOLUTION=(\d+)x(\d+)/i.exec(attrs);
     const bw = /BANDWIDTH=(\d+)/i.exec(attrs);
     const audio = /AUDIO="([^"]+)"/i.exec(attrs);
+    const fps = /FRAME-RATE=([\d.]+)/i.exec(attrs);
     variants.push({
       url,
       height: res ? parseInt(res[2], 10) : null,
       bandwidth: bw ? parseInt(bw[1], 10) : null,
       audioGroup: audio ? audio[1] : null,
+      fps: fps ? parseFloat(fps[1]) : null,
     });
   }
   return variants;
 }
 
-/// Menu label for a variant: "1080p", "720p", falling back to bandwidth
-/// ("2.5 Mbps") or the file name when resolution is absent.
+/// Menu label for a variant, media-bridge's format:
+/// "1080p • 8.00 Mbps • 60 fps". Falls back to the file name when no
+/// quality attributes are present.
+/// (Ported from jvillegasd/media-bridge, MIT, Copyright (c) 2026 Johnny Villegas.)
 function variantMenuTitle(variant, index) {
-  if (variant.height) return `${variant.height}p`;
-  if (variant.bandwidth) {
-    const mbps = variant.bandwidth / 1_000_000;
-    return mbps >= 1
-      ? `${mbps.toFixed(1)} Mbps`
-      : `${Math.round(variant.bandwidth / 1000)} kbps`;
+  const parts = [];
+  if (variant.height) {
+    parts.push(`${variant.height}p`);
   }
+  if (variant.bandwidth) {
+    parts.push(`${(variant.bandwidth / 1000000).toFixed(2)} Mbps`);
+  }
+  if (variant.fps) {
+    parts.push(`${variant.fps} fps`);
+  }
+  if (parts.length > 0) return parts.join(" • ");
   try {
     const name = decodeURIComponent(
       new URL(variant.url).pathname.split("/").filter(Boolean).pop() || "",
@@ -769,8 +777,12 @@ async function preferMasterPlaylists(urls) {
   const masters = new Set();
   const masterDirs = new Set();
   // Renditions a confirmed master references: dropped even when they live
-  // outside the master's directory (CDN-split deployments).
+  // outside the master's directory (CDN-split deployments). Matched by
+  // exact URL and by path key, so rotated tokens don't break grouping.
+  // (Path-key technique ported from jvillegasd/media-bridge, MIT,
+  // Copyright (c) 2026 Johnny Villegas.)
   const childUrls = new Set();
+  const childPathKeys = new Set();
   // Manifests whose fetch failed: they may be masters the worker couldn't
   // read (expiring tokens), so a directory group with a failed fetch among
   // confirmed non-masters is probably one stream, not several.
@@ -782,9 +794,15 @@ async function preferMasterPlaylists(urls) {
       const d = urlDirectory(u);
       if (d) masterDirs.add(d);
       const variants = await fetchAllVariants(u);
-      for (const v of variants || []) childUrls.add(v.url);
+      for (const v of variants || []) {
+        childUrls.add(v.url);
+        childPathKeys.add(urlPathKey(v.url));
+      }
       const mediaUris = await fetchAllMediaUris(u);
-      for (const m of mediaUris || []) childUrls.add(m);
+      for (const m of mediaUris || []) {
+        childUrls.add(m);
+        childPathKeys.add(urlPathKey(m));
+      }
     } else if (checks[i] === null) {
       fetchFailed.add(u);
     }
@@ -823,7 +841,7 @@ async function preferMasterPlaylists(urls) {
   return urls.filter((u) => {
     if (!MANIFEST_RE.test(u)) return true;
     if (masters.has(u)) return true;
-    if (childUrls.has(u)) return false;
+    if (childUrls.has(u) || childPathKeys.has(urlPathKey(u))) return false;
     if (fallbackKeep.has(u)) return true;
     if (fallbackDrop.has(u)) return false;
     const d = urlDirectory(u);
@@ -885,13 +903,33 @@ function sniffedHeader(headers, name) {
   return "";
 }
 
+/// Origin + pathname of a URL, ignoring query strings and fragments.
+/// Used to dedupe and match playlists whose auth tokens rotate.
+/// (Path-key technique ported from jvillegasd/media-bridge, MIT,
+/// Copyright (c) 2026 Johnny Villegas.)
+function urlPathKey(u) {
+  try {
+    const p = new URL(u);
+    return p.origin + p.pathname;
+  } catch {
+    return String(u);
+  }
+}
+
 function noteSniffed(tabId, url) {
   let f = videoFinds.get(tabId);
   if (!f) {
     f = { frames: new Map(), sniffed: [] };
     videoFinds.set(tabId, f);
   }
-  if (!f.sniffed.includes(url)) {
+  // Dedupe by path key: re-fetches with rotated tokens update the entry
+  // instead of duplicating it. Trade-off: videos distinguished only by
+  // query string collapse to the latest URL (rare in HLS practice).
+  const key = urlPathKey(url);
+  const idx = f.sniffed.findIndex((u) => urlPathKey(u) === key);
+  if (idx >= 0) {
+    f.sniffed[idx] = url;
+  } else {
     f.sniffed.push(url);
     // Bound the list: a long-lived tab could otherwise grow it forever.
     if (f.sniffed.length > 50) f.sniffed.splice(0, f.sniffed.length - 50);

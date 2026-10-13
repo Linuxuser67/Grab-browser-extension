@@ -918,6 +918,21 @@ describe("preferMasterPlaylists", () => {
     assert.deepEqual(out, [MASTER]);
   });
 
+  test("matches variants by path key when tokens rotate", async () => {
+    // The master references ?session=AAA but the player fetched ?session=BBB,
+    // and the variant lives outside the master's directory (only the path
+    // key matches, not the directory heuristic).
+    const body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\n../videos/v1.m3u8?session=AAA\n";
+    globalThis.fetch = async (url) => ({
+      ok: true,
+      text: async () => (String(url).includes("master.m3u8") ? body : MEDIA_BODY),
+    });
+    bg = loadBackground(makeChrome());
+    const ROTATED = "https://cdn.example.com/videos/v1.m3u8?session=BBB";
+    const out = await bg.preferMasterPlaylists([MASTER, ROTATED]);
+    assert.deepEqual(out, [MASTER]);
+  });
+
   test("drops audio-grouped variants referenced by the master", async () => {
     // fetchAllVariants (used for filtering) sees every rendition, unlike
     // getHlsVariants which keeps muxed-only for the submenu.
@@ -1057,14 +1072,14 @@ describe("qualityMenuLabel", () => {
   test("prefixes the quality with the one-word title", () => {
     assert.equal(
       bg.qualityMenuLabel("Example Video Title", { height: 1080, bandwidth: 8000000, url: "https://x/v.m3u8" }, 0),
-      "Example 1080p"
+      "Example 1080p • 8.00 Mbps"
     );
   });
 
   test("falls back to the bare quality label without a title", () => {
     assert.equal(
       bg.qualityMenuLabel("", { height: 720, bandwidth: 4000000, url: "https://x/v.m3u8" }, 0),
-      "720p"
+      "720p • 4.00 Mbps"
     );
   });
 });
@@ -1127,10 +1142,20 @@ describe("variantMenuTitle", () => {
     assert.equal(bg.variantMenuTitle({ url: "https://x/y.m3u8", height: 1080 }, 0), "1080p");
   });
 
+  test("combines height, bitrate and fps", () => {
+    assert.equal(
+      bg.variantMenuTitle(
+        { url: "https://x/y.m3u8", height: 1080, bandwidth: 8000000, fps: 60 },
+        0
+      ),
+      "1080p • 8.00 Mbps • 60 fps"
+    );
+  });
+
   test("falls back to bandwidth when height is absent", () => {
     assert.equal(
       bg.variantMenuTitle({ url: "https://x/y.m3u8", height: null, bandwidth: 2500000 }, 0),
-      "2.5 Mbps"
+      "2.50 Mbps"
     );
   });
 });
