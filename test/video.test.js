@@ -904,6 +904,37 @@ describe("preferMasterPlaylists", () => {
     assert.equal(await bg.isMasterPlaylist(MASTER), true);
     assert.equal(calls, 1, "second call served from cache");
   });
+
+  test("drops master-referenced variants outside the master directory", async () => {
+    // CDN-split deployment: the rendition lives under /videos/, not /hls/.
+    const body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\n../videos/v1.m3u8\n";
+    globalThis.fetch = async (url) => ({
+      ok: true,
+      text: async () => (String(url).includes("master.m3u8") ? body : MEDIA_BODY),
+    });
+    bg = loadBackground(makeChrome());
+    const CROSS_DIR = "https://cdn.example.com/videos/v1.m3u8";
+    const out = await bg.preferMasterPlaylists([MASTER, CROSS_DIR]);
+    assert.deepEqual(out, [MASTER]);
+  });
+
+  test("drops audio-grouped variants referenced by the master", async () => {
+    // fetchAllVariants (used for filtering) sees every rendition, unlike
+    // getHlsVariants which keeps muxed-only for the submenu.
+    const body = [
+      "#EXTM3U",
+      '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO="a1"',
+      "../videos/v1.m3u8",
+    ].join("\n");
+    globalThis.fetch = async (url) => ({
+      ok: true,
+      text: async () => (String(url).includes("master.m3u8") ? body : MEDIA_BODY),
+    });
+    bg = loadBackground(makeChrome());
+    const CROSS_DIR = "https://cdn.example.com/videos/v1.m3u8";
+    const out = await bg.preferMasterPlaylists([MASTER, CROSS_DIR]);
+    assert.deepEqual(out, [MASTER]);
+  });
 });
 
 describe("pageVideoTitle", () => {
