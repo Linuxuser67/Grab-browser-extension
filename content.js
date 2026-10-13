@@ -1,11 +1,12 @@
 // Grab video detector (content script, isolated world, all frames).
 //
-// Reports <video> elements with usable http(s) sources to the background
-// worker, which offers them in the right-click menu ("Download video with
-// Grab"). Videos whose source is a blob: URL (MSE players) have no file
-// behind them; those are flagged and the worker pairs them with the stream
-// manifests it sniffed via webRequest — the same trick FDM/IDM-style
-// downloaders use.
+// Reports <video> elements she started playing (play-event latch; pause never
+// unlatches, a media reset does; muted autoplay is noise) that have usable
+// http(s) sources, to the background worker, which offers them in the
+// right-click menu ("Download video with Grab"). Videos whose source is a
+// blob: URL (MSE players) have no file behind them; those are flagged and the
+// worker pairs them with the stream manifests it sniffed via webRequest — the
+// same trick FDM/IDM-style downloaders use.
 
 const MIN_VIDEO_PX = 120; // ignore tiny players (ads, trackers)
 
@@ -65,13 +66,26 @@ function isBigEnough(video) {
   return false;
 }
 
+/// Pure: whether a video counts as started — played at least once (the latch)
+/// and audible right now. Muted autoplay (ads, previews) is noise: the latch
+/// is kept so unmuting counts immediately, but muted videos never report.
+function isStartedVideo(v, played) {
+  if (!v || v.muted) return false;
+  if (played.has(v)) return true;
+  return !v.paused && !v.ended && (v.currentTime || 0) > 0;
+}
+
 /// Pure over a document-like: [{src, blob}] for each qualifying <video>.
-function collectVideos(doc) {
+/// `isPlayed` decides which videos count as started by the user; the live
+/// wiring passes `(v) => isStartedVideo(v, played)`. Tests pass explicit
+/// predicates.
+function collectVideos(doc, isPlayed) {
   const out = [];
   if (!doc || !doc.querySelectorAll) return out;
   const videos = doc.querySelectorAll("video");
   for (const v of videos) {
     if (!isBigEnough(v)) continue;
+    if (isPlayed && !isPlayed(v)) continue;
     const src = usableVideoSrc(v);
     out.push({ src, blob: !src && isBlobVideo(v) });
   }
@@ -88,6 +102,13 @@ function pageVideoTitle(doc) {
 }
 
 // --- Live wiring (browser only; the pure helpers above are unit-tested) ---
+//
+// Played-only detection: the menu offers a video only once she started it.
+// A WeakSet latches each <video> on its first play event and never unlatches
+// on pause — she pauses to right-click. A media reset (emptied) unlatches:
+// the new load is a video she hasn't started. Muted videos are filtered at
+// collect time (muted autoplay is ad/preview noise); unmuting re-reports via
+// volumechange.
 
 if (
   typeof chrome !== "undefined" &&
@@ -97,10 +118,11 @@ if (
   // worker applies the same gate to sniffed manifests.
   (typeof location === "undefined" || !hostExcluded(location.hostname))
 ) {
+  const played = new WeakSet();
   let lastSent = "";
 
   function report() {
-    const videos = collectVideos(document);
+    const videos = collectVideos(document, (v) => isStartedVideo(v, played));
     const snapshot = JSON.stringify(videos);
     if (snapshot === lastSent) return;
     lastSent = snapshot;
@@ -117,13 +139,35 @@ if (
     timer = setTimeout(report, 400);
   }
 
-  if (document.documentElement) {
-    new MutationObserver(scheduleReport).observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["src"],
-    });
+  function onPlay(e) {
+    const t = e && e.target;
+    // Latch regardless of mute: a muted autoplay that she later unmutes
+    // must already count as started when volumechange re-reports.
+    if (t && t.tagName === "VIDEO") {
+      played.add(t);
+      scheduleReport();
+    }
+  }
+  function onEmptied(e) {
+    const t = e && e.target;
+    if (t && t.tagName === "VIDEO") {
+      played.delete(t);
+      scheduleReport();
+    }
+  }
+
+  // play/playing don't bubble; capture at the document.
+  document.addEventListener("play", onPlay, true);
+  document.addEventListener("playing", onPlay, true);
+  document.addEventListener("emptied", onEmptied, true);
+  document.addEventListener("volumechange", () => scheduleReport(), true);
+
+  // Initial sweep: latch videos already playing when this script ran; the
+  // audible check happens at collect time.
+  if (document.querySelectorAll) {
+    for (const v of document.querySelectorAll("video")) {
+      if (!v.paused && !v.ended && (v.currentTime || 0) > 0) played.add(v);
+    }
   }
 
   chrome.runtime.onMessage.addListener((msg) => {
@@ -140,5 +184,5 @@ if (
 
 // Test hook for node:test.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { collectVideos, usableVideoSrc, hostExcluded, DETECT_EXCLUDED_HOSTS, MIN_VIDEO_PX, pageVideoTitle };
+  module.exports = { collectVideos, usableVideoSrc, hostExcluded, DETECT_EXCLUDED_HOSTS, MIN_VIDEO_PX, pageVideoTitle, isStartedVideo };
 }
