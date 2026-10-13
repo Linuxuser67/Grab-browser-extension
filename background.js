@@ -78,9 +78,14 @@ function updateTab(tabId, url) {
 /// Open the grab:// URL via the OS handler. The browser routes it to Grab
 /// through the .desktop file's x-scheme-handler/grab entry. No native host
 /// needed — works with Flatpak automatically.
-function handOffUrl(grabUrl) {
+async function handOffUrl(grabUrl) {
   try {
-    chrome.tabs.create({ url: grabUrl, active: false });
+    const tab = await chrome.tabs.create({ url: grabUrl, active: false });
+    // Close the handoff tab after the OS has had a moment to pick up the
+    // grab:// URL. The tab is just a vehicle — Grab handles the URL.
+    setTimeout(() => {
+      if (tab && tab.id) chrome.tabs.remove(tab.id).catch(() => {});
+    }, 1000);
     return true;
   } catch {
     return false;
@@ -136,7 +141,7 @@ async function interceptDownload(item) {
   // Hand off via grab:// URL. The browser routes it to Grab through the
   // .desktop handler. If Grab isn't installed, the browser shows an error
   // and the download is left alone.
-  if (!handOffUrl(grabUrl)) return;
+  if (!(await handOffUrl(grabUrl))) return;
 
   await claimDownload(item.id);
   try {
