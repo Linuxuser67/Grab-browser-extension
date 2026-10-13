@@ -392,27 +392,46 @@ describe("master interception toggle", () => {
     assert.equal(intercepted(chrome, 9), true);
   });
 
-  test("cold wake: download started after browser start but before worker restart is intercepted", async () => {
-    // Browser started an hour ago; the worker just restarted (fresh
-    // loadBackground) with the persisted session. A download created a
-    // second ago postdates the browser start and must be intercepted —
-    // the old worker-eval timestamp would have wrongly skipped it.
-    const session = new Map();
-    session.set("browserStartTime", Date.now() - 3600000);
-    const chrome = makeChrome({
-      session,
+  test("cold wake: a freshly woken worker intercepts a download that began before it started", async () => {
+    const shared = {
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
-    });
-    const bg = loadBackground(chrome);
-    void bg;
-    const newItem = {
-      ...item(9),
+    };
+    const first = makeChrome(shared);
+    loadBackground(first);
+    first._listeners["runtime.onStartup"]();
+    await new Promise((r) => setTimeout(r, 5));
+    const startTime = new Date().toISOString(); // the download begins
+    await new Promise((r) => setTimeout(r, 5));
+    // The idle worker is gone; the download event wakes a new one that
+    // starts after the download did, sharing the same session storage.
+    // The old per-worker timestamp would have wrongly skipped this.
+    const second = makeChrome(shared);
+    loadBackground(second);
+    await second._listeners["downloads.onCreated"]({
+      ...item(4),
       url: "https://example.com/cold-wake.iso",
       fileSize: 100,
-      startTime: new Date(Date.now() - 1000).toISOString(),
+      startTime,
+    });
+    assert.equal(intercepted(second, 4), true);
+  });
+
+  test("a download that completed during the handoff leaves no history entry or claim", async () => {
+    const chrome = makeChrome({
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    });
+    loadBackground(chrome);
+    const done = {
+      ...item(5),
+      url: "https://example.com/tiny.bin",
+      fileSize: 10,
+      state: "complete",
     };
-    await chrome._listeners["downloads.onCreated"](newItem);
-    assert.equal(intercepted(chrome, 9), true);
+    chrome._downloads.set(5, done);
+    await chrome._listeners["downloads.onCreated"](done);
+    assert.ok(chrome._calls.some(([n, a]) => n === "removeFile" && a === 5));
+    assert.ok(chrome._calls.some(([n, a]) => n === "erase" && a.id === 5));
+    assert.equal(chrome._session.has("claimedDownload:5"), false);
   });
 
   test("the size-wait decision respects a toggle flipped off mid-wait", async () => {
@@ -703,6 +722,14 @@ describe("HTTP handoff to Grab", () => {
       url: "https://example.com/f.zip?x=1",
     });
     assert.equal(tabsCreated().length, 0);
+  });
+
+  test("posts the URL untouched, including slashes in the query", async () => {
+    mockFetch(200);
+    await bg.handOff("https://example.com/f.zip?u=udp://t/announce");
+    assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
+      url: "https://example.com/f.zip?u=udp://t/announce",
+    });
   });
 
   test("isHandable rejects non-http(s) and credentialed URLs", async () => {
