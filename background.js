@@ -2,8 +2,7 @@
 //
 // Three jobs:
 //   1. Automatic interception: browser downloads are cancelled and handed to
-//      the Grab desktop app through the grab: URI scheme (registered by the
-//      app's .desktop entry as x-scheme-handler/grab).
+//      the Grab desktop app over its local HTTP endpoint (127.0.0.1:9412).
 //   2. Explicit sends: context menu and keyboard shortcut send the current
 //      tab or a link/media URL to Grab. The toolbar button opens the options
 //      page instead.
@@ -19,11 +18,20 @@ const GRAB_SCHEME = "grab://";
 // Browser startup time (Varia pattern): chrome.downloads.onCreated can re-fire
 // on startup for downloads from a previous session. Anything with a startTime
 // older than this is ignored so a cancelled download doesn't re-prompt on
-// every browser launch.
-let browserStartTime = Date.now();
+// every browser launch. Stored in session storage on browser startup only;
+// a missing value means "not stale" (worker restarts must not skip downloads).
+const BROWSER_START_KEY = "browserStartTime";
 chrome.runtime.onStartup.addListener(() => {
-  browserStartTime = Date.now();
+  chrome.storage.session.set({ [BROWSER_START_KEY]: Date.now() });
 });
+
+async function isStaleDownload(item) {
+  if (!item.startTime) return false;
+  const { [BROWSER_START_KEY]: browserStartTime } =
+    await chrome.storage.session.get(BROWSER_START_KEY);
+  if (!browserStartTime) return false;
+  return new Date(item.startTime).getTime() < browserStartTime;
+}
 
 const DEFAULTS = {
   interceptDownloads: false,
@@ -41,13 +49,19 @@ const DEFAULTS = {
 /// file:, …) cannot be handed off and returns null. The original scheme is
 /// carried as the first path segment (grab://https/host/...) so Grab can
 /// restore http vs https; needs Grab 4.7.1+.
-function toGrabUrl(url) {
-  if (typeof url !== "string") return null;
+/// True when the URL is an http(s) URL Grab can fetch (no credentials in it).
+function isHandable(url) {
+  if (typeof url !== "string") return false;
   const m = /^(https?):\/\/(.+)$/i.exec(url);
-  if (!m) return null;
+  if (!m) return false;
   // user:pass@host: Grab refuses credentials in links, and the grab: URL
   // passes through argv (xdg-open), which other local users can read.
-  if (m[2].split(/[/?#]/, 1)[0].includes("@")) return null;
+  return !m[2].split(/[/?#]/, 1)[0].includes("@");
+}
+
+function toGrabUrl(url) {
+  if (!isHandable(url)) return null;
+  const m = /^(https?):\/\/(.+)$/i.exec(url);
   return `${GRAB_SCHEME}${m[1].toLowerCase()}/${m[2]}`;
 }
 
@@ -99,21 +113,11 @@ async function postToGrab(url) {
   }
 }
 
-/// Send the URL to Grab via HTTP. Resolves to true only when Grab accepted it.
+/// Send the raw http(s) URL to Grab via HTTP. Resolves to true only when Grab accepted it.
 /// A 429 means Grab's queue is momentarily full, so retry briefly first. Any
 /// other outcome (Grab not running, 403, 414, …) is a failure: the caller must
 /// leave the browser's own download alone.
-async function handOff(grabUrl, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
-  // Extract the real URL from the grab:// wrapper.
-  // grab://https/example.com/path -> https://example.com/path
-  let url = grabUrl;
-  const m = grabUrl.match(/^grab:\/\/([^/]+)\/(.*)$/);
-  if (m) {
-    url = `${m[1]}://${m[2]}`;
-  } else if (grabUrl.startsWith("grab://magnet:")) {
-    url = grabUrl.slice("grab://".length);
-  }
-
+async function handOff(url, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
   let status = await postToGrab(url);
   for (const delay of retryDelays) {
     if (status !== 429) break;
@@ -124,6 +128,8 @@ async function handOff(grabUrl, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
 }
 
 /// True when the URL's file extension is on the user's skip list.
+/// Only the pathname is inspected: ?filename= query params and
+/// Content-Disposition headers are ignored.
 function isSkipped(url, skipTypes) {
   if (!skipTypes) return false;
   let ext = "";
@@ -164,16 +170,42 @@ async function isClaimed(id) {
   return result[key] === true;
 }
 
+/// Remove a completed download's file and history entry, then release the
+/// claim. Used when the browser finished before our cancel landed.
+async function removeDuplicate(id) {
+  try {
+    await chrome.downloads.removeFile(id);
+  } catch {
+    // Already gone.
+  }
+  try {
+    await chrome.downloads.erase({ id });
+  } catch {
+    // Already gone.
+  }
+  await unclaimDownload(id);
+}
+
 // --- Automatic interception ----------------------------------------------
 
 async function interceptDownload(item) {
-  const grabUrl = toGrabUrl(item.url);
-  if (!grabUrl) return;
+  if (!isHandable(item.url)) return;
   // Hand off over Grab's local HTTP endpoint. If Grab isn't running or
   // refuses the request, the download is left to the browser.
-  if (!(await handOff(grabUrl))) return;
+  if (!(await handOff(item.url))) return;
 
   await claimDownload(item.id);
+  // Race: the download may have completed during the handoff, firing
+  // onChanged while unclaimed. Check the current state now.
+  try {
+    const [dl] = await chrome.downloads.search({ id: item.id });
+    if (dl && dl.state === "complete") {
+      await removeDuplicate(item.id);
+      return;
+    }
+  } catch {
+    // Search failed; fall through to the cancel path.
+  }
   try {
     await chrome.downloads.cancel(item.id);
   } catch {
@@ -212,9 +244,12 @@ async function parkForSize(item) {
   // timer. Packaged Chrome fires alarms no earlier than ~30s out, so the
   // effective wait in packaged builds is >= 30s even though the deadline is
   // sooner; the deadline still decides, so unpacked builds keep the short
-  // wait for development.
-  const deadline = Date.now() + SIZE_WAIT_MS;
-  await chrome.storage.session.set({ [pendingKey(item.id)]: deadline });
+  // wait for development. Re-parking keeps the original deadline instead of
+  // extending the wait.
+  const key = pendingKey(item.id);
+  const existing = await chrome.storage.session.get(key);
+  const deadline = existing[key] || Date.now() + SIZE_WAIT_MS;
+  await chrome.storage.session.set({ [key]: deadline });
   await chrome.alarms.create(alarmName(item.id), { when: deadline });
 }
 
@@ -254,7 +289,7 @@ async function decidePending(id) {
     // The user may have changed their mind while we waited.
     if (!settings.interceptDownloads) return;
     if (isSkipped(item.url, settings.skipTypes)) return;
-    if (!toGrabUrl(item.url)) return;
+    if (!isHandable(item.url)) return;
     if (item.fileSize >= 0) {
       // Size is known: small enough stays in the browser, big enough is
       // intercepted now.
@@ -286,16 +321,13 @@ chrome.downloads.onCreated.addListener(async (item) => {
   if (!settings.interceptDownloads) return;
   // Ignore downloads from a previous browser session (Varia pattern):
   // onCreated can re-fire on startup for old downloads. Missing startTime
-  // is treated as new (not ignored).
-  if (item.startTime) {
-    const downloadTime = new Date(item.startTime).getTime();
-    if (downloadTime < browserStartTime) return;
-  }
+  // or missing browser start time is treated as new (not ignored).
+  if (await isStaleDownload(item)) return;
   // Extension installs/updates must never be intercepted.
   if (item.mime === "application/x-chrome-extension") return;
   if (isSkipped(item.url, settings.skipTypes)) return;
   // Non-http(s) downloads (blob:, data:) have no server URL to hand over.
-  if (!toGrabUrl(item.url)) return;
+  if (!isHandable(item.url)) return;
 
   const cap = minSizeBytes(settings);
   if (cap > 0) {
@@ -343,18 +375,10 @@ chrome.downloads.onChanged.addListener(async (delta) => {
   if (state === "complete") {
     // Lost the race: the browser finished before our cancel landed. Remove
     // the duplicate so only Grab's copy remains.
-    try {
-      await chrome.downloads.removeFile(delta.id);
-    } catch {
-      // Already gone.
-    }
-    try {
-      await chrome.downloads.erase({ id: delta.id });
-    } catch {
-      // Already gone.
-    }
+    await removeDuplicate(delta.id);
+    return;
   }
-  if (state === "complete" || state === "interrupted") {
+  if (state === "interrupted") {
     await unclaimDownload(delta.id);
   }
 });
@@ -557,15 +581,15 @@ function videoMenuTitle(url, index, videoTitle, total) {
 // its child media playlists are hidden from the menu so the only offered
 // entry is the correct one.
 
-/// Cache: url -> true (master) / false (media playlist). Fetch failures
-/// stay uncached so a later rebuild can retry.
-const masterCache = new Map();
+/// Cache: url -> playlist text. Fetch failures stay uncached so a later
+/// rebuild can retry. Shared by the master check and the variant/media-URI
+/// parsing so each playlist is fetched once.
+const playlistTextCache = new Map();
 
-/// True when the fetched playlist is a master (multivariant) playlist.
-/// Null when the fetch failed or the content couldn't be read — the caller
-/// treats that as "unknown", never as a media playlist.
-async function isMasterPlaylist(url) {
-  if (masterCache.has(url)) return masterCache.get(url);
+/// Fetch an HLS playlist's text (cached). Null when the fetch failed or the
+/// content couldn't be read.
+async function fetchPlaylistText(url) {
+  if (playlistTextCache.has(url)) return playlistTextCache.get(url);
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 5000);
@@ -577,15 +601,25 @@ async function isMasterPlaylist(url) {
     } finally {
       clearTimeout(timer);
     }
-    // The marker lives in the header lines; cap the scan.
-    const isMaster = text.slice(0, 4096).includes("#EXT-X-STREAM-INF");
-    masterCache.set(url, isMaster);
+    playlistTextCache.set(url, text);
     // Bounded: oldest entries go first (Map keeps insertion order).
-    if (masterCache.size > 200) masterCache.delete(masterCache.keys().next().value);
-    return isMaster;
+    if (playlistTextCache.size > 200) {
+      playlistTextCache.delete(playlistTextCache.keys().next().value);
+    }
+    return text;
   } catch {
     return null;
   }
+}
+
+/// True when the fetched playlist is a master (multivariant) playlist.
+/// Null when the fetch failed or the content couldn't be read — the caller
+/// treats that as "unknown", never as a media playlist.
+async function isMasterPlaylist(url) {
+  const text = await fetchPlaylistText(url);
+  if (text === null) return null;
+  // The marker lives in the header lines; cap the scan.
+  return text.slice(0, 4096).includes("#EXT-X-STREAM-INF");
 }
 
 /// Origin + directory of a URL, for grouping a master with its children.
@@ -611,80 +645,28 @@ function absoluteUrl(uri, base) {
 //
 // A master playlist lists its renditions as #EXT-X-STREAM-INF lines, each
 // followed by the variant playlist URI. Parsing them lets the context menu
-// offer per-quality entries ("1080p", "720p") instead of one opaque master
-// URL — the Media Grabber pattern. Variants are cached alongside the master
-// check so the playlist is fetched once.
-
-/// Cache: master url -> all parsed variants [{url, height, bandwidth,
-/// audioGroup}] (null when the fetch failed or no variants were found).
-const allVariantsCache = new Map();
+// offer per-quality entries instead of one opaque master URL — the Media
+// Grabber pattern. All parsing shares fetchPlaylistText's cache, so each
+// playlist is fetched once.
 
 /// Fetch and parse every rendition a master playlist references (resolved
-/// absolute URLs), muxed and audio-grouped alike. Cached. Null when the
-/// fetch fails or no variants are found.
+/// absolute URLs), muxed and audio-grouped alike. Null when the fetch fails
+/// or no variants are found.
 async function fetchAllVariants(masterUrl) {
-  if (allVariantsCache.has(masterUrl)) return allVariantsCache.get(masterUrl);
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 5000);
-    let text;
-    try {
-      const res = await fetch(masterUrl, { signal: ctrl.signal });
-      if (!res.ok) {
-        allVariantsCache.set(masterUrl, null);
-        return null;
-      }
-      text = await res.text();
-    } finally {
-      clearTimeout(timer);
-    }
-    const all = parseHlsVariants(text, masterUrl);
-    const result = all.length > 0 ? all : null;
-    allVariantsCache.set(masterUrl, result);
-    if (allVariantsCache.size > 200) {
-      allVariantsCache.delete(allVariantsCache.keys().next().value);
-    }
-    return result;
-  } catch {
-    allVariantsCache.set(masterUrl, null);
-    return null;
-  }
+  const text = await fetchPlaylistText(masterUrl);
+  if (text === null) return null;
+  const all = parseHlsVariants(text, masterUrl);
+  return all.length > 0 ? all : null;
 }
 
-/// Cache: master url -> EXT-X-MEDIA playlist URIs [url] (null when the fetch
-/// failed or none were found).
-const allMediaUrisCache = new Map();
-
 /// Fetch and parse the EXT-X-MEDIA playlist URIs (audio, subtitles) a
-/// master playlist references, resolved absolute. Cached. Null when the
-/// fetch fails or none are found.
+/// master playlist references, resolved absolute. Null when the fetch fails
+/// or none are found.
 async function fetchAllMediaUris(masterUrl) {
-  if (allMediaUrisCache.has(masterUrl)) return allMediaUrisCache.get(masterUrl);
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 5000);
-    let text;
-    try {
-      const res = await fetch(masterUrl, { signal: ctrl.signal });
-      if (!res.ok) {
-        allMediaUrisCache.set(masterUrl, null);
-        return null;
-      }
-      text = await res.text();
-    } finally {
-      clearTimeout(timer);
-    }
-    const uris = parseHlsMediaUris(text, masterUrl);
-    const result = uris.length > 0 ? uris : null;
-    allMediaUrisCache.set(masterUrl, result);
-    if (allMediaUrisCache.size > 200) {
-      allMediaUrisCache.delete(allMediaUrisCache.keys().next().value);
-    }
-    return result;
-  } catch {
-    allMediaUrisCache.set(masterUrl, null);
-    return null;
-  }
+  const text = await fetchPlaylistText(masterUrl);
+  if (text === null) return null;
+  const uris = parseHlsMediaUris(text, masterUrl);
+  return uris.length > 0 ? uris : null;
 }
 
 /// Parse EXT-X-MEDIA URI attributes from master playlist text. Returns
@@ -958,7 +940,7 @@ function safeMenuCreate(props) {
 function doRefreshVideoMenu(tabId) {
   const rebuild = async () => {
     // Re-read: the finds may have changed while the remove was in flight.
-    // Played-only menu: the content script reports just videos she started,
+    // Played-only menu: the content script reports just videos the user started,
     // and sniffed manifests ride along only then — without a played video
     // the tab shows no video menu at all.
     let urls =
@@ -989,12 +971,13 @@ function doRefreshVideoMenu(tabId) {
             pageTitle,
             urls.length,
           );
+          const parentId = `${VIDEO_ITEM_PREFIX}parent-${items.length}`;
           variants.forEach((v, vi) => {
             items.push({
               url: v.url,
               label: qualityMenuLabel(pageTitle, v, vi),
               parent: parentLabel,
-              parentId: `${VIDEO_ITEM_PREFIX}parent-${items.length}`,
+              parentId,
             });
           });
           continue;
@@ -1106,19 +1089,20 @@ chrome.webRequest.onResponseStarted.addListener(
   async (details) => {
     if (!detectVideosOn) return;
     if (details.tabId == null || details.tabId < 0) return;
-    // Skip yt-dlp-exclusive hosts at collection time: their players use
-    // auth-gated URLs, so sniffed manifests are unusable noise. Filtering
-    // here (not just at menu-build) keeps videoFinds clean.
-    if (await isExcludedTab(details.tabId)) return;
+    // Cheap sync check first: avoid the tabs.get IPC for non-media responses.
     const kind = classifyStream(
       details.url,
       sniffedHeader(details.responseHeaders, "content-type"),
     );
     if (kind === null) return;
+    // Skip yt-dlp-exclusive hosts at collection time: their players use
+    // auth-gated URLs, so sniffed manifests are unusable noise. Filtering
+    // here (not just at menu-build) keeps videoFinds clean.
+    if (await isExcludedTab(details.tabId)) return;
     noteSniffed(details.tabId, details.url);
     onVideoEvent(details.tabId);
   },
-  { urls: ["http://*/*", "https://*/*"] },
+  { urls: ["http://*/*", "https://*/*"], types: ["media", "xmlhttprequest", "other"] },
   ["responseHeaders"],
 );
 
@@ -1191,6 +1175,7 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     toGrabUrl,
+    isHandable,
     isSkipped,
     minSizeBytes,
     decidePending,
