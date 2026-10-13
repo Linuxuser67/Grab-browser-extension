@@ -75,26 +75,14 @@ function updateTab(tabId, url) {
   if (r && typeof r.catch === "function") r.catch(() => {});
 }
 
-/// Native-messaging host name (see native-host/). The host runs outside the
-/// browser sandbox and hands the grab:// URL to the OS directly — no tab,
-/// no prompt, no focus steal. This bypasses the external-protocol approval
-/// prompt, which Brave shows tab-modally with no "always allow": a
-/// background tab's prompt is invisible to the user, so the tab-based
-/// handoff silently dies there.
-const NATIVE_HOST = "io.github.linuxuser67.grab";
-
-/// Send the URL through the native host. Returns true when the host
-/// accepted and launched it. The native host is the only handoff channel
-/// (FDM/DownloadHelper pattern): there is no tab-based fallback — if the
-/// host isn't installed, the download stays in the browser.
-async function handOffNative(grabUrl) {
+/// Open the grab:// URL via the OS handler. The browser routes it to Grab
+/// through the .desktop file's x-scheme-handler/grab entry. No native host
+/// needed — works with Flatpak automatically.
+function handOffUrl(grabUrl) {
   try {
-    const resp = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
-      url: grabUrl,
-    });
-    return !!(resp && resp.success);
+    chrome.tabs.create({ url: grabUrl, active: false });
+    return true;
   } catch {
-    // Host not installed (or failed).
     return false;
   }
 }
@@ -145,10 +133,10 @@ async function isClaimed(id) {
 async function interceptDownload(item) {
   const grabUrl = toGrabUrl(item.url);
   if (!grabUrl) return;
-  // Hand off before cancelling: if the native host isn't installed, the
-  // browser download is left alone (FDM/DownloadHelper pattern) instead of
-  // being cancelled into a dead end.
-  if (!(await handOffNative(grabUrl))) return;
+  // Hand off via grab:// URL. The browser routes it to Grab through the
+  // .desktop handler. If Grab isn't installed, the browser shows an error
+  // and the download is left alone.
+  if (!handOffUrl(grabUrl)) return;
 
   await claimDownload(item.id);
   try {
@@ -1003,8 +991,7 @@ if (typeof module !== "undefined" && module.exports) {
     getHlsVariants,
     variantMenuTitle,
     hostExcluded,
-    handOffNative,
-    NATIVE_HOST,
+    handOffUrl,
     YTDLP_EXCLUSIVE_HOSTS,
     DEFAULTS,
     SIZE_WAIT_MS,
