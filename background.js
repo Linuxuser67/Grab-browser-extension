@@ -222,13 +222,12 @@ async function isPending(id) {
   return result[key] !== undefined;
 }
 
-async function parkForSize(item) {
+async function parkForSize(item, deadline = Date.now() + SIZE_WAIT_MS) {
   // The alarm is only the worker-wakeup: the stored deadline is the real
   // timer. Packaged Chrome fires alarms no earlier than ~30s out, so the
   // effective wait in packaged builds is >= 30s even though the deadline is
   // sooner; the deadline still decides, so unpacked builds keep the short
   // wait for development.
-  const deadline = Date.now() + SIZE_WAIT_MS;
   await chrome.storage.session.set({ [pendingKey(item.id)]: deadline });
   await chrome.alarms.create(alarmName(item.id), { when: deadline });
 }
@@ -278,7 +277,7 @@ async function decidePending(id) {
       // Size still unknown but the deadline hasn't passed: this call came
       // too early (the alarm is only the wakeup). Re-park and wait for the
       // real deadline instead of intercepting early.
-      await parkForSize(item);
+      await parkForSize(item, deadline);
       return;
     }
     // Unknown size past the deadline: streams rarely report one, and they
@@ -386,7 +385,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   const settings = await getSettings();
   // removeAll first: onInstalled also fires on extension updates, when the
   // menu may already exist (create would throw on a duplicate id).
-  await chrome.contextMenus.removeAll().catch(() => {});
+  await removeAllContextMenus();
   if (settings.showContextMenu) createContextMenu();
 });
 
@@ -395,7 +394,7 @@ chrome.storage.onChanged.addListener(async (changes, area) => {
   if (changes.showContextMenu) {
     // removeAll first: rapid toggles would otherwise stack a duplicate-id
     // create on top of an in-flight one.
-    await chrome.contextMenus.removeAll().catch(() => {});
+    await removeAllContextMenus();
     if (changes.showContextMenu.newValue) {
       createContextMenu();
     }
@@ -466,6 +465,35 @@ chrome.commands.onCommand.addListener((command) => {
 
 const VIDEO_PARENT_ID = "grabVideos";
 const VIDEO_ITEM_PREFIX = "grabVideo:";
+
+/// Callback-compatible context-menu removal: manifest declares
+/// minimum_chrome_version 102, but promise-returning chrome.contextMenus
+/// methods need Chrome 123+. These work on both.
+function removeAllContextMenus() {
+  return new Promise((resolve) => {
+    try {
+      chrome.contextMenus.removeAll(() => {
+        void chrome.runtime.lastError;
+        resolve();
+      });
+    } catch {
+      resolve();
+    }
+  });
+}
+
+function removeContextMenu(id) {
+  return new Promise((resolve) => {
+    try {
+      chrome.contextMenus.remove(id, () => {
+        void chrome.runtime.lastError;
+        resolve();
+      });
+    } catch {
+      resolve();
+    }
+  });
+}
 const MAX_VIDEO_ITEMS = 8;
 
 /// Video platforms yt-dlp extracts: their players use auth-gated/expiring
@@ -590,16 +618,40 @@ const PLAYLIST_TEXT_CAP = 256 * 1024;
 /// GET a text resource from the worker (5 s timeout), truncated to `cap`
 /// characters. Null on any failure (network, non-2xx, abort).
 async function fetchText(url, cap) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 5000);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  let reader;
   try {
-    const res = await fetch(url, { signal: ctrl.signal });
-    if (!res.ok) return null;
-    return (await res.text()).slice(0, cap);
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) return null;
+    // Streaming path: bound memory by reading at most cap bytes.
+    if (response.body && typeof response.body.getReader === "function") {
+      reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let text = "";
+      let bytesRead = 0;
+      while (bytesRead < cap) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const remaining = cap - bytesRead;
+        const chunk = value.subarray(0, remaining);
+        bytesRead += chunk.byteLength;
+        text += decoder.decode(chunk, { stream: true });
+        if (chunk.byteLength < value.byteLength || bytesRead >= cap) {
+          await reader.cancel().catch(() => {});
+          break;
+        }
+      }
+      text += decoder.decode();
+      return text;
+    }
+    // Fallback for environments without streaming body (tests).
+    return (await response.text()).slice(0, cap);
   } catch {
     return null;
   } finally {
     clearTimeout(timer);
+    if (reader) reader.releaseLock();
   }
 }
 
@@ -1129,7 +1181,7 @@ function safeMenuCreate(props) {
   }
 }
 
-function doRefreshVideoMenu(tabId) {
+async function doRefreshVideoMenu(tabId) {
   const rebuild = async () => {
     // Re-read: the finds may have changed while the remove was in flight.
     // Played-only menu: the content script reports just videos the user started,
@@ -1168,7 +1220,16 @@ function doRefreshVideoMenu(tabId) {
       ),
     );
     menuUrls = [];
-    if (entries.length === 0) return;
+    if (entries.length === 0) {
+      chrome.storage.session.set({ menuUrls: [] }).catch(() => {});
+      if (Number.isInteger(tabId) && tabId >= 0) {
+        const result = chrome.action.setBadgeText({ tabId, text: "" });
+        if (result && typeof result.catch === "function") {
+          result.catch(() => {});
+        }
+      }
+      return;
+    }
     const contexts = ["page", "video", "link"];
     safeMenuCreate({
       id: VIDEO_PARENT_ID,
@@ -1205,13 +1266,9 @@ function doRefreshVideoMenu(tabId) {
     });
     if (badged && typeof badged.catch === "function") badged.catch(() => {});
   };
-  // remove() drops the children too; a missing menu rejects, which is fine.
-  const removed = chrome.contextMenus.remove(VIDEO_PARENT_ID);
-  if (removed && typeof removed.then === "function") {
-    return removed.then(rebuild, rebuild);
-  }
-  rebuild();
-  return undefined;
+  // remove() drops the children too; a missing menu is fine.
+  await removeContextMenu(VIDEO_PARENT_ID);
+  await rebuild();
 }
 
 function clearVideoUi(tabId) {
@@ -1373,6 +1430,9 @@ if (typeof module !== "undefined" && module.exports) {
     buildVideoEntry,
     uniqueLabels,
     variantMenuTitle,
+    removeAllContextMenus,
+    removeContextMenu,
+    pendingKey,
     hostExcluded,
     handOff,
     postToGrab,

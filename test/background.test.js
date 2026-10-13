@@ -90,8 +90,8 @@ function makeChrome(shared) {
     },
     contextMenus: {
       create: (props) => calls.push(["menus.create", props.id]),
-      remove: async (id) => calls.push(["menus.remove", id]),
-      removeAll: async () => calls.push(["menus.removeAll"]),
+      remove: (id, cb) => { calls.push(["menus.remove", id]); if (typeof cb === "function") cb(); return Promise.resolve(); },
+      removeAll: (cb) => { calls.push(["menus.removeAll"]); if (typeof cb === "function") cb(); return Promise.resolve(); },
       onClicked: capture("menus.onClicked"),
     },
     runtime: {
@@ -787,5 +787,50 @@ describe("interception across worker restarts and fast downloads", () => {
     assert.ok(chrome._calls.some(([n, a]) => n === "removeFile" && a === 5));
     assert.ok(chrome._calls.some(([n, a]) => n === "erase" && a.id === 5));
     assert.equal(chrome._session.has("claimedDownload:5"), false);
+  });
+});
+
+describe("P2/P3 regression tests", () => {
+  test("removeAllContextMenus works with callback-style API", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    // Mock returns undefined (old Chrome), invokes callback.
+    let callbackInvoked = false;
+    chrome.contextMenus.removeAll = (cb) => {
+      callbackInvoked = true;
+      if (typeof cb === "function") cb();
+      return undefined;
+    };
+    await bg.removeAllContextMenus();
+    assert.equal(callbackInvoked, true);
+  });
+
+  test("removeContextMenu works with callback-style API", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    let callbackInvoked = false;
+    chrome.contextMenus.remove = (id, cb) => {
+      callbackInvoked = true;
+      if (typeof cb === "function") cb();
+      return undefined;
+    };
+    await bg.removeContextMenu("test-id");
+    assert.equal(callbackInvoked, true);
+  });
+
+  test("parkForSize preserves existing deadline on re-park", async () => {
+    const chrome = makeChrome({
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    });
+    const bg = loadBackground(chrome);
+    const item = { id: 7, url: "https://example.com/file.bin" };
+    const originalDeadline = Date.now() + 5000;
+    await bg.parkForSize(item, originalDeadline);
+    const stored1 = await chrome.storage.session.get(bg.pendingKey(7));
+    assert.equal(stored1[bg.pendingKey(7)], originalDeadline);
+    // Re-park with same deadline (simulates early decidePending call).
+    await bg.parkForSize(item, originalDeadline);
+    const stored2 = await chrome.storage.session.get(bg.pendingKey(7));
+    assert.equal(stored2[bg.pendingKey(7)], originalDeadline);
   });
 });

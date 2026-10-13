@@ -96,8 +96,8 @@ function makeChrome(shared) {
     },
     contextMenus: {
       create: (props) => calls.push(["menus.create", props.id]),
-      remove: async (id) => calls.push(["menus.remove", id]),
-      removeAll: async () => calls.push(["menus.removeAll"]),
+      remove: (id, cb) => { calls.push(["menus.remove", id]); if (typeof cb === "function") cb(); return Promise.resolve(); },
+      removeAll: (cb) => { calls.push(["menus.removeAll"]); if (typeof cb === "function") cb(); return Promise.resolve(); },
       onClicked: capture("menus.onClicked"),
     },
     runtime: {
@@ -414,7 +414,8 @@ describe("detection wiring", () => {
     assert.ok(created.includes("grabVideo:0"), "child menu created");
     assert.ok(created.includes("grabVideo:1"), "sniffed manifest rides along");
 
-    const badge = chrome._calls.find(([n]) => n === "action.setBadgeText");
+    const badges = chrome._calls.filter(([n]) => n === "action.setBadgeText");
+    const badge = badges[badges.length - 1];
     assert.deepEqual(badge[1], { tabId: 5, text: "2" });
 
     L["menus.onClicked"]({ menuItemId: "grabVideo:1" }, null);
@@ -597,7 +598,7 @@ describe("detection wiring", () => {
       false
     );
     assert.equal(
-      chrome._calls.some(([n]) => n === "action.setBadgeText"),
+      chrome._calls.some(([n, arg]) => n === "action.setBadgeText" && arg.text !== ""),
       false
     );
   });
@@ -744,7 +745,7 @@ describe("excluded hosts", () => {
       "no video menu on excluded host"
     );
     assert.equal(
-      chrome._calls.some(([n]) => n === "action.setBadgeText"),
+      chrome._calls.some(([n, arg]) => n === "action.setBadgeText" && arg.text !== ""),
       false,
       "no badge on excluded host"
     );
