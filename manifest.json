@@ -10,7 +10,8 @@
     "contextMenus",
     "downloads",
     "storage",
-    "webRequest"
+    "webRequest",
+    "cookies"
   ],
   "host_permissions": [
     "http://*/*",

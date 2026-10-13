@@ -89,10 +89,19 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /// reached (not running).
 async function postToGrab(url) {
   try {
+    // Include the site's cookies so Grab's yt-dlp can pass bot challenges
+    // (Cloudflare etc.). Scoped to the URL's domain only.
+    let cookies = [];
+    try {
+      const all = await chrome.cookies.getAll({ url });
+      cookies = all.map((c) => ({ name: c.name, value: c.value }));
+    } catch {
+      // Cookies unavailable (permission denied): send URL alone.
+    }
     const resp = await fetch(GRAB_HTTP_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, cookies }),
     });
     return resp.status;
   } catch {

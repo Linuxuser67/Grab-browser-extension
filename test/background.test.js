@@ -30,6 +30,9 @@ function makeChrome(shared) {
     _alarms: alarms,
     _session: session,
     _downloads: downloads,
+    cookies: {
+      getAll: async () => [],
+    },
     downloads: {
       onCreated: capture("downloads.onCreated"),
       onChanged: capture("downloads.onChanged"),
@@ -678,6 +681,7 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(fetchCalls[0].opts.headers["Content-Type"], "application/json");
     assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
       url: "https://example.com/f.zip?x=1",
+      cookies: [],
     });
     assert.equal(tabsCreated().length, 0);
   });
@@ -687,6 +691,7 @@ describe("HTTP handoff to Grab", () => {
     await bg.handOff("https://example.com/f.zip?u=udp://t/announce");
     assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
       url: "https://example.com/f.zip?u=udp://t/announce",
+      cookies: [],
     });
   });
 
