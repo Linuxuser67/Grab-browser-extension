@@ -601,9 +601,52 @@ function absoluteUrl(uri, base) {
 // URL — the Media Grabber pattern. Variants are cached alongside the master
 // check so the playlist is fetched once.
 
-/// Cache: master url -> [{url, height, bandwidth}] (null when the fetch
-/// failed or no variants were found).
-const variantCache = new Map();
+/// Cache: master url -> all parsed variants [{url, height, bandwidth,
+/// audioGroup}] (null when the fetch failed or no variants were found).
+const allVariantsCache = new Map();
+
+/// Fetch and parse every rendition a master playlist references (resolved
+/// absolute URLs), muxed and audio-grouped alike. Cached. Null when the
+/// fetch fails or no variants are found.
+async function fetchAllVariants(masterUrl) {
+  if (allVariantsCache.has(masterUrl)) return allVariantsCache.get(masterUrl);
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    let text;
+    try {
+      const res = await fetch(masterUrl, { signal: ctrl.signal });
+      if (!res.ok) {
+        allVariantsCache.set(masterUrl, null);
+        return null;
+      }
+      text = await res.text();
+    } finally {
+      clearTimeout(timer);
+    }
+    const all = parseHlsVariants(text, masterUrl);
+    const result = all.length > 0 ? all : null;
+    allVariantsCache.set(masterUrl, result);
+    if (allVariantsCache.size > 200) {
+      allVariantsCache.delete(allVariantsCache.keys().next().value);
+    }
+    return result;
+  } catch {
+    allVariantsCache.set(masterUrl, null);
+    return null;
+  }
+}
+
+/// Muxed variants for the quality submenu: getHlsVariants filters out
+/// variants with an AUDIO= attribute pointing at an EXT-X-MEDIA group.
+/// Video-only variants are suppressed: handing one to Grab yields silent
+/// video. Null when the fetch fails or no muxed variants exist — the caller
+/// falls back to the master URL.
+async function getHlsVariants(masterUrl) {
+  const all = await fetchAllVariants(masterUrl);
+  const muxed = (all || []).filter((v) => v.audioGroup === null);
+  return muxed.length > 0 ? muxed : null;
+}
 
 /// Parse HLS variants from master playlist text. Returns [{url, height,
 /// bandwidth, audioGroup}], height/bandwidth null when the attributes are
@@ -629,38 +672,6 @@ function parseHlsVariants(text, baseUrl) {
   return variants;
 }
 
-/// Fetch and parse a master playlist's variants, keeping only variants
-/// with bundled (muxed) audio — those without an AUDIO= attribute pointing
-/// at an EXT-X-MEDIA group. Video-only variants are suppressed: handing one
-/// to Grab yields silent video. Null when the fetch fails or no muxed
-/// variants exist — the caller falls back to the master URL.
-async function getHlsVariants(masterUrl) {
-  if (variantCache.has(masterUrl)) return variantCache.get(masterUrl);
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 5000);
-    let text;
-    try {
-      const res = await fetch(masterUrl, { signal: ctrl.signal });
-      if (!res.ok) return null;
-      text = await res.text();
-    } finally {
-      clearTimeout(timer);
-    }
-    const muxed = parseHlsVariants(text, masterUrl).filter(
-      (v) => v.audioGroup === null,
-    );
-    const result = muxed.length > 0 ? muxed : null;
-    variantCache.set(masterUrl, result);
-    if (variantCache.size > 200) {
-      variantCache.delete(variantCache.keys().next().value);
-    }
-    return result;
-  } catch {
-    return null;
-  }
-}
-
 /// Menu label for a variant: "1080p", "720p", falling back to bandwidth
 /// ("2.5 Mbps") or the file name when resolution is absent.
 function variantMenuTitle(variant, index) {
@@ -684,26 +695,34 @@ function variantMenuTitle(variant, index) {
 
 const MANIFEST_RE = /\.(m3u8|m3u)([?#]|$)/i;
 
-/// From the detected manifest URLs, drop media playlists that live under a
-/// confirmed master playlist's directory. Masters themselves, non-manifest
-/// URLs, and manifests with no confirmed master nearby are kept as-is.
+/// From the detected manifest URLs, drop media playlists that belong to a
+/// confirmed master playlist: renditions the master references (wherever
+/// they live) plus anything under the master's directory. Masters
+/// themselves, non-manifest URLs, and manifests with no confirmed master
+/// nearby are kept as-is.
 async function preferMasterPlaylists(urls) {
   const manifests = urls.filter((u) => MANIFEST_RE.test(u));
   if (manifests.length === 0) return urls;
   const checks = await Promise.all(manifests.map(isMasterPlaylist));
-  const masterDirs = new Set();
   const masters = new Set();
-  manifests.forEach((u, i) => {
-    if (checks[i] === true) {
-      masters.add(u);
-      const d = urlDirectory(u);
-      if (d) masterDirs.add(d);
-    }
-  });
-  if (masterDirs.size === 0) return urls;
+  const masterDirs = new Set();
+  // Renditions a confirmed master references: dropped even when they live
+  // outside the master's directory (CDN-split deployments).
+  const childUrls = new Set();
+  for (let i = 0; i < manifests.length; i++) {
+    if (checks[i] !== true) continue;
+    const u = manifests[i];
+    masters.add(u);
+    const d = urlDirectory(u);
+    if (d) masterDirs.add(d);
+    const variants = await fetchAllVariants(u);
+    for (const v of variants || []) childUrls.add(v.url);
+  }
+  if (masters.size === 0) return urls;
   return urls.filter((u) => {
     if (!MANIFEST_RE.test(u)) return true;
     if (masters.has(u)) return true;
+    if (childUrls.has(u)) return false;
     const d = urlDirectory(u);
     return !d || !masterDirs.has(d);
   });
