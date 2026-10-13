@@ -10,12 +10,14 @@
     "contextMenus",
     "downloads",
     "storage",
-    "webRequest",
-    "cookies"
+    "webRequest"
   ],
   "host_permissions": [
     "http://*/*",
     "https://*/*"
+  ],
+  "optional_permissions": [
+    "cookies"
   ],
   "minimum_chrome_version": "102",
   "background": {

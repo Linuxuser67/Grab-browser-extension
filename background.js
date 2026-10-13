@@ -78,41 +78,148 @@ function updateTab(tabId, url) {
 
 /// Grab's local HTTP server. The extension POSTs URLs here instead of using
 /// native messaging — no host manifest, no extension IDs, works from Flatpak.
-const GRAB_HTTP_URL = "http://127.0.0.1:9412/add";
+const GRAB_BASE_URL = "http://127.0.0.1:9412";
+const GRAB_HTTP_URL = `${GRAB_BASE_URL}/add`;
 
 /// Delays before retrying when Grab answers 429 (its handoff queue is full).
 const HANDOFF_RETRY_DELAYS_MS = [300, 900];
 
+/// Grab holds a `?confirm=1` request until the user answers its dialog (it
+/// gives up after 120 s); wait a little longer than that.
+const CONFIRM_TIMEOUT_MS = 130_000;
+/// A pairing handshake is a loopback round trip.
+const HELLO_TIMEOUT_MS = 3_000;
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/// POST one URL to Grab. Resolves to the HTTP status, or 0 when Grab can't be
-/// reached (not running).
+// --- Pairing ---------------------------------------------------------------
+//
+// Any local process can listen on 127.0.0.1:9412 before Grab does. Once the
+// user has pasted Grab's pairing code into the options page, the extension
+//   1. makes Grab prove it knows the code (GET /hello) before anything else,
+//   2. only then sends the page's cookies, and
+//   3. signs the request body, so Grab can tell this extension from any other.
+// Without a code it still hands URLs off, but never sends cookies.
+
+const SERVER_CONTEXT = "grab-server\u0000";
+const CLIENT_CONTEXT = "grab-client\u0000";
+const PAIRING_CODE_RE = /^[0-9a-f]{64}$/;
+const STATUS_UNVERIFIED = -1;
+
+/// The pairing code lives in local storage, not sync: it is a secret for this
+/// machine's Grab and must not follow the profile to other devices.
+async function getPairingCode() {
+  try {
+    const { pairingCode } = await chrome.storage.local.get({ pairingCode: "" });
+    const code = String(pairingCode || "").trim().toLowerCase();
+    return PAIRING_CODE_RE.test(code) ? code : "";
+  } catch {
+    return "";
+  }
+}
+
+function hexToBytes(hex) {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/// HMAC-SHA256(secret, context || message) as lowercase hex.
+async function hmacHex(secretHex, context, message) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    hexToBytes(secretHex),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const data = new TextEncoder().encode(context + message);
+  return bytesToHex(new Uint8Array(await crypto.subtle.sign("HMAC", key, data)));
+}
+
+function constantTimeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) {
+    return false;
+  }
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/// fetch() with a deadline.
+async function fetchWithTimeout(url, opts, ms) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/// True when the listener on Grab's port knows the pairing code. A squatter
+/// without it cannot answer, and a Grab that regenerated its code fails too.
+async function verifyGrab(secret) {
+  const nonce = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+  const resp = await fetchWithTimeout(
+    `${GRAB_BASE_URL}/hello?n=${nonce}`,
+    { method: "GET" },
+    HELLO_TIMEOUT_MS,
+  );
+  if (!resp.ok) return false;
+  const body = await resp.json();
+  const expected = await hmacHex(secret, SERVER_CONTEXT, nonce);
+  return constantTimeEqual(body && body.proof, expected);
+}
+
+/// The site's cookies in the shape Grab expects. Needs the optional `cookies`
+/// permission; without it (or on any failure) the handoff is URL-only.
+async function readCookies(url) {
+  try {
+    const all = await chrome.cookies.getAll({ url });
+    return all.map((c) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      host_only: c.hostOnly,
+      path: c.path,
+      secure: c.secure,
+      expiration_date: c.expirationDate,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/// POST one URL to Grab and wait for its answer to the confirm dialog.
+/// Resolves to the HTTP status, 0 when Grab can't be reached (not running),
+/// or STATUS_UNVERIFIED when the listener could not prove it is Grab.
 async function postToGrab(url) {
   try {
-    // Include the site's cookies so Grab's yt-dlp can pass bot challenges
-    // (Cloudflare etc.). Scoped to the URL's domain only. Full attributes
-    // preserve the browser's scope (host-only vs subdomain, path, secure,
-    // expiry); Grab falls back gracefully when they're absent.
+    const secret = await getPairingCode();
     let cookies = [];
-    try {
-      const all = await chrome.cookies.getAll({ url });
-      cookies = all.map((c) => ({
-        name: c.name,
-        value: c.value,
-        domain: c.domain,
-        host_only: c.hostOnly,
-        path: c.path,
-        secure: c.secure,
-        expiration_date: c.expirationDate,
-      }));
-    } catch {
-      // Cookies unavailable (permission denied): send URL alone.
+    if (secret) {
+      if (!(await verifyGrab(secret))) return STATUS_UNVERIFIED;
+      // Cookies let Grab's yt-dlp pass bot challenges (Cloudflare etc.).
+      // They go only to a Grab that has proven it holds the pairing code.
+      cookies = await readCookies(url);
     }
-    const resp = await fetch(GRAB_HTTP_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, cookies }),
-    });
+    const body = JSON.stringify({ url, cookies });
+    const headers = { "Content-Type": "application/json" };
+    if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
+    // confirm=1: Grab answers only once the user has approved or declined, so
+    // the browser's own download is cancelled only when Grab really took over.
+    const resp = await fetchWithTimeout(
+      `${GRAB_HTTP_URL}?confirm=1`,
+      { method: "POST", headers, body },
+      CONFIRM_TIMEOUT_MS,
+    );
     return resp.status;
   } catch {
     return 0;
@@ -121,8 +228,9 @@ async function postToGrab(url) {
 
 /// Send the URL to Grab via HTTP. Resolves to true only when Grab accepted it.
 /// A 429 means Grab's queue is momentarily full, so retry briefly first. Any
-/// other outcome (Grab not running, 403, 414, …) is a failure: the caller must
-/// leave the browser's own download alone. The caller validates the URL with
+/// other outcome (Grab not running or not verified, declined by the user (409),
+/// no answer in time (408), 403, 414, …) is a failure: the caller must leave
+/// the browser's own download alone. The caller validates the URL with
 /// toGrabUrl first; the raw URL is posted as-is.
 async function handOff(url, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
   let status = await postToGrab(url);
@@ -634,14 +742,53 @@ function videoName(url, index, pageTitle, kind) {
 const playlistCache = new Map();
 const PLAYLIST_TEXT_CAP = 256 * 1024;
 
+/// Whether the worker may fetch `url` on a page's behalf. The worker's host
+/// permission bypasses CORS, so a page that makes the browser request a
+/// playlist-looking URL could otherwise get this extension to read loopback
+/// services or a cloud metadata endpoint. http(s) only; loopback, unspecified,
+/// link-local and IPv4-mapped IPv6 hosts are refused. Ordinary LAN hosts stay
+/// allowed (home media servers). URL parsing has already normalized decimal,
+/// octal and hex IPv4 spellings to dotted form.
+function isFetchAllowed(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return false;
+  if (host.includes(":")) {
+    return !(
+      host === "::" ||
+      host === "::1" ||
+      host.startsWith("::ffff:") ||
+      /^fe[89ab]/.test(host)
+    );
+  }
+  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host);
+  if (m) {
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    if (a === 127 || a === 0 || (a === 169 && b === 254)) return false;
+  }
+  return true;
+}
+
 /// GET a text resource from the worker (5 s timeout), truncated to `cap`
 /// characters. Null on any failure (network, non-2xx, abort).
 async function fetchText(url, cap) {
+  if (!isFetchAllowed(url)) return null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5000);
   let reader;
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    // No credentials: the worker must not replay the user's session at a URL
+    // that only a web page chose.
+    const response = await fetch(url, {
+      signal: controller.signal,
+      credentials: "omit",
+    });
     if (!response.ok) return null;
     // Streaming path: bound memory by reading at most cap bytes.
     if (response.body && typeof response.body.getReader === "function") {
@@ -1455,6 +1602,9 @@ if (typeof module !== "undefined" && module.exports) {
     hostExcluded,
     handOff,
     postToGrab,
+    verifyGrab,
+    isFetchAllowed,
+    fetchText,
     YTDLP_EXCLUSIVE_HOSTS,
     DEFAULTS,
     SIZE_WAIT_MS,

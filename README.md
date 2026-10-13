@@ -62,13 +62,30 @@ Magnet links are passed to the OS untouched — Grab already handles `magnet:`.
 
 ## Limitations
 
-- Downloads that need the browser's session (logged-in direct links) may fail
-  in Grab — the extension doesn't forward cookies.
+- Downloads that need the browser's session (logged-in direct links) forward
+  the site's cookies to Grab — but only after you pair the extension (see
+  below). Unpaired, handoffs are URL-only.
 - POST-form downloads hand Grab the action URL, which may not resolve to the file.
 - Automatic interception requires Grab to be running. URLs longer than 2048
   characters are refused by Grab and stay in the browser.
-- The browser's download is cancelled as soon as Grab accepts the URL; if you
-  then decline in Grab's confirmation dialog, the download is not restored.
+- The browser's download is cancelled once Grab confirms it took over; if you
+  decline in Grab's confirmation dialog, the download is not restored.
+
+## Pairing with Grab
+
+Grab listens on `127.0.0.1:9412`. Any local program could pretend to be Grab,
+so the extension only sends cookies to a Grab that proves it knows a shared
+secret:
+
+1. In Grab, open Preferences → Browser extension and copy the pairing code.
+2. In the extension's Options page, paste it into the Pairing section and
+   click Pair. Your browser will ask for the `cookies` permission — it is
+   optional and only requested here, on your click.
+3. The extension verifies Grab (`/hello` challenge) before every cookie
+   handoff. If verification fails, the handoff is URL-only.
+
+If you click Regenerate in Grab's Preferences, pair again — the old code
+stops working immediately.
 
 ## Permissions
 

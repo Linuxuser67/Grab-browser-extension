@@ -41,3 +41,27 @@ function normalizeSettings(raw) {
 async function saveSettings(raw) {
   await chrome.storage.sync.set(normalizeSettings(raw));
 }
+
+// --- Pairing with Grab -------------------------------------------------------
+// The pairing code is a secret for this machine's Grab, so it is kept in local
+// storage (never sync) and is not part of normalizeSettings().
+
+const PAIRING_CODE_RE = /^[0-9a-f]{64}$/;
+
+/// Normalize what the user pasted: whitespace and case are forgiven.
+function normalizePairingCode(raw) {
+  return String(raw || "").replace(/\s+/g, "").toLowerCase();
+}
+
+async function loadPairingCode() {
+  const { pairingCode } = await chrome.storage.local.get({ pairingCode: "" });
+  return pairingCode;
+}
+
+/// Store a code ("" clears it). Returns false for a malformed code.
+async function savePairingCode(raw) {
+  const code = normalizePairingCode(raw);
+  if (code !== "" && !PAIRING_CODE_RE.test(code)) return false;
+  await chrome.storage.local.set({ pairingCode: code });
+  return true;
+}
