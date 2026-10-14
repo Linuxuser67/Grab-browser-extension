@@ -123,7 +123,31 @@ function makeChrome(shared) {
 function loadBackground(chrome) {
   delete require.cache[require.resolve(BG_PATH)];
   globalThis.chrome = chrome;
+  // Mock Grab's HTTP handoff: accept every handoff, record the URL.
+  // If the test already set a fetch mock (for playlist content), wrap it
+  // so POSTs are handled as handoffs and other requests go to the test's mock.
+  const testFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (opts && opts.method === "POST" && opts.body) {
+      chrome._calls.push(["handoff", JSON.parse(opts.body).url]);
+      return { status: 200, ok: true };
+    }
+    if (testFetch) return testFetch(url, opts);
+    return { status: 404, ok: false, text: async () => "" };
+  };
   return require(BG_PATH);
+}
+
+/// Wrap a GET-only fetch mock to also handle handoff POSTs.
+/// Use when a test overrides fetch for playlist content but also clicks menu items.
+function withHandoff(chrome, getMock) {
+  return async (url, opts) => {
+    if (opts && opts.method === "POST" && opts.body) {
+      chrome._calls.push(["handoff", JSON.parse(opts.body).url]);
+      return { status: 200, ok: true };
+    }
+    return getMock(url, opts);
+  };
 }
 
 function loadContent() {
@@ -149,6 +173,10 @@ describe("classifyStream", () => {
   test("a click without a real tab falls back to the active tab", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
+    // Grab down: handoff fails, falls back to tab navigation.
+    globalThis.fetch = async () => {
+      throw new Error("connection refused");
+    };
     const L = chrome._listeners;
     await L["tabs.onActivated"]({ tabId: 5 });
     L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://a.example.com/a.mp4", responseHeaders: [] });
@@ -158,7 +186,7 @@ describe("classifyStream", () => {
       { tab: { id: 5 } }
     );
     await new Promise((r) => setTimeout(r, 30));
-    L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, { id: -1 });
+    await L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, { id: -1 });
     const call = chrome._calls.find(([n]) => n === "tabs.update");
     assert.ok(call, "navigated");
     assert.equal(call[2], undefined, "no tab id passed for TAB_ID_NONE");
@@ -438,12 +466,12 @@ describe("detection wiring", () => {
     const badge = badges[badges.length - 1];
     assert.deepEqual(badge[1], { tabId: 5, text: "2" });
 
-    L["menus.onClicked"]({ menuItemId: "grabVideo:1" }, null);
+    await L["menus.onClicked"]({ menuItemId: "grabVideo:1" }, null);
     assert.ok(
       chrome._calls.some(
-        ([n, arg]) => n === "tabs.update" && arg.url === "grab://https/cdn.example.com/s/stream.m3u8"
+        ([n, url]) => n === "handoff" && url === "https://cdn.example.com/s/stream.m3u8"
       ),
-      "click navigates the active tab to the grab: URL"
+      "click hands off via HTTP"
     );
   });
 
@@ -470,9 +498,9 @@ describe("detection wiring", () => {
     await tick();
     // Right-click lands in tab 5 (window 1 focused again, no onActivated fired).
     // The menu was built from tab 6: [v.mp4, b.mp4, c.mp4], so index 2 is c.mp4.
-    L["menus.onClicked"]({ menuItemId: "grabVideo:2" }, { id: 5 });
+    await L["menus.onClicked"]({ menuItemId: "grabVideo:2" }, { id: 5 });
     assert.ok(
-      chrome._calls.some(([n, arg]) => n === "tabs.update" && arg.url === "grab://https/b.example.com/c.mp4"),
+      chrome._calls.some(([n, url]) => n === "handoff" && url === "https://b.example.com/c.mp4"),
       "the labelled item (third entry of the menu) is what gets sent"
     );
   });
@@ -480,13 +508,21 @@ describe("detection wiring", () => {
   test("a click after master-playlist filtering sends the master, not the hidden child", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
-    globalThis.fetch = async (url) => ({
-      ok: true,
-      text: async () =>
-        String(url).endsWith("master.m3u8")
-          ? "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n720/index.m3u8\n"
-          : "#EXTM3U\n#EXT-X-TARGETDURATION=6\n",
-    });
+    globalThis.fetch = async (url, opts) => {
+      // Handoff POST: record and succeed.
+      if (opts && opts.method === "POST" && opts.body) {
+        chrome._calls.push(["handoff", JSON.parse(opts.body).url]);
+        return { status: 200, ok: true };
+      }
+      // Playlist GET.
+      return {
+        ok: true,
+        text: async () =>
+          String(url).endsWith("master.m3u8")
+            ? "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n720/index.m3u8\n"
+            : "#EXTM3U\n#EXT-X-TARGETDURATION=6\n",
+      };
+    };
     const L = chrome._listeners;
     await L["tabs.onActivated"]({ tabId: 5 });
     L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://cdn.example.com/v/index.m3u8", responseHeaders: [] });
@@ -500,9 +536,9 @@ describe("detection wiring", () => {
     await tick();
     // Menu is [clip.mp4, master.m3u8]: the direct source first, then the
     // filtered master.
-    L["menus.onClicked"]({ menuItemId: "grabVideo:1" }, { id: 5 });
+    await L["menus.onClicked"]({ menuItemId: "grabVideo:1" }, { id: 5 });
     assert.ok(
-      chrome._calls.some(([n, arg]) => n === "tabs.update" && arg.url === "grab://https/cdn.example.com/v/master.m3u8"),
+      chrome._calls.some(([n, url]) => n === "handoff" && url === "https://cdn.example.com/v/master.m3u8"),
       "master playlist is sent"
     );
   });
@@ -524,10 +560,10 @@ describe("detection wiring", () => {
 
     const created = chrome._calls.filter(([n]) => n === "menus.create").map(([, id]) => id);
     assert.ok(created.includes("grabVideo:0"));
-    L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, null);
+    await L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, null);
     assert.ok(
       chrome._calls.some(
-        ([n, arg]) => n === "tabs.update" && arg.url === "grab://https/cdn.example.com/v/clip.mp4"
+        ([n, url]) => n === "handoff" && url === "https://cdn.example.com/v/clip.mp4"
       )
     );
   });
@@ -559,10 +595,10 @@ describe("detection wiring", () => {
     assert.ok(created.includes("grabVideo:0"));
     assert.ok(created.includes("grabVideo:1"));
 
-    L["menus.onClicked"]({ menuItemId: "grabVideo:1" }, null);
+    await L["menus.onClicked"]({ menuItemId: "grabVideo:1" }, null);
     assert.ok(
       chrome._calls.some(
-        ([n, arg]) => n === "tabs.update" && arg.url === "grab://https/cdn.example.com/v/b.mp4"
+        ([n, url]) => n === "handoff" && url === "https://cdn.example.com/v/b.mp4"
       )
     );
   });
@@ -584,10 +620,10 @@ describe("detection wiring", () => {
     );
     await tick();
 
-    L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, null);
+    await L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, null);
     assert.ok(
       chrome._calls.some(
-        ([n, arg]) => n === "tabs.update" && arg.url === "grab://https/cdn.example.com/s/stream.m3u8"
+        ([n, url]) => n === "handoff" && url === "https://cdn.example.com/s/stream.m3u8"
       )
     );
   });
@@ -1403,38 +1439,36 @@ describe("context menu: one flat submenu, one click to Grab", () => {
   /// One played direct file (with a page title set) plus one sniffed manifest.
   /// Returns the chrome mock and every menu item created (last rebuild wins).
   async function build({ manifestBody, manifestUrl, videos, title }) {
-    const prev = globalThis.fetch;
+    // Set fetch mock for playlist content; loadBackground wraps it to also
+    // handle handoff POSTs. Don't restore: the wrapper stays for the clicks
+    // that happen after build() returns.
     globalThis.fetch = async () => ({ ok: true, text: async () => manifestBody });
-    try {
-      const chrome = makeChrome();
-      const created = new Map();
-      const orig = chrome.contextMenus.create;
-      chrome.contextMenus.create = (props) => {
-        created.set(props.id, props);
-        return orig(props);
-      };
-      loadBackground(chrome);
-      const L = chrome._listeners;
-      await L["tabs.onActivated"]({ tabId: 3 });
-      L["runtime.onMessage"](
-        { type: "grab-videos-detected", videos, title },
-        { tab: { id: 3 } }
-      );
-      if (manifestUrl) {
-        await L["webRequest.onResponseStarted"]({ tabId: 3, url: manifestUrl, responseHeaders: [] });
-      }
-      for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r));
-      return { chrome, items: [...created.values()] };
-    } finally {
-      globalThis.fetch = prev;
+    const chrome = makeChrome();
+    const created = new Map();
+    const orig = chrome.contextMenus.create;
+    chrome.contextMenus.create = (props) => {
+      created.set(props.id, props);
+      return orig(props);
+    };
+    loadBackground(chrome);
+    const L = chrome._listeners;
+    await L["tabs.onActivated"]({ tabId: 3 });
+    L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos, title },
+      { tab: { id: 3 } }
+    );
+    if (manifestUrl) {
+      await L["webRequest.onResponseStarted"]({ tabId: 3, url: manifestUrl, responseHeaders: [] });
     }
+    for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r));
+    return { chrome, items: [...created.values()] };
   }
   const rowsOf = (items) =>
     items.filter((i) => i.parentId === "grabVideos" && i.type !== "separator");
-  const click = (chrome, id) =>
-    chrome._listeners["menus.onClicked"]({ menuItemId: id }, { id: 3 });
+  const click = async (chrome, id) =>
+    await chrome._listeners["menus.onClicked"]({ menuItemId: id }, { id: 3 });
   const sent = (chrome) =>
-    chrome._calls.filter(([n]) => n === "tabs.update").map(([, a]) => a.url);
+    chrome._calls.filter(([n]) => n === "handoff").map(([, url]) => url);
 
   test("every row sits directly under the single submenu", async () => {
     const { items } = await build({
@@ -1464,11 +1498,11 @@ describe("context menu: one flat submenu, one click to Grab", () => {
       title: "Example …",
     });
     const rows = rowsOf(items);
-    click(chrome, rows[0].id);
-    click(chrome, rows[2].id);
+    await click(chrome, rows[0].id);
+    await click(chrome, rows[2].id);
     assert.deepEqual(sent(chrome), [
-      "grab://https/cdn.example.com/v/clip.mp4",
-      "grab://https/cdn.example.com/hls/v720.m3u8",
+      "https://cdn.example.com/v/clip.mp4",
+      "https://cdn.example.com/hls/v720.m3u8",
     ]);
   });
 
@@ -1481,8 +1515,8 @@ describe("context menu: one flat submenu, one click to Grab", () => {
     });
     const rows = rowsOf(items);
     assert.deepEqual(rows.map((i) => i.title), ["x.mp4"]);
-    click(chrome, rows[0].id);
-    assert.deepEqual(sent(chrome), ["grab://https/cdn.example.com/v/x.mp4"]);
+    await click(chrome, rows[0].id);
+    assert.deepEqual(sent(chrome), ["https://cdn.example.com/v/x.mp4"]);
   });
 
   test("a page title never renames a direct file", async () => {
@@ -1504,8 +1538,8 @@ describe("context menu: one flat submenu, one click to Grab", () => {
     });
     const rows = rowsOf(items);
     assert.deepEqual(rows.map((i) => i.title), ["My Show • 1080p / 720p • pick in Grab"]);
-    click(chrome, rows[0].id);
-    assert.deepEqual(sent(chrome), ["grab://https/cdn.example.com/hls/master.m3u8"]);
+    await click(chrome, rows[0].id);
+    assert.deepEqual(sent(chrome), ["https://cdn.example.com/hls/master.m3u8"]);
   });
 
   test("the main Download with Grab item still works with videos detected", async () => {
@@ -1515,11 +1549,11 @@ describe("context menu: one flat submenu, one click to Grab", () => {
       videos: [{ src: "https://cdn.example.com/v/x.mp4", blob: false }],
       title: "",
     });
-    chrome._listeners["menus.onClicked"](
+    await chrome._listeners["menus.onClicked"](
       { menuItemId: "sendToGrab", linkUrl: "https://example.com/file.zip" },
       { id: 3 }
     );
-    assert.deepEqual(sent(chrome), ["grab://https/example.com/file.zip"]);
+    assert.deepEqual(sent(chrome), ["https://example.com/file.zip"]);
   });
 
   test("videos are separated, repeats are numbered", async () => {
