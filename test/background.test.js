@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 
 const BG_PATH = path.join(__dirname, "..", "background.js");
+const SHARED_PATH = path.join(__dirname, "..", "shared.js");
 
 /// Minimal chrome mock: captures listeners, records calls, backs
 /// chrome.storage.session with a Map. Pass a shared `shared` object to
@@ -126,7 +127,15 @@ function makeChrome(shared) {
 /// Load a fresh copy of background.js against the given chrome mock.
 function loadBackground(chrome) {
   delete require.cache[require.resolve(BG_PATH)];
+  delete require.cache[require.resolve(SHARED_PATH)];
   globalThis.chrome = chrome;
+  // background.js calls importScripts("shared.js") (worker); in Node we
+  // load it via require instead.
+  globalThis.importScripts = () => {
+    const shared = require(SHARED_PATH);
+    globalThis.SHARED_DEFAULTS = shared.SHARED_DEFAULTS;
+    globalThis.SHARED_PAIRING_CODE_RE = shared.SHARED_PAIRING_CODE_RE;
+  };
   // Default: a Grab that accepts every handoff and records the URL it got.
   // Tests must not depend on a real Grab listening on 127.0.0.1:9412; the HTTP
   // handoff suite installs its own fetch for failure cases.
