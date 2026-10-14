@@ -694,8 +694,11 @@ function classifyStream(url, contentType) {
 }
 
 const NAME_MAX = 40;
+const TITLE_MAX = 8;
 const shorten = (text) =>
   text.length > NAME_MAX ? text.slice(0, NAME_MAX) + "…" : text;
+const shortenTitle = (text) =>
+  text.length > TITLE_MAX ? text.slice(0, TITLE_MAX) + "…" : text;
 
 /// Last path segment of a URL, decoded ("my%20clip.mp4" -> "my clip.mp4").
 /// Empty when there is none.
@@ -719,9 +722,12 @@ function fileNameOf(url) {
 /// usually "master.m3u8") is named by the page's video title when the content
 /// script found one, else by its file name. "Video N" is the last resort.
 function videoName(url, index, pageTitle, kind) {
-  // Short human-readable differentiator: Video 1, Video 2, ...
-  // Quality and fps (in the row) do the rest of the differentiating.
-  return `Video ${index + 1}`;
+  const file = fileNameOf(url);
+  if (kind) {
+    const title = String(pageTitle || "").replace(/\s+/g, " ").trim();
+    if (title) return shortenTitle(title);
+  }
+  return file ? shorten(file) : `Video ${index + 1}`;
 }
 
 // --- Master playlist preference ------------------------------------------
@@ -935,11 +941,9 @@ function parseHlsVariants(text, baseUrl) {
 function variantMenuTitle(variant, index) {
   const parts = [];
   if (variant.height) {
-    parts.push(`${variant.height}p`);
-  }
-  // fps right after the height: 29.97 reads as "30 fps", 59.94 as "60 fps".
-  if (variant.fps > 0) {
-    parts.push(`${Math.round(variant.fps)} fps`);
+    // 1080p60 style: fps appended directly to the height.
+    const fps = variant.fps > 0 ? Math.round(variant.fps) : 0;
+    parts.push(fps > 0 ? `${variant.height}p${fps}` : `${variant.height}p`);
   }
   if (variant.bandwidth) {
     parts.push(`${(variant.bandwidth / 1000000).toFixed(2)} Mbps`);
@@ -1057,25 +1061,26 @@ const byQuality = (a, b) =>
 /// "1080p / 720p / 360p" from variants already sorted best first; at most
 /// five heights, "…" when there are more. Empty when none has a height.
 function heightList(variants) {
-  const heights = [
-    ...new Set(variants.map((v) => v.height).filter((h) => h > 0)),
-  ];
-  const shown = heights.slice(0, 5).map((h) => `${h}p`);
+  // Map height -> max fps for that height.
+  const fpsByHeight = new Map();
+  for (const v of variants) {
+    if (v.height > 0) {
+      const fps = v.fps > 0 ? Math.round(v.fps) : 0;
+      const prev = fpsByHeight.get(v.height);
+      if (prev === undefined || fps > prev) fpsByHeight.set(v.height, fps);
+    }
+  }
+  const heights = [...fpsByHeight.keys()].sort((a, b) => b - a);
+  const shown = heights.slice(0, 5).map((h) => {
+    const fps = fpsByHeight.get(h);
+    return fps > 0 ? `${h}p${fps}` : `${h}p`;
+  });
   if (heights.length > 5) shown.push("…");
   return shown.join(" / ");
 }
 
-/// "up to 60 fps" from the best frame rate among the variants; empty when
-/// none reports one.
-function maxFpsLabel(variants) {
-  const top = Math.max(0, ...variants.map((v) => v.fps || 0));
-  return top > 0 ? `up to ${Math.round(top)} fps` : "";
-}
-
 const pickRowQuality = (variants) =>
-  [heightList(variants), maxFpsLabel(variants), PICK_IN_GRAB]
-    .filter(Boolean)
-    .join(" • ");
+  [heightList(variants), PICK_IN_GRAB].filter(Boolean).join(" • ");
 
 /// Rows for an HLS URL. A media playlist (or an unreadable master) is one
 /// plain row.
@@ -1530,8 +1535,10 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
     videoFinds.set(tabId, f);
   }
   f.frames.set(frameId, Array.isArray(msg.videos) ? msg.videos : []);
-  // The video's own title (og:title) for menu labels; first report wins.
-  if (typeof msg.title === "string" && msg.title && !f.title) {
+  // The video's own title for menu labels.
+  // The top frame's title follows the page (SPAs change it without a
+  // navigation); a subframe only fills a gap.
+  if (typeof msg.title === "string" && msg.title && (frameId === 0 || !f.title)) {
     f.title = msg.title;
   }
   onVideoEvent(tabId);

@@ -95,13 +95,27 @@ function collectVideos(doc, isPlayed) {
   return out;
 }
 
+/// A page <title> without its trailing " - Site" / " | Site" suffix.
+function cleanDocTitle(title) {
+  const t = String(title || "").replace(/\s+/g, " ").trim();
+  const m = /^(.{8,}?)\s+[-–—|·]\s+[^-–—|·]{1,30}$/.exec(t);
+  return m ? m[1] : t;
+}
+
 /// The video's own title from the page: og:title is the video title as the
-/// site describes it (no " - Site Name" suffix); empty when absent.
+/// site describes it (no " - Site Name" suffix), then twitter:title, then
+/// the page <title> minus its site suffix; empty when none exists.
 function pageVideoTitle(doc) {
   if (!doc || !doc.querySelector) return "";
-  const og = doc.querySelector('meta[property="og:title"]');
-  const t = (og && og.content) || "";
-  return t.trim();
+  const meta = (selector) => {
+    const el = doc.querySelector(selector);
+    return ((el && el.content) || "").trim();
+  };
+  return (
+    meta('meta[property="og:title"]') ||
+    meta('meta[name="twitter:title"]') ||
+    cleanDocTitle(doc.title)
+  );
 }
 
 // --- Live wiring (browser only; the pure helpers above are unit-tested) ---
@@ -126,13 +140,16 @@ if (
 
   function report() {
     const videos = collectVideos(document, (v) => isStartedVideo(v, played));
-    const snapshot = JSON.stringify(videos);
+    const title = pageVideoTitle(document);
+    // The title is part of the snapshot: an SPA can change it with no new
+    // video, and the menu labels must follow.
+    const snapshot = JSON.stringify([videos, title]);
     if (snapshot === lastSent) return;
     lastSent = snapshot;
     chrome.runtime.sendMessage({
       type: "grab-videos-detected",
       videos,
-      title: pageVideoTitle(document),
+      title,
     });
   }
 
