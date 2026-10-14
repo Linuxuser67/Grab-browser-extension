@@ -516,6 +516,37 @@ describe("handoff tab separation (review fix 1)", () => {
     assert.equal(navigated, false);
   });
 
+  test("main menu on video element uses detected video URL, not page URL", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    // Simulate video detection for tab 1.
+    const sender = { tab: { id: 1, url: "https://example.com/" }, frameId: 0 };
+    await chrome._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{ src: "https://example.com/streamer/", title: "Stream" }],
+      },
+      sender,
+      () => {}
+    );
+    // Right-click on the video element (blob: srcUrl), main menu item.
+    let postedUrl = null;
+    globalThis.fetch = async (url, opts) => {
+      postedUrl = JSON.parse(opts.body).url;
+      return { status: 200, ok: true };
+    };
+    await chrome._listeners["menus.onClicked"](
+      {
+        menuItemId: "sendToGrab",
+        mediaType: "video",
+        srcUrl: "blob:https://example.com/abc",
+        pageUrl: "https://example.com/",
+      },
+      { id: 1 }
+    );
+    assert.equal(postedUrl, "https://example.com/streamer/");
+  });
+
   test("a blob: media URL falls back to the page URL for extraction", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
