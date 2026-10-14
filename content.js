@@ -201,11 +201,14 @@ if (
   // Initial sweep: latch videos already playing when this script ran; the
   // audible check happens at collect time. Muted autoplay is noise.
   if (document.querySelectorAll) {
+    let latched = false;
     for (const v of document.querySelectorAll("video")) {
       if (!v.muted && !v.paused && !v.ended && (v.currentTime || 0) > 0) {
         played.add(v);
+        latched = true;
       }
     }
+    if (latched) scheduleReport();
   }
 
   chrome.runtime.onMessage.addListener((msg) => {
