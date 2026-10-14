@@ -1104,15 +1104,15 @@ describe("variantMenuTitle", () => {
         { url: "https://x/y.m3u8", height: 1080, bandwidth: 8000000, fps: 60 },
         0
       ),
-      "1080p • 60 fps • 8.00 Mbps"
+      "1080p60 • 8.00 Mbps"
     );
   });
 
   test("rounds NTSC frame rates to what people call them", () => {
     const at = (fps) => bg.variantMenuTitle({ url: "https://x/y.m3u8", height: 720, fps }, 0);
-    assert.equal(at(29.97), "720p • 30 fps");
-    assert.equal(at(59.94), "720p • 60 fps");
-    assert.equal(at(23.976), "720p • 24 fps");
+    assert.equal(at(29.97), "720p30");
+    assert.equal(at(59.94), "720p60");
+    assert.equal(at(23.976), "720p24");
     assert.equal(at(null), "720p");
   });
 
@@ -1338,7 +1338,7 @@ describe("menu rows", () => {
   test("DASH is one row listing the qualities, handing the MPD", async () => {
     const url = "https://cdn.example.com/d/manifest.mpd";
     assert.deepEqual(await withFetch(MPD, () => bg.dashMenuRows(url)), [
-      { quality: "1080p / 360p • up to 30 fps • pick in Grab", url },
+      { quality: "1080p30 / 360p30 • pick in Grab", url },
     ]);
     bg = loadBackground(makeChrome());
     assert.deepEqual(await withFetch(null, () => bg.dashMenuRows(url)), [{ quality: "", url }]);

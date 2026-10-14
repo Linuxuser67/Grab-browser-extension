@@ -941,11 +941,9 @@ function parseHlsVariants(text, baseUrl) {
 function variantMenuTitle(variant, index) {
   const parts = [];
   if (variant.height) {
-    parts.push(`${variant.height}p`);
-  }
-  // fps right after the height: 29.97 reads as "30 fps", 59.94 as "60 fps".
-  if (variant.fps > 0) {
-    parts.push(`${Math.round(variant.fps)} fps`);
+    // 1080p60 style: fps appended directly to the height.
+    const fps = variant.fps > 0 ? Math.round(variant.fps) : 0;
+    parts.push(fps > 0 ? `${variant.height}p${fps}` : `${variant.height}p`);
   }
   if (variant.bandwidth) {
     parts.push(`${(variant.bandwidth / 1000000).toFixed(2)} Mbps`);
@@ -1063,25 +1061,26 @@ const byQuality = (a, b) =>
 /// "1080p / 720p / 360p" from variants already sorted best first; at most
 /// five heights, "…" when there are more. Empty when none has a height.
 function heightList(variants) {
-  const heights = [
-    ...new Set(variants.map((v) => v.height).filter((h) => h > 0)),
-  ];
-  const shown = heights.slice(0, 5).map((h) => `${h}p`);
+  // Map height -> max fps for that height.
+  const fpsByHeight = new Map();
+  for (const v of variants) {
+    if (v.height > 0) {
+      const fps = v.fps > 0 ? Math.round(v.fps) : 0;
+      const prev = fpsByHeight.get(v.height);
+      if (prev === undefined || fps > prev) fpsByHeight.set(v.height, fps);
+    }
+  }
+  const heights = [...fpsByHeight.keys()].sort((a, b) => b - a);
+  const shown = heights.slice(0, 5).map((h) => {
+    const fps = fpsByHeight.get(h);
+    return fps > 0 ? `${h}p${fps}` : `${h}p`;
+  });
   if (heights.length > 5) shown.push("…");
   return shown.join(" / ");
 }
 
-/// "up to 60 fps" from the best frame rate among the variants; empty when
-/// none reports one.
-function maxFpsLabel(variants) {
-  const top = Math.max(0, ...variants.map((v) => v.fps || 0));
-  return top > 0 ? `up to ${Math.round(top)} fps` : "";
-}
-
 const pickRowQuality = (variants) =>
-  [heightList(variants), maxFpsLabel(variants), PICK_IN_GRAB]
-    .filter(Boolean)
-    .join(" • ");
+  [heightList(variants), PICK_IN_GRAB].filter(Boolean).join(" • ");
 
 /// Rows for an HLS URL. A media playlist (or an unreadable master) is one
 /// plain row.
