@@ -14,7 +14,15 @@
 // All listeners are registered synchronously at the top level: the worker is
 // ephemeral and Chrome only wakes it for events it registered for on startup.
 
-importScripts("shared.js");
+// shared.js loads via importScripts in the Chrome MV3 service worker.
+// Firefox lists it as a background script before this file, so the
+// globals already exist there (importScripts only exists in workers).
+if (
+  typeof SHARED_DEFAULTS === "undefined" &&
+  typeof importScripts === "function"
+) {
+  importScripts("shared.js");
+}
 
 const GRAB_SCHEME = "grab://";
 
@@ -1242,6 +1250,7 @@ if (chrome.windows && chrome.windows.onFocusChanged) {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   videoFinds.delete(tabId);
+  warnedTabs.delete(tabId);
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {

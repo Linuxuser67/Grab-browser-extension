@@ -1,6 +1,5 @@
 // Shared settings for the popup and options pages.
-// Single source of truth for DEFAULTS and the save normalization.
-// (background.js keeps its own copy for the worker; keep them in sync.)
+// Single source of truth for the save normalization.
 
 // Shared defaults live in shared.js (loaded via <script> before this file).
 const DEFAULTS = SHARED_DEFAULTS;
