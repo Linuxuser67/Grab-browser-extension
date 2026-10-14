@@ -165,9 +165,10 @@ if (
 
   function onPlay(e) {
     const t = e && e.target;
-    // Latch regardless of mute: a muted autoplay that the user later unmutes
-    // must already count as started when volumechange re-reports.
-    if (t && t.tagName === "VIDEO") {
+    // Latch only unmuted play: muted autoplay (feeds, ads, previews) is
+    // noise. A muted video the user unmutes fires volumechange, which
+    // re-reports and latches then.
+    if (t && t.tagName === "VIDEO" && !t.muted) {
       played.add(t);
       scheduleReport();
     }
@@ -184,15 +185,26 @@ if (
   document.addEventListener("play", onPlay, true);
   document.addEventListener("playing", onPlay, true);
   document.addEventListener("emptied", onEmptied, true);
-  document.addEventListener("volumechange", () => scheduleReport(), true);
+  document.addEventListener(
+    "volumechange",
+    (e) => {
+      const t = e && e.target;
+      // Unmuting is user intent: latch it even if paused.
+      if (t && t.tagName === "VIDEO" && !t.muted) played.add(t);
+      scheduleReport();
+    },
+    true,
+  );
   // The decoded height only exists once metadata has loaded.
   document.addEventListener("loadedmetadata", () => scheduleReport(), true);
 
   // Initial sweep: latch videos already playing when this script ran; the
-  // audible check happens at collect time.
+  // audible check happens at collect time. Muted autoplay is noise.
   if (document.querySelectorAll) {
     for (const v of document.querySelectorAll("video")) {
-      if (!v.paused && !v.ended && (v.currentTime || 0) > 0) played.add(v);
+      if (!v.muted && !v.paused && !v.ended && (v.currentTime || 0) > 0) {
+        played.add(v);
+      }
     }
   }
 
