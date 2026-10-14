@@ -466,10 +466,28 @@ describe("handoff tab separation (review fix 1)", () => {
     assert.equal(anyTab, false);
   });
 
-  test("explicit context-menu send still navigates the active tab", async () => {
+  test("explicit context-menu send uses HTTP handoff when Grab is up", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
-    chrome._listeners["menus.onClicked"](
+    await chrome._listeners["menus.onClicked"](
+      { menuItemId: "sendToGrab", linkUrl: "https://example.com/f.zip" },
+      null
+    );
+    const handoffUsed = chrome._calls.some(
+      ([name, url]) => name === "handoff" && url === "https://example.com/f.zip"
+    );
+    const navigated = chrome._calls.some(([name]) => name === "tabs.update");
+    assert.equal(handoffUsed, true);
+    assert.equal(navigated, false);
+  });
+
+  test("explicit context-menu send falls back to tab navigation when Grab is down", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    globalThis.fetch = async () => {
+      throw new Error("connection refused");
+    };
+    await chrome._listeners["menus.onClicked"](
       { menuItemId: "sendToGrab", linkUrl: "https://example.com/f.zip" },
       null
     );
@@ -487,7 +505,7 @@ describe("handoff tab separation (review fix 1)", () => {
   test("a blob: media URL falls back to the page URL for extraction", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
-    chrome._listeners["menus.onClicked"](
+    await chrome._listeners["menus.onClicked"](
       {
         menuItemId: "sendToGrab",
         srcUrl: "blob:https://example.com/uuid",
@@ -496,9 +514,8 @@ describe("handoff tab separation (review fix 1)", () => {
       null
     );
     const sent = chrome._calls.some(
-      ([name, arg]) =>
-        name === "tabs.update" &&
-        arg.url === "grab://https/example.com/room/user"
+      ([name, url]) =>
+        name === "handoff" && url === "https://example.com/room/user"
     );
     assert.equal(sent, true);
   });
@@ -506,7 +523,7 @@ describe("handoff tab separation (review fix 1)", () => {
   test("a usable media URL is still preferred over the page URL", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
-    chrome._listeners["menus.onClicked"](
+    await chrome._listeners["menus.onClicked"](
       {
         menuItemId: "sendToGrab",
         srcUrl: "https://cdn.example.com/v.mp4",
@@ -515,8 +532,7 @@ describe("handoff tab separation (review fix 1)", () => {
       null
     );
     const sent = chrome._calls.some(
-      ([name, arg]) =>
-        name === "tabs.update" && arg.url === "grab://https/cdn.example.com/v.mp4"
+      ([name, url]) => name === "handoff" && url === "https://cdn.example.com/v.mp4"
     );
     assert.equal(sent, true);
   });

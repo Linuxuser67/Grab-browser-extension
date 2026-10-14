@@ -382,34 +382,47 @@ async function decidePending(id) {
     const stored = await chrome.storage.session.get(pendingKey(id));
     const deadline = stored[pendingKey(id)];
     if (deadline === undefined) return;
-    await dropPending(id);
 
     const settings = await getSettings();
     const items = await chrome.downloads.search({ id });
     const item = items[0];
-    if (!item) return;
+    if (!item) {
+      await dropPending(id);
+      return;
+    }
     // The download finished or failed while parked (or in the async gap
     // between deciding to park and persisting the pending state): too late
     // to hand over — leave the browser copy alone.
-    if (item.state === "complete" || item.state === "interrupted") return;
+    if (item.state === "complete" || item.state === "interrupted") {
+      await dropPending(id);
+      return;
+    }
     // The user may have changed their mind while we waited.
-    if (!settings.interceptDownloads) return;
-    if (isSkipped(item.url, settings.skipTypes)) return;
-    if (!toGrabUrl(item.url)) return;
+    if (!settings.interceptDownloads || isSkipped(item.url, settings.skipTypes) || !toGrabUrl(item.url)) {
+      await dropPending(id);
+      return;
+    }
     if (item.fileSize >= 0) {
       // Size is known: small enough stays in the browser, big enough is
       // intercepted now.
-      if (item.fileSize < minSizeBytes(settings)) return;
+      if (item.fileSize < minSizeBytes(settings)) {
+        await dropPending(id);
+        return;
+      }
     } else if (Date.now() < deadline) {
       // Size still unknown but the deadline hasn't passed: this call came
       // too early (the alarm is only the wakeup). Re-park and wait for the
-      // real deadline instead of intercepting early.
+      // real deadline instead of intercepting early. Don't drop: parkForSize
+      // refreshes the pending entry.
       await parkForSize(item, deadline);
       return;
     }
     // Unknown size past the deadline: streams rarely report one, and they
     // belong in Grab (see SIZE_WAIT_MS).
+    // Drop the pending entry AFTER the handoff starts, so a worker death
+    // in between doesn't lose the download silently.
     await interceptDownload(item);
+    await dropPending(id);
   } finally {
     deciding.delete(id);
   }
@@ -550,7 +563,10 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       }
     }
     const url = urls[Number(id.slice(VIDEO_ITEM_PREFIX.length))];
-    if (url) sendToGrab(url, tab && tab.id);
+    // Try the paired HTTP handoff first (sends cookies, waits for Grab's
+    // real answer); fall back to the grab:// navigation when Grab isn't
+    // reachable.
+    if (url && !(await handOff(url))) sendToGrab(url, tab && tab.id);
     return;
   }
   if (id !== "sendToGrab") return;
@@ -566,7 +582,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
   // Prefer the media/link target, but a blob:/data: media URL can't leave
   // the browser — fall back to the page URL so yt-dlp can extract it there.
-  sendToGrab(candidates.find((u) => toGrabUrl(u)), tab && tab.id);
+  // Try the paired HTTP handoff first (sends cookies); fall back to grab://.
+  const target = candidates.find((u) => toGrabUrl(u));
+  if (target && !(await handOff(target))) sendToGrab(target, tab && tab.id);
 });
 
 // The toolbar button now opens popup.html (default_popup in the manifest),
@@ -574,8 +592,10 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
 chrome.commands.onCommand.addListener((command) => {
   if (command !== "send-tab-to-grab") return;
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (tabs[0] && tabs[0].url) sendToGrab(tabs[0].url, tabs[0].id);
+  chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+    const url = tabs[0] && tabs[0].url;
+    // Paired HTTP handoff first (sends cookies); grab:// fallback.
+    if (url && !(await handOff(url))) sendToGrab(url, tabs[0].id);
   });
 });
 
@@ -1035,8 +1055,12 @@ async function fetchDashRepresentations(url) {
   if (text === null) return null; // uncached: a later rebuild may retry
   const reps = parseDashRepresentations(text);
   const result = reps.length > 0 ? reps : null;
-  dashCache.set(url, result);
-  if (dashCache.size > 200) dashCache.delete(dashCache.keys().next().value);
+  // Don't cache null: a transient bad parse shouldn't poison the menu until
+  // 200 other entries evict it. Same rule as the playlist cache.
+  if (result !== null) {
+    dashCache.set(url, result);
+    if (dashCache.size > 200) dashCache.delete(dashCache.keys().next().value);
+  }
   return result;
 }
 
