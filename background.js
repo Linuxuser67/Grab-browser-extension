@@ -644,8 +644,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     updateTab(tab && tab.id, magnet);
     return;
   }
-  // Right-clicked on a video element whose srcUrl is a blob: (unusable):
-  // if the tab has exactly one detected video, that's the one the user
+  // Right-clicked on a video element whose srcUrl is unusable (blob:/data:):
+  // try to find the detected video matching the clicked element's src.
+  // If the tab has exactly one detected video, that's the one the user
   // meant — don't fall back to the generic page URL.
   let target = candidates.find((u) => toGrabUrl(u));
   if (
@@ -655,8 +656,28 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     target === info.pageUrl
   ) {
     const detected = mergedVideoUrls(tab.id);
-    if (detected.length === 1 && toGrabUrl(detected[0])) {
+    // Try to match the clicked video's srcUrl against detected videos.
+    // info.srcUrl is the video element's src (may be blob:).
+    let matched = null;
+    if (info.srcUrl) {
+      const videos = domVideosFor(tab.id);
+      for (const v of videos) {
+        if (v && v.src === info.srcUrl) {
+          matched = v;
+          break;
+        }
+      }
+    }
+    if (matched && toGrabUrl(matched.src) && matched.src !== info.pageUrl) {
+      // Direct URL: use it.
+      target = matched.src;
+    } else if (detected.length === 1 && toGrabUrl(detected[0])) {
+      // Single detected video: use it.
       target = detected[0];
+    } else if (matched && matched.blob && detected.length > 0) {
+      // Blob video matched but no direct URL: use first detected (likely paired manifest).
+      const first = detected.find((u) => toGrabUrl(u));
+      if (first) target = first;
     }
   }
   // Prefer the media/link target, but a blob:/data: media URL can't leave

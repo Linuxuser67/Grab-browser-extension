@@ -547,6 +547,39 @@ describe("handoff tab separation (review fix 1)", () => {
     assert.equal(postedUrl, "https://example.com/streamer/");
   });
 
+  test("right-click matches video by srcUrl among multiple detected", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    const sender = { tab: { id: 2, url: "https://example.com/feed" }, frameId: 0 };
+    await chrome._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [
+          { src: "blob:https://example.com/v1", blob: true, title: "First" },
+          { src: "https://cdn.example.com/v2.mp4", title: "Second" },
+        ],
+      },
+      sender,
+      () => {}
+    );
+    // Right-click the second video (direct URL src).
+    let postedUrl = null;
+    globalThis.fetch = async (url, opts) => {
+      postedUrl = JSON.parse(opts.body).url;
+      return { status: 200, ok: true };
+    };
+    await chrome._listeners["menus.onClicked"](
+      {
+        menuItemId: "sendToGrab",
+        mediaType: "video",
+        srcUrl: "https://cdn.example.com/v2.mp4",
+        pageUrl: "https://example.com/feed",
+      },
+      { id: 2 }
+    );
+    assert.equal(postedUrl, "https://cdn.example.com/v2.mp4");
+  });
+
   test("empty re-report keeps known videos (live element swap)", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
