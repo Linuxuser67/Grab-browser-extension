@@ -242,6 +242,21 @@ async function handOff(url, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
   return status >= 200 && status < 300;
 }
 
+/// Explicit user action (context menu, video menu, Alt+G): try the HTTP
+/// handoff first, but only fall back to the grab:// navigation when Grab
+/// isn't reachable at all (connection failure). If Grab responded — even
+/// with 409 (card opened or declined) or 408 — it handled the URL; falling
+/// back would duplicate the handoff.
+async function explicitSend(url, tabId) {
+  let status = await postToGrab(url);
+  for (const delay of HANDOFF_RETRY_DELAYS_MS) {
+    if (status !== 429) break;
+    await sleep(delay);
+    status = await postToGrab(url);
+  }
+  if (status === 0) sendToGrab(url, tabId);
+}
+
 /// True when the URL's file extension is on the user's skip list.
 function isSkipped(url, skipTypes) {
   if (!skipTypes) return false;
@@ -564,9 +579,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     }
     const url = urls[Number(id.slice(VIDEO_ITEM_PREFIX.length))];
     // Try the paired HTTP handoff first (sends cookies, waits for Grab's
-    // real answer); fall back to the grab:// navigation when Grab isn't
-    // reachable.
-    if (url && !(await handOff(url))) sendToGrab(url, tab && tab.id);
+    // real answer); fall back to the grab:// navigation only when Grab isn't
+    // reachable at all.
+    if (url) await explicitSend(url, tab && tab.id);
     return;
   }
   if (id !== "sendToGrab") return;
@@ -582,9 +597,10 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
   // Prefer the media/link target, but a blob:/data: media URL can't leave
   // the browser — fall back to the page URL so yt-dlp can extract it there.
-  // Try the paired HTTP handoff first (sends cookies); fall back to grab://.
+  // Try the paired HTTP handoff first (sends cookies); fall back to grab://
+  // only when Grab isn't reachable at all.
   const target = candidates.find((u) => toGrabUrl(u));
-  if (target && !(await handOff(target))) sendToGrab(target, tab && tab.id);
+  if (target) await explicitSend(target, tab && tab.id);
 });
 
 // The toolbar button now opens popup.html (default_popup in the manifest),
@@ -594,8 +610,9 @@ chrome.commands.onCommand.addListener((command) => {
   if (command !== "send-tab-to-grab") return;
   chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
     const url = tabs[0] && tabs[0].url;
-    // Paired HTTP handoff first (sends cookies); grab:// fallback.
-    if (url && !(await handOff(url))) sendToGrab(url, tabs[0].id);
+    // Paired HTTP handoff first (sends cookies); grab:// fallback only when
+    // Grab isn't reachable at all.
+    if (url) await explicitSend(url, tabs[0].id);
   });
 });
 
