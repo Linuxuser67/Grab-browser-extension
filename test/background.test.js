@@ -547,6 +547,46 @@ describe("handoff tab separation (review fix 1)", () => {
     assert.equal(postedUrl, "https://example.com/streamer/");
   });
 
+  test("empty re-report keeps known videos (live element swap)", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    await chrome._listeners["tabs.onActivated"]({ tabId: 7 });
+    const sender = { tab: { id: 7, url: "https://example.com/" }, frameId: 0 };
+    // Initial report with a played video.
+    await chrome._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{ src: "https://cdn.example.com/v/clip.mp4" }],
+      },
+      sender,
+      () => {}
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    // Live site swaps the <video> element; the new one hasn't played yet.
+    await chrome._listeners["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [] },
+      sender,
+      () => {}
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    // The main menu fallback should still find the preserved video.
+    let postedUrl = null;
+    globalThis.fetch = async (url, opts) => {
+      postedUrl = JSON.parse(opts.body).url;
+      return { status: 200, ok: true };
+    };
+    await chrome._listeners["menus.onClicked"](
+      {
+        menuItemId: "sendToGrab",
+        mediaType: "video",
+        srcUrl: "blob:https://example.com/abc",
+        pageUrl: "https://example.com/",
+      },
+      { id: 7 }
+    );
+    assert.equal(postedUrl, "https://cdn.example.com/v/clip.mp4");
+  });
+
   test("a blob: media URL falls back to the page URL for extraction", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
