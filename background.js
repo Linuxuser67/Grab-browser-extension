@@ -595,11 +595,25 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     updateTab(tab && tab.id, magnet);
     return;
   }
+  // Right-clicked on a video element whose srcUrl is a blob: (unusable):
+  // if the tab has exactly one detected video, that's the one the user
+  // meant — don't fall back to the generic page URL.
+  let target = candidates.find((u) => toGrabUrl(u));
+  if (
+    info.mediaType === "video" &&
+    tab &&
+    Number.isInteger(tab.id) &&
+    target === info.pageUrl
+  ) {
+    const detected = mergedVideoUrls(tab.id);
+    if (detected.length === 1 && toGrabUrl(detected[0])) {
+      target = detected[0];
+    }
+  }
   // Prefer the media/link target, but a blob:/data: media URL can't leave
   // the browser — fall back to the page URL so yt-dlp can extract it there.
   // Try the paired HTTP handoff first (sends cookies); fall back to grab://
   // only when Grab isn't reachable at all.
-  const target = candidates.find((u) => toGrabUrl(u));
   if (target) await explicitSend(target, tab && tab.id);
 });
 
