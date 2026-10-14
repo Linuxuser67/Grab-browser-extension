@@ -1161,14 +1161,14 @@ describe("videoName", () => {
 
   test("truncates long names with an ellipsis", async () => {
     const name = bg.videoName(`https://cdn.example.com/v/${"a".repeat(60)}.mp4`, 0, "", null);
-    assert.ok(name.length <= 25);
+    assert.ok(name.length <= 17);
     assert.ok(name.endsWith(".mp4"));
   });
 
   test("a stream is named by the whole page video title", async () => {
     assert.equal(
       bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, "  Example   Video Title ", "hls"),
-      "Example Video Title"
+      "Example Video T…"
     );
     assert.equal(
       bg.videoName("https://cdn.example.com/d/manifest.mpd", 0, "My Show", "dash"),
@@ -1429,9 +1429,9 @@ describe("context menu: one flat submenu, one click to Grab", () => {
     assert.ok(ids.has("grabVideos"));
     assert.deepEqual(rowsOf(items).map((i) => i.title), [
       "clip.mp4 • 1080p",
-      "Example Video Title • 1080p • 5.00 Mbps",
-      "Example Video Title • 720p • 2.00 Mbps",
-      "Example Video Title • 360p • 0.80 Mbps",
+      "Example Video T… • 1080p • 5.00 Mbps",
+      "Example Video T… • 720p • 2.00 Mbps",
+      "Example Video T… • 360p • 0.80 Mbps",
     ]);
     assert.ok(items.every((i) => i.enabled !== false));
   });
