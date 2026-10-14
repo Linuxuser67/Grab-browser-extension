@@ -719,12 +719,9 @@ function fileNameOf(url) {
 /// usually "master.m3u8") is named by the page's video title when the content
 /// script found one, else by its file name. "Video N" is the last resort.
 function videoName(url, index, pageTitle, kind) {
-  const file = fileNameOf(url);
-  if (kind) {
-    const title = String(pageTitle || "").replace(/\s+/g, " ").trim();
-    if (title) return shorten(title);
-  }
-  return file ? shorten(file) : `Video ${index + 1}`;
+  // Short human-readable differentiator: Video 1, Video 2, ...
+  // Quality and fps (in the row) do the rest of the differentiating.
+  return `Video ${index + 1}`;
 }
 
 // --- Master playlist preference ------------------------------------------
@@ -930,8 +927,9 @@ function parseHlsVariants(text, baseUrl) {
   return variants;
 }
 
-/// Menu label for a variant, media-bridge's format:
-/// "1080p • 8.00 Mbps • 60 fps". Falls back to the file name when no
+/// Menu label for a variant, adapted from media-bridge's format:
+/// "1080p • 60 fps • 8.00 Mbps" (quality first, so a truncated label still
+/// shows what matters). Falls back to the file name when no
 /// quality attributes are present.
 /// (Ported from jvillegasd/media-bridge, MIT, Copyright (c) 2026 Johnny Villegas.)
 function variantMenuTitle(variant, index) {
@@ -939,11 +937,12 @@ function variantMenuTitle(variant, index) {
   if (variant.height) {
     parts.push(`${variant.height}p`);
   }
+  // fps right after the height: 29.97 reads as "30 fps", 59.94 as "60 fps".
+  if (variant.fps > 0) {
+    parts.push(`${Math.round(variant.fps)} fps`);
+  }
   if (variant.bandwidth) {
     parts.push(`${(variant.bandwidth / 1000000).toFixed(2)} Mbps`);
-  }
-  if (variant.fps) {
-    parts.push(`${variant.fps} fps`);
   }
   if (parts.length > 0) return parts.join(" • ");
   try {
@@ -1066,8 +1065,17 @@ function heightList(variants) {
   return shown.join(" / ");
 }
 
+/// "up to 60 fps" from the best frame rate among the variants; empty when
+/// none reports one.
+function maxFpsLabel(variants) {
+  const top = Math.max(0, ...variants.map((v) => v.fps || 0));
+  return top > 0 ? `up to ${Math.round(top)} fps` : "";
+}
+
 const pickRowQuality = (variants) =>
-  [heightList(variants), PICK_IN_GRAB].filter(Boolean).join(" • ");
+  [heightList(variants), maxFpsLabel(variants), PICK_IN_GRAB]
+    .filter(Boolean)
+    .join(" • ");
 
 /// Rows for an HLS URL. A media playlist (or an unreadable master) is one
 /// plain row.
