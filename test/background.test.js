@@ -502,6 +502,20 @@ describe("handoff tab separation (review fix 1)", () => {
     assert.equal(viaBackgroundTab, false);
   });
 
+  test("explicit send does not fall back to grab:// when Grab answers 409", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    // Grab opened the card (or the user declined): it handled the URL.
+    // Falling back to grab:// would duplicate the handoff.
+    globalThis.fetch = async () => ({ status: 409, ok: false });
+    await chrome._listeners["menus.onClicked"](
+      { menuItemId: "sendToGrab", linkUrl: "https://example.com/f.zip" },
+      null
+    );
+    const navigated = chrome._calls.some(([name]) => name === "tabs.update");
+    assert.equal(navigated, false);
+  });
+
   test("a blob: media URL falls back to the page URL for extraction", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
