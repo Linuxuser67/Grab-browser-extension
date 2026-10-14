@@ -505,44 +505,6 @@ describe("detection wiring", () => {
     );
   });
 
-  test("a click after master-playlist filtering sends the master, not the hidden child", async () => {
-    const chrome = makeChrome();
-    loadBackground(chrome);
-    globalThis.fetch = async (url, opts) => {
-      // Handoff POST: record and succeed.
-      if (opts && opts.method === "POST" && opts.body) {
-        chrome._calls.push(["handoff", JSON.parse(opts.body).url]);
-        return { status: 200, ok: true };
-      }
-      // Playlist GET.
-      return {
-        ok: true,
-        text: async () =>
-          String(url).endsWith("master.m3u8")
-            ? "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n720/index.m3u8\n"
-            : "#EXTM3U\n#EXT-X-TARGETDURATION=6\n",
-      };
-    };
-    const L = chrome._listeners;
-    await L["tabs.onActivated"]({ tabId: 5 });
-    L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://cdn.example.com/v/index.m3u8", responseHeaders: [] });
-    L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://cdn.example.com/v/master.m3u8", responseHeaders: [] });
-    // Played-only menu: the sniffed manifests need a started video to surface.
-    L["runtime.onMessage"](
-      { type: "grab-videos-detected", videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }] },
-      { tab: { id: 5 } }
-    );
-    await tick();
-    await tick();
-    // Menu is [clip.mp4, master.m3u8]: the direct source first, then the
-    // filtered master.
-    await L["menus.onClicked"]({ menuItemId: "grabVideo:1" }, { id: 5 });
-    assert.ok(
-      chrome._calls.some(([n, url]) => n === "handoff" && url === "https://cdn.example.com/v/master.m3u8"),
-      "master playlist is sent"
-    );
-  });
-
   test("content-script reports reach the menu", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
@@ -878,164 +840,6 @@ describe("excluded hosts", () => {
   });
 });
 
-describe("preferMasterPlaylists", () => {
-  let bg;
-  const MASTER = "https://cdn.example.com/hls/master.m3u8";
-  const VIDEO_PL = "https://cdn.example.com/hls/index-v1.m3u8";
-  const AUDIO_PL = "https://cdn.example.com/hls/index-v1-a1.m3u8";
-  const OTHER_DIR = "https://cdn.example.com/other/clip.m3u8";
-  const MP4 = "https://cdn.example.com/v/clip.mp4";
-
-  const MASTER_BODY = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nindex-v1.m3u8\n";
-  const MEDIA_BODY = "#EXTM3U\n#EXT-X-TARGETDURATION=6\n#EXTINF:6.0,\nseg1.ts\n";
-
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
-    // Mock fetch: master for MASTER, media playlist for the rest.
-    globalThis.fetch = async (url) => ({
-      ok: true,
-      text: async () => (String(url).includes("master.m3u8") ? MASTER_BODY : MEDIA_BODY),
-    });
-  });
-
-  test("keeps only the master when its children are detected", async () => {
-    const out = await bg.preferMasterPlaylists([MASTER, VIDEO_PL, AUDIO_PL]);
-    assert.deepEqual(out, [MASTER]);
-  });
-
-  test("keeps manifests outside the master directory", async () => {
-    const out = await bg.preferMasterPlaylists([MASTER, VIDEO_PL, OTHER_DIR]);
-    assert.deepEqual(out, [MASTER, OTHER_DIR]);
-  });
-
-  test("keeps non-manifest URLs untouched", async () => {
-    const out = await bg.preferMasterPlaylists([MASTER, VIDEO_PL, MP4]);
-    assert.deepEqual(out, [MASTER, MP4]);
-  });
-
-  test("returns everything when no master is confirmed", async () => {
-    globalThis.fetch = async () => ({ ok: true, text: async () => MEDIA_BODY });
-    // Fresh module so the cache from beforeEach doesn't leak.
-    bg = loadBackground(makeChrome());
-    const out = await bg.preferMasterPlaylists([VIDEO_PL, AUDIO_PL]);
-    assert.deepEqual(out, [VIDEO_PL, AUDIO_PL]);
-  });
-
-  test("returns everything when the fetch fails", async () => {
-    globalThis.fetch = async () => { throw new Error("denied"); };
-    bg = loadBackground(makeChrome());
-    const out = await bg.preferMasterPlaylists([MASTER, VIDEO_PL]);
-    assert.deepEqual(out, [MASTER, VIDEO_PL]);
-  });
-
-  test("isMasterPlaylist caches its result", async () => {
-    let calls = 0;
-    globalThis.fetch = async () => {
-      calls++;
-      return { ok: true, text: async () => MASTER_BODY };
-    };
-    bg = loadBackground(makeChrome());
-    assert.equal(await bg.isMasterPlaylist(MASTER), true);
-    assert.equal(await bg.isMasterPlaylist(MASTER), true);
-    assert.equal(calls, 1, "second call served from cache");
-  });
-
-  test("drops master-referenced variants outside the master directory", async () => {
-    // CDN-split deployment: the rendition lives under /videos/, not /hls/.
-    const body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\n../videos/v1.m3u8\n";
-    globalThis.fetch = async (url) => ({
-      ok: true,
-      text: async () => (String(url).includes("master.m3u8") ? body : MEDIA_BODY),
-    });
-    bg = loadBackground(makeChrome());
-    const CROSS_DIR = "https://cdn.example.com/videos/v1.m3u8";
-    const out = await bg.preferMasterPlaylists([MASTER, CROSS_DIR]);
-    assert.deepEqual(out, [MASTER]);
-  });
-
-  test("matches variants by path key when tokens rotate", async () => {
-    // The master references ?session=AAA but the player fetched ?session=BBB,
-    // and the variant lives outside the master's directory (only the path
-    // key matches, not the directory heuristic).
-    const body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\n../videos/v1.m3u8?session=AAA\n";
-    globalThis.fetch = async (url) => ({
-      ok: true,
-      text: async () => (String(url).includes("master.m3u8") ? body : MEDIA_BODY),
-    });
-    bg = loadBackground(makeChrome());
-    const ROTATED = "https://cdn.example.com/videos/v1.m3u8?session=BBB";
-    const out = await bg.preferMasterPlaylists([MASTER, ROTATED]);
-    assert.deepEqual(out, [MASTER]);
-  });
-
-  test("drops audio-grouped variants referenced by the master", async () => {
-    // fetchAllVariants (used for filtering) sees every rendition, unlike
-    // getHlsVariants which keeps muxed-only for the submenu.
-    const body = [
-      "#EXTM3U",
-      '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO="a1"',
-      "../videos/v1.m3u8",
-    ].join("\n");
-    globalThis.fetch = async (url) => ({
-      ok: true,
-      text: async () => (String(url).includes("master.m3u8") ? body : MEDIA_BODY),
-    });
-    bg = loadBackground(makeChrome());
-    const CROSS_DIR = "https://cdn.example.com/videos/v1.m3u8";
-    const out = await bg.preferMasterPlaylists([MASTER, CROSS_DIR]);
-    assert.deepEqual(out, [MASTER]);
-  });
-
-  test("drops EXT-X-MEDIA audio playlists outside the master directory", async () => {
-    const body = [
-      "#EXTM3U",
-      '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a1",NAME="English",URI="/audio/en.m3u8"',
-      '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO="a1"',
-      "index-v1.m3u8",
-    ].join("\n");
-    globalThis.fetch = async (url) => ({
-      ok: true,
-      text: async () => (String(url).includes("master.m3u8") ? body : MEDIA_BODY),
-    });
-    bg = loadBackground(makeChrome());
-    const AUDIO_PL = "https://cdn.example.com/audio/en.m3u8";
-    const out = await bg.preferMasterPlaylists([MASTER, VIDEO_PL, AUDIO_PL]);
-    assert.deepEqual(out, [MASTER]);
-  });
-
-  test("collapses to the unfetchable master when its variants are confirmed non-masters", async () => {
-    // The master URL can't be read (expiring token) but its 7 chunklists
-    // can: 5 video + 2 audio, all confirmed media playlists. The failed
-    // fetch among confirmed non-masters marks this as one stream.
-    const DIR = "https://cdn.example.com/s/origin.stream123";
-    const UNFETCHABLE = `${DIR}/llhls.m3u8?token=ABC`;
-    const chunks = Array.from({ length: 7 }, (_, i) => `${DIR}/chunklist_${i}_llhls.m3u8?session=S1`);
-    globalThis.fetch = async (url) => {
-      if (String(url).includes("llhls.m3u8?token=")) throw new Error("403");
-      return { ok: true, text: async () => MEDIA_BODY };
-    };
-    bg = loadBackground(makeChrome());
-    const out = await bg.preferMasterPlaylists([UNFETCHABLE, ...chunks]);
-    assert.deepEqual(out, [UNFETCHABLE]);
-  });
-
-  test("keeps both when the failed fetch wasn't sniffed first", async () => {
-    // A dead video's playlist (failed fetch) sniffed AFTER a working one:
-    // the failure is a different video, not this group's master.
-    const DIR = "https://cdn.example.com/s";
-    const WORKING = `${DIR}/b.m3u8`;
-    const DEAD = `${DIR}/a.m3u8`;
-    globalThis.fetch = async (url) => {
-      if (String(url).endsWith("/a.m3u8")) throw new Error("403");
-      return { ok: true, text: async () => MEDIA_BODY };
-    };
-    bg = loadBackground(makeChrome());
-    const out = await bg.preferMasterPlaylists([WORKING, DEAD]);
-    assert.deepEqual(out, [WORKING, DEAD]);
-  });
-
-});
-
 describe("pageVideoTitle", () => {
   let content;
   beforeEach(() => {
@@ -1073,107 +877,6 @@ describe("pageVideoTitle", () => {
 
   test("empty on missing document", () => {
     assert.equal(content.pageVideoTitle(null), "");
-  });
-});
-
-describe("parseHlsVariants", () => {
-  let bg;
-  const BASE = "https://cdn.example.com/hls/master.m3u8";
-
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
-  });
-
-  test("extracts resolution and bandwidth per variant", () => {
-    const body = [
-      "#EXTM3U",
-      '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360',
-      "index-v1.m3u8",
-      '#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720',
-      "index-v2.m3u8",
-      '#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080',
-      "index-v3.m3u8",
-    ].join("\n");
-    const out = bg.parseHlsVariants(body, BASE);
-    assert.equal(out.length, 3);
-    assert.equal(out[0].height, 360);
-    assert.equal(out[0].bandwidth, 800000);
-    assert.equal(out[0].url, "https://cdn.example.com/hls/index-v1.m3u8");
-    assert.equal(out[2].height, 1080);
-  });
-
-  test("handles missing resolution gracefully", () => {
-    const body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nindex-v1.m3u8\n";
-    const out = bg.parseHlsVariants(body, BASE);
-    assert.equal(out.length, 1);
-    assert.equal(out[0].height, null);
-    assert.equal(out[0].bandwidth, 800000);
-  });
-
-  test("returns empty for media playlists", () => {
-    const body = "#EXTM3U\n#EXT-X-TARGETDURATION=6\n#EXTINF:6.0,\nseg1.ts\n";
-    assert.deepEqual(bg.parseHlsVariants(body, BASE), []);
-  });
-
-  test("resolves relative URIs against the master", () => {
-    const body = "#EXTM3U\n#EXT-X-STREAM-INF:RESOLUTION=1280x720\n../other/v.m3u8\n";
-    const out = bg.parseHlsVariants(body, BASE);
-    assert.equal(out[0].url, "https://cdn.example.com/other/v.m3u8");
-  });
-});
-
-describe("variantMenuTitle", () => {
-  let bg;
-
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
-  });
-
-  test("shows height as 720p-style label", () => {
-    assert.equal(bg.variantMenuTitle({ url: "https://x/y.m3u8", height: 720 }, 0), "720p");
-    assert.equal(bg.variantMenuTitle({ url: "https://x/y.m3u8", height: 1080 }, 0), "1080p");
-  });
-
-  test("combines height, fps and bitrate, quality first", () => {
-    assert.equal(
-      bg.variantMenuTitle(
-        { url: "https://x/y.m3u8", height: 1080, bandwidth: 8000000, fps: 60 },
-        0
-      ),
-      "1080p60 • 8.00 Mbps"
-    );
-  });
-
-  test("rounds NTSC frame rates to what people call them", () => {
-    const at = (fps) => bg.variantMenuTitle({ url: "https://x/y.m3u8", height: 720, fps }, 0);
-    assert.equal(at(29.97), "720p30");
-    assert.equal(at(59.94), "720p60");
-    assert.equal(at(23.976), "720p24");
-    assert.equal(at(null), "720p");
-  });
-
-  test("falls back to bandwidth when height is absent", () => {
-    assert.equal(
-      bg.variantMenuTitle({ url: "https://x/y.m3u8", height: null, bandwidth: 2500000 }, 0),
-      "2.50 Mbps"
-    );
-  });
-});
-
-describe("HLS variant parsing", () => {
-  let bg;
-  const MASTER = "https://cdn.example.com/hls/master.m3u8";
-
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
-  });
-
-  test("parseHlsVariants captures the audio group", () => {
-    const body = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=640x360,AUDIO="a1"\nv.m3u8\n';
-    const out = bg.parseHlsVariants(body, MASTER);
-    assert.equal(out[0].audioGroup, "a1");
-    const body2 = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=640x360\nv.m3u8\n";
-    assert.equal(bg.parseHlsVariants(body2, MASTER)[0].audioGroup, null);
   });
 });
 
@@ -1249,174 +952,6 @@ describe("videoName", () => {
   });
 });
 
-describe("menu rows", () => {
-  let bg;
-  const MASTER = "https://cdn.example.com/hls/master.m3u8";
-  const withFetch = async (body, fn) => {
-    const prev = globalThis.fetch;
-    globalThis.fetch = async () =>
-      body === null ? { ok: false } : { ok: true, text: async () => body };
-    try {
-      return await fn();
-    } finally {
-      globalThis.fetch = prev;
-    }
-  };
-
-  beforeEach(() => {
-    bg = loadBackground(makeChrome());
-  });
-
-  test("muxed HLS renditions hand their own URL, best first", async () => {
-    const body = [
-      "#EXTM3U",
-      "#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360",
-      "v360.m3u8",
-      "#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080",
-      "v1080.m3u8",
-      "#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720",
-      "v720.m3u8",
-    ].join("\n");
-    const rows = await withFetch(body, () => bg.hlsMenuRows(MASTER));
-    assert.deepEqual(
-      rows.map((r) => r.quality),
-      ["1080p • 5.00 Mbps", "720p • 2.00 Mbps", "360p • 0.80 Mbps"]
-    );
-    assert.equal(rows[0].url, "https://cdn.example.com/hls/v1080.m3u8");
-  });
-
-  test("a lone muxed rendition hands the master", async () => {
-    const body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720\nv720.m3u8\n";
-    const rows = await withFetch(body, () => bg.hlsMenuRows(MASTER));
-    assert.deepEqual(rows, [{ quality: "720p • 2.00 Mbps", url: MASTER }]);
-  });
-
-  test("separate-audio HLS is one row listing the qualities, handing the master", async () => {
-    const body = [
-      "#EXTM3U",
-      '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a1",NAME="en",URI="audio.m3u8"',
-      '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO="a1"',
-      "v360.m3u8",
-      '#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,AUDIO="a1"',
-      "v720.m3u8",
-    ].join("\n");
-    const rows = await withFetch(body, () => bg.hlsMenuRows(MASTER));
-    assert.deepEqual(rows, [{ quality: "720p / 360p • pick in Grab", url: MASTER }]);
-  });
-
-  test("mixed master: muxed rows plus one pick row for the taller split ones", async () => {
-    const body = [
-      "#EXTM3U",
-      "#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360",
-      "m360.m3u8",
-      "#EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=1280x720",
-      "m720.m3u8",
-      '#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,AUDIO="a1"',
-      "s1080.m3u8",
-      '#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=640x360,AUDIO="a1"',
-      "s360.m3u8",
-    ].join("\n");
-    const rows = await withFetch(body, () => bg.hlsMenuRows(MASTER));
-    assert.deepEqual(rows, [
-      { quality: "720p • 1.50 Mbps", url: "https://cdn.example.com/hls/m720.m3u8" },
-      { quality: "360p • 0.80 Mbps", url: "https://cdn.example.com/hls/m360.m3u8" },
-      { quality: "1080p • pick in Grab", url: MASTER },
-    ]);
-  });
-
-  test("audio-only renditions are never listed", async () => {
-    const body = [
-      "#EXTM3U",
-      '#EXT-X-STREAM-INF:BANDWIDTH=64000,CODECS="mp4a.40.2"',
-      "audio.m3u8",
-      '#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,CODECS="avc1.64001f,mp4a.40.2"',
-      "v720.m3u8",
-    ].join("\n");
-    const rows = await withFetch(body, () => bg.hlsMenuRows(MASTER));
-    assert.deepEqual(rows, [{ quality: "720p • 2.00 Mbps", url: MASTER }]);
-  });
-
-  test("a media playlist or unreadable master is one plain row", async () => {
-    const plain = [{ quality: "", url: MASTER }];
-    assert.deepEqual(
-      await withFetch("#EXTM3U\n#EXT-X-TARGETDURATION=6\n", () => bg.hlsMenuRows(MASTER)),
-      plain
-    );
-    bg = loadBackground(makeChrome());
-    assert.deepEqual(await withFetch(null, () => bg.hlsMenuRows(MASTER)), plain);
-  });
-
-  const MPD = `<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period>
-  <AdaptationSet contentType="video" mimeType="video/mp4" frameRate="30000/1001">
-    <Representation id="v1" bandwidth="800000" width="640" height="360" codecs="avc1.4d401e"/>
-    <Representation id="v2" bandwidth="5000000" width="1920" height="1080" codecs="avc1.640028">
-      <SegmentTemplate media="v2-$Number$.m4s"/>
-    </Representation>
-    <Representation id="v2b" bandwidth="5000000" height="1080"/>
-  </AdaptationSet>
-  <AdaptationSet contentType="audio" mimeType="audio/mp4">
-    <Representation id="a1" bandwidth="128000" codecs="mp4a.40.2"/>
-  </AdaptationSet>
-  <AdaptationSet contentType="image" mimeType="image/jpeg">
-    <Representation id="t1" bandwidth="1000" height="90"/>
-  </AdaptationSet>
-</Period></MPD>`;
-
-  test("parseDashRepresentations keeps video only, best first, deduplicated", () => {
-    assert.deepEqual(bg.parseDashRepresentations(MPD), [
-      { height: 1080, bandwidth: 5000000, fps: 29.97 },
-      { height: 360, bandwidth: 800000, fps: 29.97 },
-    ]);
-    assert.deepEqual(bg.parseDashRepresentations("not xml"), []);
-  });
-
-  test("DASH is one row listing the qualities, handing the MPD", async () => {
-    const url = "https://cdn.example.com/d/manifest.mpd";
-    assert.deepEqual(await withFetch(MPD, () => bg.dashMenuRows(url)), [
-      { quality: "1080p30 / 360p30 • pick in Grab", url },
-    ]);
-    bg = loadBackground(makeChrome());
-    assert.deepEqual(await withFetch(null, () => bg.dashMenuRows(url)), [{ quality: "", url }]);
-  });
-
-  test("direct files carry the reported height", () => {
-    assert.deepEqual(bg.directMenuRow("https://c.example.com/clip.mp4", 1080), {
-      quality: "1080p",
-      url: "https://c.example.com/clip.mp4",
-    });
-    assert.equal(bg.directMenuRow("https://c.example.com/clip.mp4", 0).quality, "");
-  });
-
-  test("manifestKind: extension first, content sniff for extensionless manifests", async () => {
-    assert.equal(await bg.manifestKind("https://x.example/a.m3u8?t=1", null), "hls");
-    assert.equal(await bg.manifestKind("https://x.example/a.mpd", null), "dash");
-    assert.equal(await bg.manifestKind("https://x.example/a.mp4", "media"), null);
-    assert.equal(await bg.manifestKind("https://x.example/play", null), null);
-    assert.equal(
-      await withFetch("#EXTM3U\n", () => bg.manifestKind("https://x.example/play1", "manifest")),
-      "hls"
-    );
-    assert.equal(
-      await withFetch(MPD, () => bg.manifestKind("https://x.example/play2", "manifest")),
-      "dash"
-    );
-    assert.equal(
-      await withFetch("<html/>", () => bg.manifestKind("https://x.example/play3", "manifest")),
-      null
-    );
-  });
-
-  test("uniqueLabels numbers repeats only", () => {
-    assert.deepEqual(bg.uniqueLabels(["Show", "Clip", "Show", "Show"]), [
-      "Show",
-      "Clip",
-      "Show (2)",
-      "Show (3)",
-    ]);
-  });
-});
-
 describe("context menu: one flat submenu, one click to Grab", () => {
   const MUXED = [
     "#EXTM3U",
@@ -1438,11 +973,7 @@ describe("context menu: one flat submenu, one click to Grab", () => {
 
   /// One played direct file (with a page title set) plus one sniffed manifest.
   /// Returns the chrome mock and every menu item created (last rebuild wins).
-  async function build({ manifestBody, manifestUrl, videos, title }) {
-    // Set fetch mock for playlist content; loadBackground wraps it to also
-    // handle handoff POSTs. Don't restore: the wrapper stays for the clicks
-    // that happen after build() returns.
-    globalThis.fetch = async () => ({ ok: true, text: async () => manifestBody });
+  async function build({ manifestUrl, videos, title }) {
     const chrome = makeChrome();
     const created = new Map();
     const orig = chrome.contextMenus.create;
@@ -1472,7 +1003,6 @@ describe("context menu: one flat submenu, one click to Grab", () => {
 
   test("every row sits directly under the single submenu", async () => {
     const { items } = await build({
-      manifestBody: MUXED,
       manifestUrl: "https://cdn.example.com/hls/master.m3u8",
       videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false, height: 1080 }],
       title: "Example …",
@@ -1483,32 +1013,28 @@ describe("context menu: one flat submenu, one click to Grab", () => {
     assert.ok(ids.has("grabVideos"));
     assert.deepEqual(rowsOf(items).map((i) => i.title), [
       "clip.mp4 • 1080p",
-      "Example … • 1080p • 5.00 Mbps",
-      "Example … • 720p • 2.00 Mbps",
-      "Example … • 360p • 0.80 Mbps",
+      "Example …",
     ]);
     assert.ok(items.every((i) => i.enabled !== false));
   });
 
   test("a click on a row sends that row's URL to Grab", async () => {
     const { chrome, items } = await build({
-      manifestBody: MUXED,
       manifestUrl: "https://cdn.example.com/hls/master.m3u8",
       videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false, height: 1080 }],
       title: "Example …",
     });
     const rows = rowsOf(items);
     await click(chrome, rows[0].id);
-    await click(chrome, rows[2].id);
+    await click(chrome, rows[1].id);
     assert.deepEqual(sent(chrome), [
       "https://cdn.example.com/v/clip.mp4",
-      "https://cdn.example.com/hls/v720.m3u8",
+      "https://cdn.example.com/hls/master.m3u8",
     ]);
   });
 
   test("a plain mp4 with no page title still shows x.mp4", async () => {
     const { items, chrome } = await build({
-      manifestBody: "",
       manifestUrl: null,
       videos: [{ src: "https://cdn.example.com/v/x.mp4", blob: false }],
       title: "",
@@ -1521,7 +1047,6 @@ describe("context menu: one flat submenu, one click to Grab", () => {
 
   test("a page title never renames a direct file", async () => {
     const { items } = await build({
-      manifestBody: "",
       manifestUrl: null,
       videos: [{ src: "https://cdn.example.com/v/x.mp4", blob: false }],
       title: "Watch Now Free HD",
@@ -1531,20 +1056,18 @@ describe("context menu: one flat submenu, one click to Grab", () => {
 
   test("separate-audio streams are one row that hands over the master", async () => {
     const { chrome, items } = await build({
-      manifestBody: SPLIT,
       manifestUrl: "https://cdn.example.com/hls/master.m3u8",
       videos: [{ src: null, blob: true }],
       title: "My Show",
     });
     const rows = rowsOf(items);
-    assert.deepEqual(rows.map((i) => i.title), ["My Show • 1080p / 720p • pick in Grab"]);
+    assert.deepEqual(rows.map((i) => i.title), ["My Show"]);
     await click(chrome, rows[0].id);
     assert.deepEqual(sent(chrome), ["https://cdn.example.com/hls/master.m3u8"]);
   });
 
   test("the main Download with Grab item still works with videos detected", async () => {
     const { chrome } = await build({
-      manifestBody: "",
       manifestUrl: null,
       videos: [{ src: "https://cdn.example.com/v/x.mp4", blob: false }],
       title: "",
@@ -1558,7 +1081,6 @@ describe("context menu: one flat submenu, one click to Grab", () => {
 
   test("videos are separated, repeats are numbered", async () => {
     const { items } = await build({
-      manifestBody: "",
       manifestUrl: null,
       videos: [
         { src: "https://a.example.com/x.mp4", blob: false },
