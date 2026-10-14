@@ -116,12 +116,15 @@ function fileNameOf(url) {
 /// usually "master.m3u8") is named by the page's video title when the content
 /// script found one, else by its file name. "Video N" is the last resort.
 function videoName(url, index, pageTitle, kind) {
-  const file = fileNameOf(url);
-  if (kind) {
-    const title = String(pageTitle || "").replace(/\s+/g, " ").trim();
-    if (title) return shorten(title);
+  // Human-readable differentiator: the host, not the page title or file name.
+  // Quality and fps (in the row) do the rest of the differentiating.
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    if (host) return shorten(host);
+  } catch {
+    // Fall through.
   }
-  return file ? shorten(file) : `Video ${index + 1}`;
+  return `Video ${index + 1}`;
 }
 
 // --- Master playlist preference ------------------------------------------
@@ -810,7 +813,8 @@ async function doRefreshVideoMenu(tabId) {
       title: "Videos detected by Grab",
       contexts,
     });
-    entries.forEach((entry, ei) => {
+    capped.forEach((entry, ei) => {
+      const name = names[ei];
       if (ei > 0) {
         safeMenuCreate({
           id: `${VIDEO_ITEM_PREFIX}sep-${ei}`,
@@ -826,7 +830,7 @@ async function doRefreshVideoMenu(tabId) {
         safeMenuCreate({
           id: `${VIDEO_ITEM_PREFIX}${idx}`,
           parentId: VIDEO_PARENT_ID,
-          title: menuRowTitle(names[ei], row.quality),
+          title: menuRowTitle(name, row.quality),
           contexts,
         });
       }
