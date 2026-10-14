@@ -1071,11 +1071,22 @@ describe("worker fetch hardening", () => {
   for (const url of [
     "https://cdn.example.com/a.m3u8",
     "http://example.com:8080/a.mpd",
-    "http://192.168.1.20:8096/Videos/1/master.m3u8", // home media server
-    "http://10.0.0.5/a.m3u8",
     "https://[2606:4700::1111]/a.m3u8",
   ]) {
     test(`allows ${url}`, () => assert.equal(bg.isFetchAllowed(url), true));
+  }
+
+  for (const url of [
+    "http://192.168.1.20:8096/Videos/1/master.m3u8", // private IPv4
+    "http://10.0.0.5/a.m3u8", // private IPv4
+    "http://172.16.0.1/a.m3u8", // private IPv4
+    "http://172.31.255.1/a.m3u8", // private IPv4
+    "https://[fc00::1]/a.m3u8", // unique-local IPv6
+    "https://[fd00::1]/a.m3u8", // unique-local IPv6
+    "https://[fc::1]/a.m3u8", // compressed unique-local IPv6
+    "https://[fd::1]/a.m3u8", // compressed unique-local IPv6
+  ]) {
+    test(`refuses ${url}`, () => assert.equal(bg.isFetchAllowed(url), false));
   }
 
   test("fetchText never issues a request for a refused host", async () => {
