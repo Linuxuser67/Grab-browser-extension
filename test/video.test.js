@@ -1149,15 +1149,10 @@ describe("videoName", () => {
     bg = await loadBackground(makeChrome());
   });
 
-  test("names are the hostname, not the file or page title", async () => {
-    assert.equal(bg.videoName("https://cdn.example.com/v/clip.mp4?t=1", 0, "Some Page Title", null), "cdn.example.com");
-    assert.equal(bg.videoName("https://cdn.example.com/v/clip.mp4", 0, "", null), "cdn.example.com");
-    assert.equal(bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, "  Example   Video Title ", "hls"), "cdn.example.com");
-    assert.equal(bg.videoName("https://www.example.com/v/a.mp4", 0, "", null), "example.com");
-  });
-
-  test("Video N is the last resort for unparseable URLs", async () => {
-    assert.equal(bg.videoName("not a url", 0, "", null), "Video 1");
+  test("names are Video N", async () => {
+    assert.equal(bg.videoName("https://cdn.example.com/v/clip.mp4?t=1", 0, "Some Page Title", null), "Video 1");
+    assert.equal(bg.videoName("https://cdn.example.com/v/clip.mp4", 2, "", null), "Video 3");
+    assert.equal(bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, "  Example   Video Title ", "hls"), "Video 1");
   });
 
   test("menuRowTitle joins name and quality and escapes %", async () => {
@@ -1403,10 +1398,10 @@ describe("context menu: one flat submenu, one click to Grab", () => {
     assert.ok(items.every((i) => i.parentId === undefined || i.parentId === "grabVideos"));
     assert.ok(ids.has("grabVideos"));
     assert.deepEqual(rowsOf(items).map((i) => i.title), [
-      "cdn.example.com • 1080p",
-      "cdn.example.com (2) • 1080p • 5.00 Mbps",
-      "cdn.example.com (2) • 720p • 2.00 Mbps",
-      "cdn.example.com (2) • 360p • 0.80 Mbps",
+      "Video 1 • 1080p",
+      "Video 2 • 1080p • 5.00 Mbps",
+      "Video 2 • 720p • 2.00 Mbps",
+      "Video 2 • 360p • 0.80 Mbps",
     ]);
     assert.ok(items.every((i) => i.enabled !== false));
   });
@@ -1435,7 +1430,7 @@ describe("context menu: one flat submenu, one click to Grab", () => {
       title: "",
     });
     const rows = rowsOf(items);
-    assert.deepEqual(rows.map((i) => i.title), ["cdn.example.com"]);
+    assert.deepEqual(rows.map((i) => i.title), ["Video 1"]);
     click(chrome, rows[0].id);
     assert.deepEqual(sent(chrome), ["grab://https/cdn.example.com/v/x.mp4"]);
   });
@@ -1447,7 +1442,7 @@ describe("context menu: one flat submenu, one click to Grab", () => {
       videos: [{ src: "https://cdn.example.com/v/x.mp4", blob: false }],
       title: "Watch Now Free HD",
     });
-    assert.deepEqual(rowsOf(items).map((i) => i.title), ["cdn.example.com"]);
+    assert.deepEqual(rowsOf(items).map((i) => i.title), ["Video 1"]);
   });
 
   test("separate-audio streams are one row that hands over the master", async () => {
@@ -1458,7 +1453,7 @@ describe("context menu: one flat submenu, one click to Grab", () => {
       title: "My Show",
     });
     const rows = rowsOf(items);
-    assert.deepEqual(rows.map((i) => i.title), ["cdn.example.com • 1080p / 720p • pick in Grab"]);
+    assert.deepEqual(rows.map((i) => i.title), ["Video 1 • 1080p / 720p • pick in Grab"]);
     click(chrome, rows[0].id);
     assert.deepEqual(sent(chrome), ["grab://https/cdn.example.com/hls/master.m3u8"]);
   });
@@ -1487,7 +1482,7 @@ describe("context menu: one flat submenu, one click to Grab", () => {
       ],
       title: "",
     });
-    assert.deepEqual(rowsOf(items).map((i) => i.title), ["a.example.com", "b.example.com"]);
+    assert.deepEqual(rowsOf(items).map((i) => i.title), ["Video 1", "Video 2"]);
     assert.equal(items.filter((i) => i.type === "separator").length, 1);
   });
 });

@@ -116,14 +116,8 @@ function fileNameOf(url) {
 /// usually "master.m3u8") is named by the page's video title when the content
 /// script found one, else by its file name. "Video N" is the last resort.
 function videoName(url, index, pageTitle, kind) {
-  // Human-readable differentiator: the host, not the page title or file name.
+  // Short human-readable differentiator: Video 1, Video 2, ...
   // Quality and fps (in the row) do the rest of the differentiating.
-  try {
-    const host = new URL(url).hostname.replace(/^www\./, "");
-    if (host) return shorten(host);
-  } catch {
-    // Fall through.
-  }
   return `Video ${index + 1}`;
 }
 
