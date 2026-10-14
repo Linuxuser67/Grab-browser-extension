@@ -70,8 +70,12 @@ function isBigEnough(video) {
 /// and audible right now. Muted autoplay (ads, previews) is noise: the latch
 /// is kept so unmuting counts immediately, but muted videos never report.
 function isStartedVideo(v, played) {
-  if (!v || v.muted) return false;
+  if (!v) return false;
+  // Latched (fired play): the user started it, count even if muted — a
+  // muted autoplay they later unmute must already be reported.
   if (played.has(v)) return true;
+  // Not latched: muted autoplay is noise (ads), unmuted playing is real.
+  if (v.muted) return false;
   return !v.paused && !v.ended && (v.currentTime || 0) > 0;
 }
 
