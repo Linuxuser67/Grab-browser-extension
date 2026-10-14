@@ -400,9 +400,9 @@ describe("isStartedVideo (content script)", () => {
     assert.equal(content.isStartedVideo(video, playedSet([video])), true);
   });
 
-  test("muted videos never count, latched or not", () => {
+  test("latched muted videos count; unlatched muted autoplay does not", () => {
     const latched = pv({ muted: true, paused: true, currentTime: 42 });
-    assert.equal(content.isStartedVideo(latched, playedSet([latched])), false);
+    assert.equal(content.isStartedVideo(latched, playedSet([latched])), true);
     const autoplaying = pv({ muted: true, paused: false, currentTime: 5 });
     assert.equal(content.isStartedVideo(autoplaying, playedSet([])), false);
   });
