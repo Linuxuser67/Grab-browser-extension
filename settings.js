@@ -2,18 +2,8 @@
 // Single source of truth for DEFAULTS and the save normalization.
 // (background.js keeps its own copy for the worker; keep them in sync.)
 
-// Keep in sync with DEFAULTS in background.js.
-const DEFAULTS = {
-  interceptDownloads: false,
-  // Comma-separated file extensions the browser keeps handling itself.
-  skipTypes: "",
-  showContextMenu: true,
-  // Detect videos playing in tabs (content script + webRequest sniffing)
-  // and offer them in the right-click menu.
-  detectVideos: true,
-  // Minimum download size (MiB) that gets intercepted. 0 intercepts everything.
-  minSizeMB: 0,
-};
+// Shared defaults live in shared.js (loaded via <script> before this file).
+const DEFAULTS = SHARED_DEFAULTS;
 
 /// Load settings from sync storage, filling in defaults.
 async function loadSettings() {
@@ -96,7 +86,8 @@ function bindSettingsForm(doc) {
 // The pairing code is a secret for this machine's Grab, so it is kept in local
 // storage (never sync) and is not part of normalizeSettings().
 
-const PAIRING_CODE_RE = /^[0-9a-f]{64}$/;
+// Shared pattern lives in shared.js.
+const PAIRING_CODE_RE = SHARED_PAIRING_CODE_RE;
 
 /// Normalize what the user pasted: whitespace and case are forgiven.
 function normalizePairingCode(raw) {

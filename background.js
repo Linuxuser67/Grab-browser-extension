@@ -14,6 +14,8 @@
 // All listeners are registered synchronously at the top level: the worker is
 // ephemeral and Chrome only wakes it for events it registered for on startup.
 
+importScripts("shared.js");
+
 const GRAB_SCHEME = "grab://";
 
 // Browser startup time (Varia pattern): chrome.downloads.onCreated can re-fire
@@ -26,17 +28,8 @@ chrome.runtime.onStartup.addListener(() => {
   chrome.storage.session.set({ browserStartTime: Date.now() });
 });
 
-const DEFAULTS = {
-  interceptDownloads: false,
-  // Comma-separated file extensions the browser keeps handling itself.
-  skipTypes: "",
-  showContextMenu: true,
-  // Detect videos playing in tabs (content script + webRequest sniffing)
-  // and offer them in the right-click menu.
-  detectVideos: true,
-  // Minimum download size (MiB) that gets intercepted. 0 intercepts everything.
-  minSizeMB: 0,
-};
+// Shared defaults live in shared.js (importScripts'd above).
+const DEFAULTS = SHARED_DEFAULTS;
 
 /// Wrap an http(s) URL for the Grab desktop app. Anything else (blob:, data:,
 /// file:, …) cannot be handed off and returns null. The original scheme is
@@ -110,7 +103,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const SERVER_CONTEXT = "grab-server\u0000";
 const CLIENT_CONTEXT = "grab-client\u0000";
-const PAIRING_CODE_RE = /^[0-9a-f]{64}$/;
+// Shared pattern lives in shared.js.
+const PAIRING_CODE_RE = SHARED_PAIRING_CODE_RE;
 const STATUS_UNVERIFIED = -1;
 /// The POST was sent but the answer never arrived (timeout or connection
 /// drop): Grab may have accepted it. Never fall back to grab:// here —
@@ -292,6 +286,7 @@ async function handOff(url, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
 /// with 409 (card opened or declined) or 408 — it handled the URL; falling
 /// back would duplicate the handoff.
 async function explicitSend(url, tabId) {
+  if (!toGrabUrl(url)) return;
   const status = await postToGrabWithRetry(url);
   const tabArg =
     Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
@@ -304,11 +299,15 @@ async function explicitSend(url, tabId) {
     try {
       await chrome.action.setBadgeText({ ...tabArg, text: "!" });
       await chrome.action.setBadgeBackgroundColor({ ...tabArg, color: "#cc0000" });
+      await chrome.action.setTitle({ ...tabArg, title: "Grab not recognised. Pair again in Options." });
+      if (Number.isInteger(tabId) && tabId >= 0) warnedTabs.add(tabId);
     } catch {}
   } else if (status >= 200 && status < 300) {
     // Success: clear any earlier squatter warning.
     try {
       await chrome.action.setBadgeText({ ...tabArg, text: "" });
+      await chrome.action.setTitle({ ...tabArg, title: "" });
+      if (Number.isInteger(tabId) && tabId >= 0) warnedTabs.delete(tabId);
     } catch {}
   }
   // STATUS_MAYBE_SENT or other HTTP statuses: Grab (or the card) handled
@@ -610,6 +609,10 @@ chrome.storage.onChanged.addListener(async (changes, area) => {
     await removeAllContextMenus();
     if (changes.showContextMenu.newValue) {
       createContextMenu();
+      // removeAll also dropped the video submenu; rebuild it.
+      if (Number.isInteger(activeTabId) && activeTabId >= 0) {
+        refreshVideoMenu(activeTabId);
+      }
     }
   }
   if (changes.detectVideos) {
@@ -860,49 +863,9 @@ function videoName(url, index, pageTitle, kind) {
   return file ? shorten(file) : `Video ${index + 1}`;
 }
 
-// --- Master playlist preference ------------------------------------------
-//
-// HLS serves a master (multivariant) playlist plus per-rendition media
-// playlists. Handing yt-dlp a media playlist directly yields a video-only
-// (or audio-only) download — the master is what ties renditions to their
-// audio tracks. When a master is confirmed among the detected manifests,
-// its child media playlists are hidden from the menu so the only offered
-// entry is the correct one.
-
-/// Value of attribute `name` inside one tag's attribute text, or null.
-/// "30000/1001" -> 29.97, "25" -> 25, junk -> null.
-function parseFrameRate(value) {
-  if (!value) return null;
-  const [n, d] = String(value).split("/");
-  const num = parseFloat(n);
-  const den = d === undefined ? 1 : parseFloat(d);
-  if (!(num > 0) || !(den > 0)) return null;
-  return Math.round((num / den) * 100) / 100;
-}
-
-/// Video representations of an MPD, best first: [{height, bandwidth, fps}].
-/// Audio, subtitle and image sets are skipped; duplicates (same height and
-/// bandwidth, e.g. across periods) collapse.
-// --- Menu rows -------------------------------------------------------------
-//
-// One flat submenu ("Videos detected by Grab") holds every row, so sending a
-// video to Grab is one click away. A row is {quality, url} and is shown as
-// "<name> • <quality>". Grab takes exactly one URL, so:
-//   - muxed HLS renditions get one row per quality, each handing its own
-//     variant URL (video and audio in one);
-//   - HLS with separate audio, and every DASH stream, can't pin a quality from
-//   - an HLS master or DASH manifest is one row handing the URL to Grab,
-//     whose yt-dlp picks the quality;
-//   - a direct file is one row handing the file.
-
-/// One row for an HLS master URL: hand it to Grab, whose yt-dlp picks
-/// the quality.
-function hlsMenuRows(url) {
-  return [{ quality: "", url }];
-}
-
-/// One row for a DASH manifest: hand the MPD to Grab.
-function dashMenuRows(url) {
+/// One row for an HLS master or DASH manifest: hand it to Grab, whose
+/// yt-dlp picks the quality.
+function manifestMenuRows(url) {
   return [{ quality: "", url }];
 }
 
@@ -934,10 +897,10 @@ function manifestKind(url) {
 /// the height the player reported for a direct file.
 function buildVideoEntry(url, ctx = {}) {
   const kind = manifestKind(url);
-  let rows;
-  if (kind === "hls") rows = hlsMenuRows(url);
-  else if (kind === "dash") rows = dashMenuRows(url);
-  else rows = [directMenuRow(url, ctx.height)];
+  const rows =
+    kind === "hls" || kind === "dash"
+      ? manifestMenuRows(url)
+      : [directMenuRow(url, ctx.height)];
   return { url, kind, rows };
 }
 
@@ -974,6 +937,10 @@ function mergeVideoFinds(domVideos, sniffedUrls) {
 // runs in all frames; last-writer-wins per tab would drop other frames'
 // videos whenever two frames report at different times.
 const videoFinds = new Map();
+/// Tabs showing the "unverified Grab" warning badge. The video-menu code
+/// blanks badges on tab switches; warned tabs keep their "!" until Grab
+/// verifies successfully.
+const warnedTabs = new Set();
 let activeTabId = null;
 /// The URLs behind the submenu items as last built (after filtering): a
 /// click index resolves here, never against a fresh, differently-ordered list.
@@ -1098,7 +1065,7 @@ async function doRefreshVideoMenu(tabId) {
     menuUrls = [];
     if (entries.length === 0) {
       chrome.storage.session.set({ menuUrls: [] }).catch(() => {});
-      if (Number.isInteger(tabId) && tabId >= 0) {
+      if (Number.isInteger(tabId) && tabId >= 0 && !warnedTabs.has(tabId)) {
         const result = chrome.action.setBadgeText({ tabId, text: "" });
         if (result && typeof result.catch === "function") {
           result.catch(() => {});
@@ -1149,6 +1116,7 @@ async function doRefreshVideoMenu(tabId) {
 
 function clearVideoUi(tabId) {
   videoFinds.delete(tabId);
+  warnedTabs.delete(tabId);
   if (tabId === activeTabId) {
     refreshVideoMenu(tabId); // rebuild sees no finds: drops the menu
     const badged = chrome.action.setBadgeText({ tabId, text: "" });
@@ -1163,6 +1131,7 @@ function clearAllVideoUi() {
   videoFinds.clear();
   refreshVideoMenu(activeTabId);
   for (const id of tabIds) {
+    if (warnedTabs.has(id)) continue;
     const badged = chrome.action.setBadgeText({ tabId: id, text: "" });
     if (badged && typeof badged.catch === "function") {
       badged.catch(() => {});
@@ -1235,16 +1204,22 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
   // video element is replaced periodically, and the new element hasn't
   // fired 'play' yet. Real navigations clear via tabs.onUpdated.
   const videos = Array.isArray(msg.videos) ? msg.videos : [];
-  if (videos.length > 0 || !f.frames.has(frameId)) {
+  const hadFrame = f.frames.has(frameId);
+  let changed = false;
+  if (videos.length > 0 || !hadFrame) {
     f.frames.set(frameId, videos);
+    changed = true;
   }
   // The video's own title for menu labels.
   // The top frame's title follows the page (SPAs change it without a
   // navigation); a subframe only fills a gap.
   if (typeof msg.title === "string" && msg.title && (frameId === 0 || !f.title)) {
     f.title = msg.title;
+    changed = true;
   }
-  onVideoEvent(tabId);
+  // Skip the menu rebuild when nothing changed: a page with many iframes
+  // would otherwise rebuild the menu once per frame on every load.
+  if (changed) onVideoEvent(tabId);
 });
 
 chrome.tabs.onActivated.addListener((info) => {
@@ -1301,8 +1276,7 @@ if (typeof module !== "undefined" && module.exports) {
     videoName,
     menuRowTitle,
     mergeVideoFinds,
-    hlsMenuRows,
-    dashMenuRows,
+    manifestMenuRows,
     directMenuRow,
     manifestKind,
     buildVideoEntry,
@@ -1321,5 +1295,6 @@ if (typeof module !== "undefined" && module.exports) {
     GRAB_SCHEME,
     // Test hook: inspect per-tab detections.
     _videoFinds: videoFinds,
+    _warnedTabs: warnedTabs,
   };
 }

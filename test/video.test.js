@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 
 const BG_PATH = path.join(__dirname, "..", "background.js");
+const SHARED_PATH = path.join(__dirname, "..", "shared.js");
 const CONTENT_PATH = path.join(__dirname, "..", "content.js");
 
 // Default fetch mock: manifests read as plain media playlists (not masters),
@@ -122,7 +123,13 @@ function makeChrome(shared) {
 
 function loadBackground(chrome) {
   delete require.cache[require.resolve(BG_PATH)];
+  delete require.cache[require.resolve(SHARED_PATH)];
   globalThis.chrome = chrome;
+  globalThis.importScripts = () => {
+    const shared = require(SHARED_PATH);
+    globalThis.SHARED_DEFAULTS = shared.SHARED_DEFAULTS;
+    globalThis.SHARED_PAIRING_CODE_RE = shared.SHARED_PAIRING_CODE_RE;
+  };
   // Mock Grab's HTTP handoff: accept every handoff, record the URL.
   // If the test already set a fetch mock (for playlist content), wrap it
   // so POSTs are handled as handoffs and other requests go to the test's mock.
