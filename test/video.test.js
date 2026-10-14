@@ -936,7 +936,7 @@ describe("videoName", () => {
   test("a stream is named by the whole page video title", () => {
     assert.equal(
       bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, "  Example   Video Title ", "hls"),
-      "Example …"
+      "Example Video Ti…"
     );
   });
 
