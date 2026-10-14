@@ -105,6 +105,10 @@ const SERVER_CONTEXT = "grab-server\u0000";
 const CLIENT_CONTEXT = "grab-client\u0000";
 const PAIRING_CODE_RE = /^[0-9a-f]{64}$/;
 const STATUS_UNVERIFIED = -1;
+/// The POST was sent but the answer never arrived (timeout or connection
+/// drop): Grab may have accepted it. Never fall back to grab:// here —
+/// that would duplicate the download.
+const STATUS_MAYBE_SENT = -2;
 
 /// The pairing code lives in local storage, not sync: it is a secret for this
 /// machine's Grab and must not follow the profile to other devices.
@@ -199,20 +203,44 @@ async function readCookies(url) {
 
 /// POST one URL to Grab and wait for its answer to the confirm dialog.
 /// Resolves to the HTTP status, 0 when Grab can't be reached (not running),
-/// or STATUS_UNVERIFIED when the listener could not prove it is Grab.
+/// STATUS_UNVERIFIED when the listener could not prove it is Grab, or
+/// STATUS_MAYBE_SENT when the POST may have reached Grab but the answer
+/// was lost (timeout). The caller must not fall back to grab:// on
+/// STATUS_MAYBE_SENT — that would risk a duplicate download.
 async function postToGrab(url) {
+  let secret;
   try {
-    const secret = await getPairingCode();
-    let cookies = [];
-    if (secret) {
-      if (!(await verifyGrab(secret))) return STATUS_UNVERIFIED;
-      // Cookies let Grab's yt-dlp pass bot challenges (Cloudflare etc.).
-      // They go only to a Grab that has proven it holds the pairing code.
-      cookies = await readCookies(url);
+    secret = await getPairingCode();
+  } catch {
+    return 0; // Storage unreachable; treat as Grab not running.
+  }
+  let cookies = [];
+  if (secret) {
+    let verified;
+    try {
+      verified = await verifyGrab(secret);
+    } catch {
+      return 0; // Grab not reachable.
     }
-    const body = JSON.stringify({ url, cookies });
-    const headers = { "Content-Type": "application/json" };
+    if (!verified) return STATUS_UNVERIFIED;
+    // Cookies let Grab's yt-dlp pass bot challenges (Cloudflare etc.).
+    // They go only to a Grab that has proven it holds the pairing code.
+    try {
+      cookies = await readCookies(url);
+    } catch {
+      cookies = []; // Cookie read failure: URL-only handoff.
+    }
+  }
+  let body, headers;
+  try {
+    body = JSON.stringify({ url, cookies });
+    headers = { "Content-Type": "application/json" };
     if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
+  } catch {
+    return 0; // Crypto failed; POST never sent, safe to fall back.
+  }
+  const start = Date.now();
+  try {
     // confirm=1: Grab answers only once the user has approved or declined, so
     // the browser's own download is cancelled only when Grab really took over.
     const resp = await fetchWithTimeout(
@@ -222,7 +250,9 @@ async function postToGrab(url) {
     );
     return resp.status;
   } catch {
-    return 0;
+    // Fast failure (connection refused): Grab isn't running, the POST never
+    // left. Slow failure (timeout): Grab may have accepted it.
+    return Date.now() - start < 10000 ? 0 : STATUS_MAYBE_SENT;
   }
 }
 
@@ -254,7 +284,26 @@ async function explicitSend(url, tabId) {
     await sleep(delay);
     status = await postToGrab(url);
   }
-  if (status === 0) sendToGrab(url, tabId);
+  const tabArg =
+    Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
+  if (status === 0) {
+    // Grab not running: the OS launches it with the grab:// URL.
+    sendToGrab(url, tabId);
+  } else if (status === STATUS_UNVERIFIED) {
+    // Something else answers on Grab's port. Don't hand the URL to a
+    // stranger; flag it on the toolbar instead.
+    try {
+      await chrome.action.setBadgeText({ ...tabArg, text: "!" });
+      await chrome.action.setBadgeBackgroundColor({ ...tabArg, color: "#cc0000" });
+    } catch {}
+  } else if (status >= 200 && status < 300) {
+    // Success: clear any earlier squatter warning.
+    try {
+      await chrome.action.setBadgeText({ ...tabArg, text: "" });
+    } catch {}
+  }
+  // STATUS_MAYBE_SENT or other HTTP statuses: Grab (or the card) handled
+  // it, or may have. Never fall back — that risks a duplicate.
 }
 
 /// True when the URL's file extension is on the user's skip list.
@@ -813,18 +862,35 @@ function isFetchAllowed(url) {
   if (u.protocol !== "http:" && u.protocol !== "https:") return false;
   const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (host === "localhost" || host.endsWith(".localhost")) return false;
+  // Note: DNS names are not resolved here (no DNS API in a service worker);
+  // a name resolving to a loopback or private address is not caught. The
+  // fetches are credential-free, limiting the impact to unauthenticated
+  // local services.
   if (host.includes(":")) {
+    // Expand :: compression so fc::1 / fd::1 match the unique-local block.
+    let expanded = host;
+    if (expanded.includes("::")) {
+      const parts = expanded.split("::");
+      const left = parts[0] ? parts[0].split(":") : [];
+      const right = parts[1] ? parts[1].split(":") : [];
+      const missing = 8 - left.length - right.length;
+      expanded = [...left, ...Array(missing).fill("0"), ...right].join(":");
+    }
     return !(
       host === "::" ||
       host === "::1" ||
       host.startsWith("::ffff:") ||
-      /^fe[89ab]/.test(host)
+      /^fe[89ab]/.test(expanded) ||
+      /^f[cd]/.test(expanded) // fc00::/7 unique-local
     );
   }
   const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host);
   if (m) {
     const [a, b] = [Number(m[1]), Number(m[2])];
     if (a === 127 || a === 0 || (a === 169 && b === 254)) return false;
+    if (a === 10) return false; // 10/8 private
+    if (a === 172 && b >= 16 && b <= 31) return false; // 172.16/12 private
+    if (a === 192 && b === 168) return false; // 192.168/16 private
   }
   return true;
 }
