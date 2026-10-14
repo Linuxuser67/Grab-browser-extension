@@ -694,8 +694,11 @@ function classifyStream(url, contentType) {
 }
 
 const NAME_MAX = 40;
+const TITLE_MAX = 8;
 const shorten = (text) =>
   text.length > NAME_MAX ? text.slice(0, NAME_MAX) + "…" : text;
+const shortenTitle = (text) =>
+  text.length > TITLE_MAX ? text.slice(0, TITLE_MAX) + "…" : text;
 
 /// Last path segment of a URL, decoded ("my%20clip.mp4" -> "my clip.mp4").
 /// Empty when there is none.
@@ -722,7 +725,7 @@ function videoName(url, index, pageTitle, kind) {
   const file = fileNameOf(url);
   if (kind) {
     const title = String(pageTitle || "").replace(/\s+/g, " ").trim();
-    if (title) return shorten(title);
+    if (title) return shortenTitle(title);
   }
   return file ? shorten(file) : `Video ${index + 1}`;
 }

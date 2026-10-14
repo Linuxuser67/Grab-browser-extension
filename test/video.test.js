@@ -1197,7 +1197,7 @@ describe("videoName", () => {
   test("a stream is named by the whole page video title", () => {
     assert.equal(
       bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, "  Example   Video Title ", "hls"),
-      "Example Video Title"
+      "Example …"
     );
   });
 
@@ -1441,7 +1441,7 @@ describe("context menu: one flat submenu, one click to Grab", () => {
       manifestBody: MUXED,
       manifestUrl: "https://cdn.example.com/hls/master.m3u8",
       videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false, height: 1080 }],
-      title: "Example Video Title",
+      title: "Example …",
     });
     // Nothing is nested deeper than the root submenu.
     const ids = new Set(items.map((i) => i.id));
@@ -1449,9 +1449,9 @@ describe("context menu: one flat submenu, one click to Grab", () => {
     assert.ok(ids.has("grabVideos"));
     assert.deepEqual(rowsOf(items).map((i) => i.title), [
       "clip.mp4 • 1080p",
-      "Example Video Title • 1080p • 5.00 Mbps",
-      "Example Video Title • 720p • 2.00 Mbps",
-      "Example Video Title • 360p • 0.80 Mbps",
+      "Example … • 1080p • 5.00 Mbps",
+      "Example … • 720p • 2.00 Mbps",
+      "Example … • 360p • 0.80 Mbps",
     ]);
     assert.ok(items.every((i) => i.enabled !== false));
   });
@@ -1461,7 +1461,7 @@ describe("context menu: one flat submenu, one click to Grab", () => {
       manifestBody: MUXED,
       manifestUrl: "https://cdn.example.com/hls/master.m3u8",
       videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false, height: 1080 }],
-      title: "Example Video Title",
+      title: "Example …",
     });
     const rows = rowsOf(items);
     click(chrome, rows[0].id);
