@@ -48,7 +48,14 @@ function toGrabUrl(url) {
   if (!m) return null;
   // user:pass@host: Grab refuses credentials in links, and the grab: URL
   // passes through argv (xdg-open), which other local users can read.
-  if (m[2].split(/[/?#]/, 1)[0].includes("@")) return null;
+  // The WHATWG parser handles the edge cases (tab/newline stripping, etc.).
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (u.username || u.password) return null;
   return `${GRAB_SCHEME}${m[1].toLowerCase()}/${m[2]}`;
 }
 
@@ -115,7 +122,7 @@ const STATUS_MAYBE_SENT = -2;
 async function getPairingCode() {
   try {
     const { pairingCode } = await chrome.storage.local.get({ pairingCode: "" });
-    const code = String(pairingCode || "").trim().toLowerCase();
+    const code = String(pairingCode || "").replace(/\s+/g, "").toLowerCase();
     return PAIRING_CODE_RE.test(code) ? code : "";
   } catch {
     return "";
@@ -256,6 +263,18 @@ async function postToGrab(url) {
   }
 }
 
+/// POST to Grab, retrying briefly on 429 (queue full). Resolves to the final
+/// HTTP status, or 0 when Grab isn't reachable.
+async function postToGrabWithRetry(url, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
+  let status = await postToGrab(url);
+  for (const delay of retryDelays) {
+    if (status !== 429) break;
+    await sleep(delay);
+    status = await postToGrab(url);
+  }
+  return status;
+}
+
 /// Send the URL to Grab via HTTP. Resolves to true only when Grab accepted it.
 /// A 429 means Grab's queue is momentarily full, so retry briefly first. Any
 /// other outcome (Grab not running or not verified, declined by the user (409),
@@ -263,12 +282,7 @@ async function postToGrab(url) {
 /// the browser's own download alone. The caller validates the URL with
 /// toGrabUrl first; the raw URL is posted as-is.
 async function handOff(url, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
-  let status = await postToGrab(url);
-  for (const delay of retryDelays) {
-    if (status !== 429) break;
-    await sleep(delay);
-    status = await postToGrab(url);
-  }
+  const status = await postToGrabWithRetry(url, retryDelays);
   return status >= 200 && status < 300;
 }
 
@@ -278,12 +292,7 @@ async function handOff(url, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
 /// with 409 (card opened or declined) or 408 — it handled the URL; falling
 /// back would duplicate the handoff.
 async function explicitSend(url, tabId) {
-  let status = await postToGrab(url);
-  for (const delay of HANDOFF_RETRY_DELAYS_MS) {
-    if (status !== 429) break;
-    await sleep(delay);
-    status = await postToGrab(url);
-  }
+  const status = await postToGrabWithRetry(url);
   const tabArg =
     Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
   if (status === 0) {
@@ -860,262 +869,7 @@ function videoName(url, index, pageTitle, kind) {
 // its child media playlists are hidden from the menu so the only offered
 // entry is the correct one.
 
-/// Cache: playlist url -> text (capped). Masters are small; the cap keeps a
-/// huge media playlist from bloating the worker. Failures stay uncached so a
-/// later rebuild can retry.
-const playlistCache = new Map();
-const PLAYLIST_TEXT_CAP = 256 * 1024;
-
-/// Whether the worker may fetch `url` on a page's behalf. The worker's host
-/// permission bypasses CORS, so a page that makes the browser request a
-/// playlist-looking URL could otherwise get this extension to read loopback
-/// services or a cloud metadata endpoint. http(s) only; loopback, unspecified,
-/// link-local and IPv4-mapped IPv6 hosts are refused. Ordinary LAN hosts stay
-/// allowed (home media servers). URL parsing has already normalized decimal,
-/// octal and hex IPv4 spellings to dotted form.
-function isFetchAllowed(url) {
-  let u;
-  try {
-    u = new URL(url);
-  } catch {
-    return false;
-  }
-  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
-  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (host === "localhost" || host.endsWith(".localhost")) return false;
-  // Note: DNS names are not resolved here (no DNS API in a service worker);
-  // a name resolving to a loopback or private address is not caught. The
-  // fetches are credential-free, limiting the impact to unauthenticated
-  // local services.
-  if (host.includes(":")) {
-    // Expand :: compression so fc::1 / fd::1 match the unique-local block.
-    let expanded = host;
-    if (expanded.includes("::")) {
-      const parts = expanded.split("::");
-      const left = parts[0] ? parts[0].split(":") : [];
-      const right = parts[1] ? parts[1].split(":") : [];
-      const missing = 8 - left.length - right.length;
-      expanded = [...left, ...Array(missing).fill("0"), ...right].join(":");
-    }
-    return !(
-      host === "::" ||
-      host === "::1" ||
-      host.startsWith("::ffff:") ||
-      /^fe[89ab]/.test(expanded) ||
-      /^f[cd]/.test(expanded) // fc00::/7 unique-local
-    );
-  }
-  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host);
-  if (m) {
-    const [a, b] = [Number(m[1]), Number(m[2])];
-    if (a === 127 || a === 0 || (a === 169 && b === 254)) return false;
-    if (a === 10) return false; // 10/8 private
-    if (a === 172 && b >= 16 && b <= 31) return false; // 172.16/12 private
-    if (a === 192 && b === 168) return false; // 192.168/16 private
-  }
-  return true;
-}
-
-/// GET a text resource from the worker (5 s timeout), truncated to `cap`
-/// characters. Null on any failure (network, non-2xx, abort).
-async function fetchText(url, cap) {
-  if (!isFetchAllowed(url)) return null;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
-  let reader;
-  try {
-    // No credentials: the worker must not replay the user's session at a URL
-    // that only a web page chose.
-    const response = await fetch(url, {
-      signal: controller.signal,
-      credentials: "omit",
-    });
-    if (!response.ok) return null;
-    // Streaming path: bound memory by reading at most cap bytes.
-    if (response.body && typeof response.body.getReader === "function") {
-      reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let text = "";
-      let bytesRead = 0;
-      while (bytesRead < cap) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const remaining = cap - bytesRead;
-        const chunk = value.subarray(0, remaining);
-        bytesRead += chunk.byteLength;
-        text += decoder.decode(chunk, { stream: true });
-        if (chunk.byteLength < value.byteLength || bytesRead >= cap) {
-          await reader.cancel().catch(() => {});
-          break;
-        }
-      }
-      text += decoder.decode();
-      return text;
-    }
-    // Fallback for environments without streaming body (tests).
-    return (await response.text()).slice(0, cap);
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-    if (reader) reader.releaseLock();
-  }
-}
-
-/// Fetch a playlist once and cache it. Null on any failure.
-async function fetchPlaylistText(url) {
-  if (playlistCache.has(url)) return playlistCache.get(url);
-  const text = await fetchText(url, PLAYLIST_TEXT_CAP);
-  if (text === null) return null;
-  playlistCache.set(url, text);
-  // Bounded: oldest entries go first (Map keeps insertion order).
-  if (playlistCache.size > 200) {
-    playlistCache.delete(playlistCache.keys().next().value);
-  }
-  return text;
-}
-
-/// True when the fetched playlist is a master (multivariant) playlist.
-/// Null when the fetch failed or the content couldn't be read: the caller
-/// treats that as "unknown", never as a media playlist.
-async function isMasterPlaylist(url) {
-  const text = await fetchPlaylistText(url);
-  if (text === null) return null;
-  // The marker lives in the header lines; cap the scan.
-  return text.slice(0, 4096).includes("#EXT-X-STREAM-INF");
-}
-
-/// Origin + directory of a URL, for grouping a master with its children.
-function urlDirectory(u) {
-  try {
-    const p = new URL(u);
-    return p.origin + p.pathname.slice(0, p.pathname.lastIndexOf("/") + 1);
-  } catch {
-    return null;
-  }
-}
-
-/// Resolve a possibly-relative playlist URI against the master playlist URL.
-function absoluteUrl(uri, base) {
-  try {
-    return new URL(uri.trim(), base).toString();
-  } catch {
-    return null;
-  }
-}
-
-// --- HLS variant parsing ---------------------------------------------------
-//
-// A master playlist lists its renditions as #EXT-X-STREAM-INF lines, each
-// followed by the variant playlist URI. Parsing them lets the context menu
-// offer per-quality entries ("1080p", "720p") instead of one opaque master
-// URL — the Media Grabber pattern. Variants are cached alongside the master
-// check so the playlist is fetched once.
-
-/// Every rendition a master playlist references (resolved absolute URLs),
-/// muxed and audio-grouped alike. Null when the fetch fails or no variants
-/// are found.
-async function fetchAllVariants(masterUrl) {
-  const text = await fetchPlaylistText(masterUrl);
-  const all = text === null ? [] : parseHlsVariants(text, masterUrl);
-  return all.length > 0 ? all : null;
-}
-
-/// The EXT-X-MEDIA playlist URIs (audio, subtitles) a master references,
-/// resolved absolute. Null when the fetch fails or none are found.
-async function fetchAllMediaUris(masterUrl) {
-  const text = await fetchPlaylistText(masterUrl);
-  const uris = text === null ? [] : parseHlsMediaUris(text, masterUrl);
-  return uris.length > 0 ? uris : null;
-}
-
-/// Parse EXT-X-MEDIA URI attributes from master playlist text. Returns
-/// [url], resolved absolute against the master URL.
-function parseHlsMediaUris(text, baseUrl) {
-  const uris = [];
-  const re = /#EXT-X-MEDIA:[^\r\n]*?URI="([^"]+)"/g;
-  for (const m of text.matchAll(re)) {
-    const url = absoluteUrl(m[1], baseUrl);
-    if (url) uris.push(url);
-  }
-  return uris;
-}
-
-/// Parse HLS variants from master playlist text. Returns [{url, height,
-/// bandwidth, audioGroup, fps, audioOnly}], height/bandwidth null when the
-/// attributes are absent, audioGroup null when the variant has muxed audio
-/// (no AUDIO= attribute pointing at an EXT-X-MEDIA group), audioOnly true
-/// when CODECS lists no video codec.
-function parseHlsVariants(text, baseUrl) {
-  const variants = [];
-  const re = /#EXT-X-STREAM-INF:([^\n\r]*)[\r\n]+([^\s#][^\r\n]*)/g;
-  for (const m of text.matchAll(re)) {
-    const attrs = m[1];
-    const url = absoluteUrl(m[2], baseUrl);
-    if (!url) continue;
-    const res = /RESOLUTION=(\d+)x(\d+)/i.exec(attrs);
-    const bw = /BANDWIDTH=(\d+)/i.exec(attrs);
-    const audio = /AUDIO="([^"]+)"/i.exec(attrs);
-    const fps = /FRAME-RATE=([\d.]+)/i.exec(attrs);
-    const codecs = /CODECS="([^"]*)"/i.exec(attrs);
-    variants.push({
-      url,
-      height: res ? parseInt(res[2], 10) : null,
-      bandwidth: bw ? parseInt(bw[1], 10) : null,
-      audioGroup: audio ? audio[1] : null,
-      fps: fps ? parseFloat(fps[1]) : null,
-      audioOnly:
-        !!codecs && !/(avc|hvc|hev|vp0?9|vp8|av01|dvh)/i.test(codecs[1]),
-    });
-  }
-  return variants;
-}
-
-/// Menu label for a variant, adapted from media-bridge's format:
-/// "1080p • 60 fps • 8.00 Mbps" (quality first, so a truncated label still
-/// shows what matters). Falls back to the file name when no
-/// quality attributes are present.
-/// (Ported from jvillegasd/media-bridge, MIT, Copyright (c) 2026 Johnny Villegas.)
-function variantMenuTitle(variant, index) {
-  const parts = [];
-  if (variant.height) {
-    // 1080p60 style: fps appended directly to the height.
-    const fps = variant.fps > 0 ? Math.round(variant.fps) : 0;
-    parts.push(fps > 0 ? `${variant.height}p${fps}` : `${variant.height}p`);
-  }
-  if (variant.bandwidth) {
-    parts.push(`${(variant.bandwidth / 1000000).toFixed(2)} Mbps`);
-  }
-  if (parts.length > 0) return parts.join(" • ");
-  try {
-    const name = decodeURIComponent(
-      new URL(variant.url).pathname.split("/").filter(Boolean).pop() || "",
-    );
-    if (name) return name.length > 30 ? name.slice(0, 30) + "…" : name;
-  } catch {
-    // Fall through.
-  }
-  return `Variant ${index + 1}`;
-}
-
-const MANIFEST_RE = /\.(m3u8|m3u)([?#]|$)/i;
-
-// --- DASH ------------------------------------------------------------------
-//
-// MPD manifests list video and audio as separate AdaptationSets, so a DASH
-// stream is always "audio is separate". Service workers have no DOMParser;
-// the few attributes needed are read with regexes.
-
-/// Cache: mpd url -> [{height, bandwidth, fps}] (null when unreadable).
-const dashCache = new Map();
-const DASH_TEXT_CAP = 2 * 1024 * 1024;
-
 /// Value of attribute `name` inside one tag's attribute text, or null.
-function xmlAttr(attrs, name) {
-  const m = new RegExp(`(?:^|\\s)${name}="([^"]*)"`).exec(attrs || "");
-  return m ? m[1] : null;
-}
-
 /// "30000/1001" -> 29.97, "25" -> 25, junk -> null.
 function parseFrameRate(value) {
   if (!value) return null;
@@ -1129,59 +883,6 @@ function parseFrameRate(value) {
 /// Video representations of an MPD, best first: [{height, bandwidth, fps}].
 /// Audio, subtitle and image sets are skipped; duplicates (same height and
 /// bandwidth, e.g. across periods) collapse.
-function parseDashRepresentations(text) {
-  const out = [];
-  const seen = new Set();
-  const sets = String(text).matchAll(
-    /<AdaptationSet\b([^>]*)>([\s\S]*?)<\/AdaptationSet>/gi,
-  );
-  for (const set of sets) {
-    const setAttrs = set[1];
-    for (const rep of set[2].matchAll(/<Representation\b([^>]*)>/gi)) {
-      const a = rep[1];
-      const mime =
-        xmlAttr(a, "mimeType") ||
-        xmlAttr(setAttrs, "mimeType") ||
-        xmlAttr(setAttrs, "contentType") ||
-        "";
-      const height = parseInt(
-        xmlAttr(a, "height") || xmlAttr(setAttrs, "height"),
-        10,
-      );
-      if (!(/^video/i.test(mime) || (!mime && height > 0))) continue;
-      const bandwidth = parseInt(xmlAttr(a, "bandwidth"), 10);
-      const key = `${height}:${bandwidth}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({
-        height: height > 0 ? height : null,
-        bandwidth: bandwidth > 0 ? bandwidth : null,
-        fps: parseFrameRate(
-          xmlAttr(a, "frameRate") || xmlAttr(setAttrs, "frameRate"),
-        ),
-      });
-    }
-  }
-  return out.sort(byQuality);
-}
-
-/// Fetch and parse an MPD once. Null when the fetch fails or no video
-/// representation is found.
-async function fetchDashRepresentations(url) {
-  if (dashCache.has(url)) return dashCache.get(url);
-  const text = await fetchText(url, DASH_TEXT_CAP);
-  if (text === null) return null; // uncached: a later rebuild may retry
-  const reps = parseDashRepresentations(text);
-  const result = reps.length > 0 ? reps : null;
-  // Don't cache null: a transient bad parse shouldn't poison the menu until
-  // 200 other entries evict it. Same rule as the playlist cache.
-  if (result !== null) {
-    dashCache.set(url, result);
-    if (dashCache.size > 200) dashCache.delete(dashCache.keys().next().value);
-  }
-  return result;
-}
-
 // --- Menu rows -------------------------------------------------------------
 //
 // One flat submenu ("Videos detected by Grab") holds every row, so sending a
@@ -1190,69 +891,19 @@ async function fetchDashRepresentations(url) {
 //   - muxed HLS renditions get one row per quality, each handing its own
 //     variant URL (video and audio in one);
 //   - HLS with separate audio, and every DASH stream, can't pin a quality from
-//     here: one row lists the qualities and hands over the master/MPD, which
-//     Grab's yt-dlp merges with the audio and offers its own picker for;
+//   - an HLS master or DASH manifest is one row handing the URL to Grab,
+//     whose yt-dlp picks the quality;
 //   - a direct file is one row handing the file.
 
-const PICK_IN_GRAB = "pick in Grab";
-
-/// Best quality first: height, then bandwidth.
-const byQuality = (a, b) =>
-  (b.height || 0) - (a.height || 0) || (b.bandwidth || 0) - (a.bandwidth || 0);
-
-/// "1080p / 720p / 360p" from variants already sorted best first; at most
-/// five heights, "…" when there are more. Empty when none has a height.
-function heightList(variants) {
-  // Map height -> max fps for that height.
-  const fpsByHeight = new Map();
-  for (const v of variants) {
-    if (v.height > 0) {
-      const fps = v.fps > 0 ? Math.round(v.fps) : 0;
-      const prev = fpsByHeight.get(v.height);
-      if (prev === undefined || fps > prev) fpsByHeight.set(v.height, fps);
-    }
-  }
-  const heights = [...fpsByHeight.keys()].sort((a, b) => b - a);
-  const shown = heights.slice(0, 5).map((h) => {
-    const fps = fpsByHeight.get(h);
-    return fps > 0 ? `${h}p${fps}` : `${h}p`;
-  });
-  if (heights.length > 5) shown.push("…");
-  return shown.join(" / ");
+/// One row for an HLS master URL: hand it to Grab, whose yt-dlp picks
+/// the quality.
+function hlsMenuRows(url) {
+  return [{ quality: "", url }];
 }
 
-const pickRowQuality = (variants) =>
-  [heightList(variants), PICK_IN_GRAB].filter(Boolean).join(" • ");
-
-/// Rows for an HLS URL. A media playlist (or an unreadable master) is one
-/// plain row.
-async function hlsMenuRows(url) {
-  const all = await fetchAllVariants(url);
-  const plain = [{ quality: "", url }];
-  if (!all) return plain;
-  const video = all.filter((v) => !v.audioOnly);
-  const muxed = video.filter((v) => v.audioGroup === null).sort(byQuality);
-  const bestMuxed = muxed.length > 0 ? muxed[0].height || 0 : 0;
-  // Separate-audio renditions are listed only when they add something the
-  // muxed ones don't (everything, or taller than the best muxed one).
-  const split = video
-    .filter((v) => v.audioGroup !== null)
-    .filter((v) => muxed.length === 0 || (v.height || 0) > bestMuxed)
-    .sort(byQuality);
-  // A lone rendition hands the master: it is what ties the video to its audio.
-  const rows =
-    muxed.length === 1 && split.length === 0
-      ? [{ quality: variantMenuTitle(muxed[0], 0), url }]
-      : muxed.map((v, i) => ({ quality: variantMenuTitle(v, i), url: v.url }));
-  if (split.length > 0) rows.push({ quality: pickRowQuality(split), url });
-  return rows.length > 0 ? rows : plain;
-}
-
-/// One row for a DASH manifest: its qualities, handing the MPD to Grab.
-async function dashMenuRows(url) {
-  const reps = await fetchDashRepresentations(url);
-  if (!reps) return [{ quality: "", url }];
-  return [{ quality: pickRowQuality(reps), url }];
+/// One row for a DASH manifest: hand the MPD to Grab.
+function dashMenuRows(url) {
+  return [{ quality: "", url }];
 }
 
 /// Row for a direct file: the height the player reported, when known.
@@ -1266,9 +917,8 @@ function menuRowTitle(name, quality) {
   return (quality ? `${name} • ${quality}` : name).replace(/%/g, "%%");
 }
 
-/// "hls", "dash" or null (a direct file). The extension decides; a manifest
-/// sniffed by content type with no telling extension is read to find out.
-async function manifestKind(url, sniffedKind) {
+/// "hls", "dash" or null (a direct file), by URL extension only.
+function manifestKind(url) {
   let path;
   try {
     path = new URL(url).pathname;
@@ -1277,22 +927,16 @@ async function manifestKind(url, sniffedKind) {
   }
   if (/\.(m3u8|m3u)$/i.test(path)) return "hls";
   if (/\.mpd$/i.test(path)) return "dash";
-  if (sniffedKind !== "manifest") return null;
-  const text = await fetchPlaylistText(url);
-  if (text === null) return null;
-  if (text.trimStart().startsWith("#EXTM3U")) return "hls";
-  if (/<MPD\b/i.test(text.slice(0, 4096))) return "dash";
   return null;
 }
 
-/// Menu model for one detected URL: {url, kind, rows}. `ctx.sniffedKind` is
-/// the classifyStream result when the URL came from webRequest; `ctx.height`
+/// Menu model for one detected URL: {url, kind, rows}. `ctx.height` is
 /// the height the player reported for a direct file.
-async function buildVideoEntry(url, ctx = {}) {
-  const kind = await manifestKind(url, ctx.sniffedKind);
+function buildVideoEntry(url, ctx = {}) {
+  const kind = manifestKind(url);
   let rows;
-  if (kind === "hls") rows = await hlsMenuRows(url);
-  else if (kind === "dash") rows = await dashMenuRows(url);
+  if (kind === "hls") rows = hlsMenuRows(url);
+  else if (kind === "dash") rows = dashMenuRows(url);
   else rows = [directMenuRow(url, ctx.height)];
   return { url, kind, rows };
 }
@@ -1307,91 +951,6 @@ function uniqueLabels(labels) {
   });
 }
 
-/// From the detected manifest URLs, drop media playlists that belong to a
-/// confirmed master playlist: renditions the master references (wherever
-/// they live) plus anything under the master's directory. Masters
-/// themselves, non-manifest URLs, and manifests with no confirmed master
-/// nearby are kept as-is.
-async function preferMasterPlaylists(urls) {
-  const manifests = urls.filter((u) => MANIFEST_RE.test(u));
-  if (manifests.length === 0) return urls;
-  const checks = await Promise.all(manifests.map(isMasterPlaylist));
-  const masters = new Set();
-  const masterDirs = new Set();
-  // Renditions a confirmed master references: dropped even when they live
-  // outside the master's directory (CDN-split deployments). Matched by
-  // exact URL and by path key, so rotated tokens don't break grouping.
-  // (Path-key technique ported from jvillegasd/media-bridge, MIT,
-  // Copyright (c) 2026 Johnny Villegas.)
-  const childUrls = new Set();
-  const childPathKeys = new Set();
-  // Manifests whose fetch failed: they may be masters the worker couldn't
-  // read (expiring tokens), so a directory group with a failed fetch among
-  // confirmed non-masters is probably one stream, not several.
-  const fetchFailed = new Set();
-  for (let i = 0; i < manifests.length; i++) {
-    const u = manifests[i];
-    if (checks[i] === true) {
-      masters.add(u);
-      const d = urlDirectory(u);
-      if (d) masterDirs.add(d);
-      const variants = await fetchAllVariants(u);
-      for (const v of variants || []) {
-        childUrls.add(v.url);
-        childPathKeys.add(urlPathKey(v.url));
-      }
-      const mediaUris = await fetchAllMediaUris(u);
-      for (const m of mediaUris || []) {
-        childUrls.add(m);
-        childPathKeys.add(urlPathKey(m));
-      }
-    } else if (checks[i] === null) {
-      fetchFailed.add(u);
-    }
-  }
-  // Group manifests by directory, in sniff order.
-  const byDir = new Map();
-  for (const u of manifests) {
-    const d = urlDirectory(u);
-    if (!d) continue;
-    if (!byDir.has(d)) byDir.set(d, []);
-    byDir.get(d).push(u);
-  }
-  // Fallback directories: several manifests, no confirmed master, but the
-  // earliest-sniffed fetch failed among confirmed non-masters. The player
-  // must fetch the master before its variants, so a failed fetch that
-  // wasn't first is a different (dead) video, not this group's master.
-  const fallbackKeep = new Set();
-  for (const [, group] of byDir) {
-    if (group.length < 2) continue;
-    if (group.some((u) => masters.has(u))) continue;
-    if (!fetchFailed.has(group[0])) continue;
-    if (!group.slice(1).some((u) => !fetchFailed.has(u) && !masters.has(u))) {
-      continue;
-    }
-    fallbackKeep.add(group[0]);
-  }
-  // The rest of each fallback group is dropped.
-  const fallbackDrop = new Set();
-  for (const [, group] of byDir) {
-    const keeper = [...fallbackKeep].find((k) => group.includes(k));
-    if (!keeper) continue;
-    for (const u of group) {
-      if (u !== keeper) fallbackDrop.add(u);
-    }
-  }
-  return urls.filter((u) => {
-    if (!MANIFEST_RE.test(u)) return true;
-    if (masters.has(u)) return true;
-    if (childUrls.has(u) || childPathKeys.has(urlPathKey(u))) return false;
-    if (fallbackKeep.has(u)) return true;
-    if (fallbackDrop.has(u)) return false;
-    const d = urlDirectory(u);
-    if (!d) return true;
-    if (masterDirs.has(d)) return false;
-    return true;
-  });
-}
 
 /// Merge content-script reports (direct sources first) with sniffed stream
 /// URLs, deduplicated. blob: entries carry no URL; they fall back to the
@@ -1515,9 +1074,6 @@ async function doRefreshVideoMenu(tabId) {
     // Backstop: collection already filters excluded hosts, but a tab may
     // have navigated there after its videos were recorded.
     if (urls.length > 0 && (await isExcludedTab(tabId))) urls = [];
-    // Prefer master playlists: hides child media playlists whose direct
-    // download would miss the audio track.
-    urls = await preferMasterPlaylists(urls);
     // One entry per video/stream; its rows go straight into the one submenu
     // (see "Menu rows").
     const finds = videoFinds.get(tabId);
@@ -1529,8 +1085,7 @@ async function doRefreshVideoMenu(tabId) {
     const entries = [];
     for (const u of urls) {
       entries.push(
-        await buildVideoEntry(u, {
-          sniffedKind: finds && finds.kinds && finds.kinds.get(urlPathKey(u)),
+        buildVideoEntry(u, {
           height: heights.get(u),
         }),
       );
@@ -1746,28 +1301,20 @@ if (typeof module !== "undefined" && module.exports) {
     videoName,
     menuRowTitle,
     mergeVideoFinds,
-    isMasterPlaylist,
-    preferMasterPlaylists,
-    urlDirectory,
-    parseHlsVariants,
-    fetchAllVariants,
-    parseDashRepresentations,
     hlsMenuRows,
     dashMenuRows,
     directMenuRow,
     manifestKind,
     buildVideoEntry,
     uniqueLabels,
-    variantMenuTitle,
     removeAllContextMenus,
     removeContextMenu,
     pendingKey,
     hostExcluded,
     handOff,
     postToGrab,
+    postToGrabWithRetry,
     verifyGrab,
-    isFetchAllowed,
-    fetchText,
     YTDLP_EXCLUSIVE_HOSTS,
     DEFAULTS,
     SIZE_WAIT_MS,
