@@ -823,8 +823,8 @@ function classifyStream(url, contentType) {
   return null;
 }
 
-const NAME_MAX = 40;
-const TITLE_MAX = 8;
+const NAME_MAX = 16;
+const TITLE_MAX = 16;
 const shorten = (text) =>
   text.length > NAME_MAX ? text.slice(0, NAME_MAX) + "…" : text;
 const shortenTitle = (text) =>
