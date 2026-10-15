@@ -399,6 +399,7 @@ describe("isStartedVideo (content script)", () => {
     paused: true,
     ended: false,
     currentTime: 0,
+    readyState: 4,
     ...opts,
   });
 

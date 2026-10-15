@@ -193,9 +193,12 @@ async function verifyGrab(secret) {
 
 /// The site's cookies in the shape Grab expects. Needs the optional `cookies`
 /// permission; without it (or on any failure) the handoff is URL-only.
-async function readCookies(url) {
+/// `storeId` scopes the read to the tab's cookie store (incognito, Firefox
+/// containers); without it the default store's cookies would leak in.
+async function readCookies(url, storeId) {
   try {
-    const all = await chrome.cookies.getAll({ url });
+    const filter = storeId ? { url, storeId } : { url };
+    const all = await chrome.cookies.getAll(filter);
     return all.map((c) => ({
       name: c.name,
       value: c.value,
@@ -216,7 +219,7 @@ async function readCookies(url) {
 /// STATUS_MAYBE_SENT when the POST may have reached Grab but the answer
 /// was lost (timeout). The caller must not fall back to grab:// on
 /// STATUS_MAYBE_SENT — that would risk a duplicate download.
-async function postToGrab(url) {
+async function postToGrab(url, tabId) {
   let secret;
   try {
     secret = await getPairingCode();
@@ -234,15 +237,30 @@ async function postToGrab(url) {
     if (!verified) return STATUS_UNVERIFIED;
     // Cookies let Grab's yt-dlp pass bot challenges (Cloudflare etc.).
     // They go only to a Grab that has proven it holds the pairing code.
+    // Scope to the tab's cookie store: incognito/container tabs must not
+    // send the default store's cookies.
     try {
-      cookies = await readCookies(url);
+      let storeId;
+      if (Number.isInteger(tabId) && tabId >= 0) {
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          storeId = tab && tab.cookieStoreId;
+        } catch {}
+      }
+      cookies = await readCookies(url, storeId);
     } catch {
       cookies = []; // Cookie read failure: URL-only handoff.
     }
   }
   let body, headers;
   try {
-    body = JSON.stringify({ url, cookies });
+    // userAgent travels with the cookies: cf_clearance is UA-bound, so Grab
+    // applies it to its HTTP client and yt-dlp alongside the jar.
+    const userAgent =
+      typeof navigator !== "undefined" && navigator.userAgent
+        ? navigator.userAgent
+        : undefined;
+    body = JSON.stringify({ url, cookies, user_agent: userAgent });
     headers = { "Content-Type": "application/json" };
     if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
   } catch {
@@ -267,12 +285,12 @@ async function postToGrab(url) {
 
 /// POST to Grab, retrying briefly on 429 (queue full). Resolves to the final
 /// HTTP status, or 0 when Grab isn't reachable.
-async function postToGrabWithRetry(url, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
-  let status = await postToGrab(url);
+async function postToGrabWithRetry(url, tabId, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
+  let status = await postToGrab(url, tabId);
   for (const delay of retryDelays) {
     if (status !== 429) break;
     await sleep(delay);
-    status = await postToGrab(url);
+    status = await postToGrab(url, tabId);
   }
   return status;
 }
@@ -295,7 +313,7 @@ async function handOff(url, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
 /// back would duplicate the handoff.
 async function explicitSend(url, tabId) {
   if (!toGrabUrl(url)) return;
-  const status = await postToGrabWithRetry(url);
+  const status = await postToGrabWithRetry(url, tabId);
   const tabArg =
     Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
   if (status === 0) {
