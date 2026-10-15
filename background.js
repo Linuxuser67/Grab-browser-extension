@@ -218,6 +218,44 @@ async function readCookies(url, storeId) {
   }
 }
 
+/// Resolve the cookie store for a handoff context. Returns a store ID string,
+/// undefined for the default store, or null to fail closed (send no cookies).
+/// Firefox exposes tab.cookieStoreId directly; Chrome needs a lookup through
+/// getAllCookieStores() matching tabIds. Chrome's store list has no incognito
+/// flag, so an incognito context with no resolvable store fails closed rather
+/// than guessing.
+async function resolveStoreId(ctx) {
+  const tabId = ctx && ctx.tabId;
+  const ctxIncognito = ctx && ctx.incognito === true;
+  if (Number.isInteger(tabId) && tabId >= 0) {
+    let tab;
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch {
+      tab = undefined;
+    }
+    if (tab && tab.cookieStoreId) {
+      return tab.cookieStoreId; // Firefox (containers, incognito).
+    }
+    // Chrome: match the tab against the stores' tabIds.
+    try {
+      const stores = await chrome.cookies.getAllCookieStores();
+      if (Array.isArray(stores)) {
+        const match = stores.find(
+          (s) => Array.isArray(s.tabIds) && s.tabIds.includes(tabId)
+        );
+        if (match) return match.id;
+      }
+    } catch {}
+    if (ctxIncognito || (tab && tab.incognito === true)) {
+      return null; // Fail closed: never send default-store cookies for incognito.
+    }
+  } else if (ctxIncognito) {
+    return null; // Incognito interception with no tab: fail closed.
+  }
+  return undefined; // Default store.
+}
+
 /// POST one URL to Grab and wait for its answer to the confirm dialog.
 /// Resolves to the HTTP status, 0 when Grab can't be reached (not running),
 /// STATUS_UNVERIFIED when the listener could not prove it is Grab, or
@@ -245,15 +283,8 @@ async function postToGrab(url, ctx) {
     // Scope to the tab's cookie store: incognito/container tabs must not
     // send the default store's cookies.
     try {
-      const tabId = ctx && ctx.tabId;
-      let storeId;
-      if (Number.isInteger(tabId) && tabId >= 0) {
-        try {
-          const tab = await chrome.tabs.get(tabId);
-          storeId = tab && tab.cookieStoreId;
-        } catch {}
-      }
-      cookies = await readCookies(url, storeId);
+      const storeId = await resolveStoreId(ctx);
+      cookies = storeId === null ? [] : await readCookies(url, storeId);
     } catch {
       cookies = []; // Cookie read failure: URL-only handoff.
     }
@@ -1321,6 +1352,7 @@ if (typeof module !== "undefined" && module.exports) {
     handOff,
     _setSleep,
     postToGrab,
+    resolveStoreId,
     postToGrabWithRetry,
     verifyGrab,
     YTDLP_EXCLUSIVE_HOSTS,
