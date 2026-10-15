@@ -1202,6 +1202,22 @@ function clearAllVideoUi() {
   }
 }
 
+/// Ask a tab's content script to re-sweep for videos (wiring shadow roots).
+/// Debounced per tab, with one retry at ~1.5s in case the player mounts
+/// just after the manifest is sniffed.
+const rescanTimers = new Map();
+function requestRescan(tabId) {
+  if (rescanTimers.has(tabId)) return;
+  const send = () => {
+    chrome.tabs.sendMessage(tabId, { type: "grab-rescan" }).catch(() => {});
+  };
+  send();
+  const retry = setTimeout(send, 1500);
+  // Debounce: ignore further sniffs for 3s, then allow a new rescan.
+  const reset = setTimeout(() => rescanTimers.delete(tabId), 3000);
+  rescanTimers.set(tabId, { retry, reset });
+}
+
 function onVideoEvent(tabId) {
   if (!detectVideosOn) return;
   if (tabId === activeTabId) {
@@ -1236,6 +1252,11 @@ chrome.webRequest.onResponseStarted.addListener(
     if (await isExcludedTab(details.tabId)) return;
     noteSniffed(details.tabId, details.url, kind);
     onVideoEvent(details.tabId);
+    // A sniffed manifest may belong to a shadow-root player whose play
+    // events never reach the document. Nudge the tab to re-sweep (wiring
+    // shadow roots); debounced, with one retry in case the player mounts
+    // just after the sniff.
+    requestRescan(details.tabId);
   },
   {
     urls: ["http://*/*", "https://*/*"],
@@ -1353,6 +1374,7 @@ if (typeof module !== "undefined" && module.exports) {
     _setSleep,
     postToGrab,
     resolveStoreId,
+    requestRescan,
     postToGrabWithRetry,
     verifyGrab,
     YTDLP_EXCLUSIVE_HOSTS,

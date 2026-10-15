@@ -1099,4 +1099,23 @@ describe("context menu: one flat submenu, one click to Grab", () => {
     assert.deepEqual(rowsOf(items).map((i) => i.title), ["x.mp4", "x.mp4 (2)"]);
     assert.equal(items.filter((i) => i.type === "separator").length, 1);
   });
+
+  test("requestRescan sends grab-rescan and debounces", async () => {
+    const chrome = makeChrome({});
+    const bg = loadBackground(chrome);
+    const sent = [];
+    chrome.tabs.sendMessage = async (tabId, msg) => {
+      sent.push({ tabId, msg });
+    };
+    // First call sends immediately.
+    bg.requestRescan(42);
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0], { tabId: 42, msg: { type: "grab-rescan" } });
+    // Debounced: second call within 3s is ignored.
+    bg.requestRescan(42);
+    assert.equal(sent.length, 1, "debounced");
+    // Different tab is not debounced.
+    bg.requestRescan(43);
+    assert.equal(sent.length, 2);
+  });
 });
