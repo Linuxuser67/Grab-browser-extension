@@ -926,6 +926,99 @@ describe("HTTP handoff to Grab", () => {
     }
   });
 
+  test("resolveStoreId: Firefox tab.cookieStoreId is used directly", async () => {
+    chrome.tabs.get = async (id) => ({ id, cookieStoreId: "firefox-container-1" });
+    const getAllCalls = [];
+    const origGetAll = chrome.cookies.getAll;
+    chrome.cookies.getAll = async (opts) => {
+      getAllCalls.push(opts);
+      return [];
+    };
+    try {
+      const storeId = await bg.resolveStoreId({ tabId: 7 });
+      assert.equal(storeId, "firefox-container-1");
+      // readCookies path: getAll called with the Firefox store ID.
+      await pair();
+      mockPairedGrab({ addStatus: 200 });
+      await bg.handOff("https://example.com/f.zip", { tabId: 7 }, [0, 0]);
+      assert.ok(
+        getAllCalls.some((o) => o.storeId === "firefox-container-1"),
+        "getAll used the Firefox cookieStoreId"
+      );
+    } finally {
+      chrome.cookies.getAll = origGetAll;
+    }
+  });
+
+  test("resolveStoreId: Chrome matches tabIds via getAllCookieStores", async () => {
+    chrome.tabs.get = async (id) => ({ id }); // No cookieStoreId on Chrome.
+    chrome.cookies.getAllCookieStores = async () => [
+      { id: "0", tabIds: [1, 2] },
+      { id: "1", tabIds: [7, 8] },
+    ];
+    const getAllCalls = [];
+    const origGetAll = chrome.cookies.getAll;
+    chrome.cookies.getAll = async (opts) => {
+      getAllCalls.push(opts);
+      return [];
+    };
+    try {
+      const storeId = await bg.resolveStoreId({ tabId: 7 });
+      assert.equal(storeId, "1");
+      await pair();
+      mockPairedGrab({ addStatus: 200 });
+      await bg.handOff("https://example.com/f.zip", { tabId: 7 }, [0, 0]);
+      assert.ok(
+        getAllCalls.some((o) => o.storeId === "1"),
+        "getAll used the Chrome store matched by tabIds"
+      );
+    } finally {
+      chrome.cookies.getAll = origGetAll;
+      delete chrome.cookies.getAllCookieStores;
+    }
+  });
+
+  test("resolveStoreId: incognito with no resolvable store fails closed", async () => {
+    chrome.tabs.get = async () => {
+      throw new Error("no such tab");
+    };
+    chrome.cookies.getAllCookieStores = async () => [];
+    await pair();
+    mockPairedGrab({ addStatus: 200 });
+    const ok = await bg.handOff(
+      "https://example.com/f.zip",
+      { tabId: 99, incognito: true },
+      [0, 0]
+    );
+    assert.equal(ok, true);
+    const post = fetchCalls.find((c) => c.opts.method === "POST");
+    const body = JSON.parse(post.opts.body);
+    assert.deepEqual(body.cookies, [], "incognito with no store sends no cookies");
+    delete chrome.cookies.getAllCookieStores;
+  });
+
+  test("resolveStoreId: non-incognito with no tab uses the default store", async () => {
+    const getAllCalls = [];
+    const origGetAll = chrome.cookies.getAll;
+    chrome.cookies.getAll = async (opts) => {
+      getAllCalls.push(opts);
+      return [];
+    };
+    try {
+      const storeId = await bg.resolveStoreId(undefined);
+      assert.equal(storeId, undefined);
+      await pair();
+      mockPairedGrab({ addStatus: 200 });
+      await bg.handOff("https://example.com/f.zip", undefined, [0, 0]);
+      assert.ok(
+        getAllCalls.some((o) => o.storeId === undefined),
+        "getAll used the default store"
+      );
+    } finally {
+      chrome.cookies.getAll = origGetAll;
+    }
+  });
+
   test("handOff honors the retry delays (not the default 300/900)", async () => {
     mockFetch(429, 429, 200);
     const delays = [];
