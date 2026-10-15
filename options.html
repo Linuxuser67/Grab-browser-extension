@@ -4,12 +4,22 @@
     <meta charset="utf-8" />
     <title>Grab Options</title>
     <style>
+      :root {
+        color-scheme: light dark;
+      }
       body {
         font-family: system-ui, sans-serif;
         font-size: 14px;
         max-width: 480px;
         margin: 24px;
         color: #1e1e1e;
+        background: #ffffff;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          color: #e0e0e0;
+          background: #1e1e1e;
+        }
       }
       label {
         display: block;
@@ -19,6 +29,11 @@
         color: #666;
         font-size: 12px;
         margin: 2px 0 0;
+      }
+      @media (prefers-color-scheme: dark) {
+        .hint {
+          color: #aaa;
+        }
       }
       input[type="text"] {
         width: 100%;
