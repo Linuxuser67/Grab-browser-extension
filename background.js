@@ -98,7 +98,12 @@ const CONFIRM_TIMEOUT_MS = 130_000;
 /// A pairing handshake is a loopback round trip.
 const HELLO_TIMEOUT_MS = 3_000;
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Test hook: swap the sleep implementation to observe retry delays.
+function _setSleep(fn) {
+  sleep = fn;
+}
 
 // --- Pairing ---------------------------------------------------------------
 //
@@ -219,7 +224,7 @@ async function readCookies(url, storeId) {
 /// STATUS_MAYBE_SENT when the POST may have reached Grab but the answer
 /// was lost (timeout). The caller must not fall back to grab:// on
 /// STATUS_MAYBE_SENT — that would risk a duplicate download.
-async function postToGrab(url, tabId) {
+async function postToGrab(url, ctx) {
   let secret;
   try {
     secret = await getPairingCode();
@@ -240,6 +245,7 @@ async function postToGrab(url, tabId) {
     // Scope to the tab's cookie store: incognito/container tabs must not
     // send the default store's cookies.
     try {
+      const tabId = ctx && ctx.tabId;
       let storeId;
       if (Number.isInteger(tabId) && tabId >= 0) {
         try {
@@ -285,12 +291,12 @@ async function postToGrab(url, tabId) {
 
 /// POST to Grab, retrying briefly on 429 (queue full). Resolves to the final
 /// HTTP status, or 0 when Grab isn't reachable.
-async function postToGrabWithRetry(url, tabId, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
-  let status = await postToGrab(url, tabId);
+async function postToGrabWithRetry(url, ctx, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
+  let status = await postToGrab(url, ctx);
   for (const delay of retryDelays) {
     if (status !== 429) break;
     await sleep(delay);
-    status = await postToGrab(url, tabId);
+    status = await postToGrab(url, ctx);
   }
   return status;
 }
@@ -301,8 +307,8 @@ async function postToGrabWithRetry(url, tabId, retryDelays = HANDOFF_RETRY_DELAY
 /// no answer in time (408), 403, 414, …) is a failure: the caller must leave
 /// the browser's own download alone. The caller validates the URL with
 /// toGrabUrl first; the raw URL is posted as-is.
-async function handOff(url, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
-  const status = await postToGrabWithRetry(url, retryDelays);
+async function handOff(url, ctx, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
+  const status = await postToGrabWithRetry(url, ctx, retryDelays);
   return status >= 200 && status < 300;
 }
 
@@ -313,7 +319,7 @@ async function handOff(url, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
 /// back would duplicate the handoff.
 async function explicitSend(url, tabId) {
   if (!toGrabUrl(url)) return;
-  const status = await postToGrabWithRetry(url, tabId);
+  const status = await postToGrabWithRetry(url, { tabId });
   const tabArg =
     Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
   if (status === 0) {
@@ -403,7 +409,7 @@ async function interceptDownload(item) {
   if (!toGrabUrl(item.url)) return;
   // Hand off over Grab's local HTTP endpoint. If Grab isn't running or
   // refuses the request, the download is left to the browser.
-  if (!(await handOff(item.url))) return;
+  if (!(await handOff(item.url, { incognito: item.incognito === true }))) return;
 
   await claimDownload(item.id);
   // A tiny download can finish while the handoff is in flight, before the
@@ -1313,6 +1319,7 @@ if (typeof module !== "undefined" && module.exports) {
     pendingKey,
     hostExcluded,
     handOff,
+    _setSleep,
     postToGrab,
     postToGrabWithRetry,
     verifyGrab,

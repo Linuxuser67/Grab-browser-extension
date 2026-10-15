@@ -892,16 +892,57 @@ describe("HTTP handoff to Grab", () => {
 
   test("429 is retried and succeeds without opening a tab", async () => {
     mockFetch(429, 200);
-    assert.equal(await bg.handOff("https://example.com/f.zip", [0, 0]), true);
+    assert.equal(await bg.handOff("https://example.com/f.zip", undefined, [0, 0]), true);
     assert.equal(fetchCalls.length, 2);
     assert.equal(tabsCreated().length, 0);
   });
 
   test("a queue that stays full gives up after the retries", async () => {
     mockFetch(429);
-    assert.equal(await bg.handOff("https://example.com/f.zip", [0, 0]), false);
+    assert.equal(await bg.handOff("https://example.com/f.zip", undefined, [0, 0]), false);
     assert.equal(fetchCalls.length, 3, "1 attempt + 2 retries");
     assert.equal(tabsCreated().length, 0);
+  });
+
+  test("handOff forwards ctx to postToGrab (tabId reaches cookie lookup)", async () => {
+    mockPairedGrab({ addStatus: 200 });
+    await pair();
+    const tabGets = [];
+    const origGet = chrome.tabs.get;
+    chrome.tabs.get = async (id) => {
+      tabGets.push(id);
+      return { id, cookieStoreId: "firefox-default" };
+    };
+    try {
+      assert.equal(
+        await bg.handOff("https://example.com/f.zip", { tabId: 42 }, [0, 0]),
+        true
+      );
+      assert.deepEqual(tabGets, [42, 42, 42].slice(0, tabGets.length));
+      assert.ok(tabGets.length > 0, "chrome.tabs.get was called with the ctx tabId");
+      assert.ok(tabGets.every((id) => id === 42), "all lookups used tabId 42");
+    } finally {
+      chrome.tabs.get = origGet;
+    }
+  });
+
+  test("handOff honors the retry delays (not the default 300/900)", async () => {
+    mockFetch(429, 429, 200);
+    const delays = [];
+    const origSleep = bg._setSleep;
+    bg._setSleep(async (ms) => {
+      delays.push(ms);
+    });
+    try {
+      assert.equal(
+        await bg.handOff("https://example.com/f.zip", undefined, [0, 0]),
+        true
+      );
+      assert.deepEqual(delays, [0, 0], "used the passed delays, not HANDOFF_RETRY_DELAYS_MS");
+    } finally {
+      bg._setSleep((ms) => new Promise((r) => setTimeout(r, ms)));
+    }
+    void origSleep;
   });
 
   test("automatic interception cancels the browser download after a 200", async () => {
