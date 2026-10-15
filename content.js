@@ -156,6 +156,9 @@ if (
   let lastSent = "";
 
   function report() {
+    // Wire any new open shadow roots before collecting: a player added
+    // after the last sweep needs its listeners attached.
+    wireShadowRoots(document);
     const videos = collectVideos(document, (v) => isStartedVideo(v, played));
     const title = pageVideoTitle(document);
     // The title is part of the snapshot: an SPA can change it with no new
@@ -200,22 +203,49 @@ if (
     }
   }
 
+  // Media events don't bubble and aren't composed, so they never leave a
+  // shadow root. Attach the same capture listeners to each open shadow root
+  // found during a sweep; events fired inside a root are visible there.
+  const shadowRootsWired = new WeakSet();
+  function wireShadowRoots(root) {
+    if (!root || !root.querySelectorAll) return;
+    for (const el of root.querySelectorAll("*")) {
+      const sr = el.shadowRoot;
+      if (sr && !shadowRootsWired.has(sr)) {
+        shadowRootsWired.add(sr);
+        sr.addEventListener("play", onPlay, true);
+        sr.addEventListener("playing", onPlay, true);
+        sr.addEventListener("emptied", onEmptied, true);
+        sr.addEventListener("volumechange", onVolumeChange, true);
+        sr.addEventListener("loadedmetadata", () => scheduleReport(), true);
+        // Recurse: shadow roots can nest.
+        wireShadowRoots(sr);
+      }
+    }
+  }
+
+  function onVolumeChange(e) {
+    const t = e && e.target;
+    // Unmuting is user intent: latch it even if paused.
+    if (t && t.tagName === "VIDEO" && !t.muted) played.add(t);
+    scheduleReport();
+  }
+
   // play/playing don't bubble; capture at the document.
   document.addEventListener("play", onPlay, true);
   document.addEventListener("playing", onPlay, true);
   document.addEventListener("emptied", onEmptied, true);
-  document.addEventListener(
-    "volumechange",
-    (e) => {
-      const t = e && e.target;
-      // Unmuting is user intent: latch it even if paused.
-      if (t && t.tagName === "VIDEO" && !t.muted) played.add(t);
-      scheduleReport();
-    },
-    true,
-  );
+  document.addEventListener("volumechange", onVolumeChange, true);
   // The decoded height only exists once metadata has loaded.
   document.addEventListener("loadedmetadata", () => scheduleReport(), true);
+
+  // Composed events (click, keydown, pointerdown) DO cross shadow boundaries.
+  // A user interacting with a shadow-root player triggers a sweep, which
+  // wires the root's listeners so subsequent play events are caught.
+  const sweepOnInteract = () => scheduleReport();
+  document.addEventListener("click", sweepOnInteract, true);
+  document.addEventListener("keydown", sweepOnInteract, true);
+  document.addEventListener("pointerdown", sweepOnInteract, true);
 
   // Initial sweep: latch videos already playing when this script ran; the
   // audible check happens at collect time. Muted autoplay is noise.
