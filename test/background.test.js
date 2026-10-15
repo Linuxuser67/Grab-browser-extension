@@ -859,6 +859,7 @@ describe("HTTP handoff to Grab", () => {
     assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
       url: "https://example.com/f.zip?x=1",
       cookies: [],
+      user_agent: navigator.userAgent,
     });
     assert.equal(tabsCreated().length, 0);
   });
@@ -869,6 +870,7 @@ describe("HTTP handoff to Grab", () => {
     assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
       url: "https://example.com/f.zip?u=udp://t/announce",
       cookies: [],
+      user_agent: navigator.userAgent,
     });
   });
 
@@ -972,6 +974,7 @@ describe("HTTP handoff to Grab", () => {
           // No expiration_date: session cookie; JSON.stringify omits it.
         },
       ],
+      user_agent: navigator.userAgent,
     });
   });
 
@@ -985,6 +988,7 @@ describe("HTTP handoff to Grab", () => {
     assert.deepEqual(JSON.parse(posts()[0].opts.body), {
       url: "https://example.com/f.zip",
       cookies: [],
+      user_agent: navigator.userAgent,
     });
   });
 
