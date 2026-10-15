@@ -1119,3 +1119,4 @@ describe("context menu: one flat submenu, one click to Grab", () => {
     assert.equal(sent.length, 2);
   });
 });
+

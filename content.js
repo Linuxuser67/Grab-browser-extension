@@ -82,14 +82,19 @@ function isStartedVideo(v, played) {
 }
 
 /// All <video> elements under `root`, piercing open shadow roots (custom
-/// players). Closed roots are unreachable by design; their play/playing
-/// events still reach the document listener.
+/// players). Closed roots are unreachable by design, and their media events
+/// never reach the document listener.
 function allVideos(root) {
   const out = [];
   if (!root || !root.querySelectorAll) return out;
   for (const v of root.querySelectorAll("video")) out.push(v);
   for (const el of root.querySelectorAll("*")) {
-    if (el.shadowRoot) out.push(...allVideos(el.shadowRoot));
+    if (el.shadowRoot) {
+      // Wire the root's listeners while traversing: one pass collects
+      // videos and attaches listeners, instead of two full DOM walks.
+      wireShadowRoot(el.shadowRoot);
+      out.push(...allVideos(el.shadowRoot));
+    }
   }
   return out;
 }
@@ -156,9 +161,6 @@ if (
   let lastSent = "";
 
   function report() {
-    // Wire any new open shadow roots before collecting: a player added
-    // after the last sweep needs its listeners attached.
-    wireShadowRoots(document);
     const videos = collectVideos(document, (v) => isStartedVideo(v, played));
     const title = pageVideoTitle(document);
     // The title is part of the snapshot: an SPA can change it with no new
@@ -207,21 +209,14 @@ if (
   // shadow root. Attach the same capture listeners to each open shadow root
   // found during a sweep; events fired inside a root are visible there.
   const shadowRootsWired = new WeakSet();
-  function wireShadowRoots(root) {
-    if (!root || !root.querySelectorAll) return;
-    for (const el of root.querySelectorAll("*")) {
-      const sr = el.shadowRoot;
-      if (sr && !shadowRootsWired.has(sr)) {
-        shadowRootsWired.add(sr);
-        sr.addEventListener("play", onPlay, true);
-        sr.addEventListener("playing", onPlay, true);
-        sr.addEventListener("emptied", onEmptied, true);
-        sr.addEventListener("volumechange", onVolumeChange, true);
-        sr.addEventListener("loadedmetadata", () => scheduleReport(), true);
-        // Recurse: shadow roots can nest.
-        wireShadowRoots(sr);
-      }
-    }
+  function wireShadowRoot(sr) {
+    if (!sr || shadowRootsWired.has(sr)) return;
+    shadowRootsWired.add(sr);
+    sr.addEventListener("play", onPlay, true);
+    sr.addEventListener("playing", onPlay, true);
+    sr.addEventListener("emptied", onEmptied, true);
+    sr.addEventListener("volumechange", onVolumeChange, true);
+    sr.addEventListener("loadedmetadata", () => scheduleReport(), true);
   }
 
   function onVolumeChange(e) {
@@ -239,12 +234,12 @@ if (
   // The decoded height only exists once metadata has loaded.
   document.addEventListener("loadedmetadata", () => scheduleReport(), true);
 
-  // Composed events (click, keydown, pointerdown) DO cross shadow boundaries.
+  // Composed events (click, pointerdown) DO cross shadow boundaries.
   // A user interacting with a shadow-root player triggers a sweep, which
   // wires the root's listeners so subsequent play events are caught.
+  // (keydown omitted: typing in a comment box would spam sweeps.)
   const sweepOnInteract = () => scheduleReport();
   document.addEventListener("click", sweepOnInteract, true);
-  document.addEventListener("keydown", sweepOnInteract, true);
   document.addEventListener("pointerdown", sweepOnInteract, true);
 
   // Initial sweep: latch videos already playing when this script ran; the
