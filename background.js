@@ -1589,7 +1589,13 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
     f = { frames: new Map(), sniffed: [] };
     videoFinds.set(tabId, f);
   }
-  f.frames.set(frameId, Array.isArray(msg.videos) ? msg.videos : []);
+  // Don't let an empty re-report wipe known videos: on live streams the
+  // video element is replaced periodically, and the new element hasn't
+  // fired 'play' yet. Real navigations clear via tabs.onUpdated.
+  const videos = Array.isArray(msg.videos) ? msg.videos : [];
+  if (videos.length > 0 || !f.frames.has(frameId)) {
+    f.frames.set(frameId, videos);
+  }
   // The video's own title for menu labels.
   // The top frame's title follows the page (SPAs change it without a
   // navigation); a subframe only fills a gap.
