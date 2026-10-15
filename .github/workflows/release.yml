@@ -33,9 +33,9 @@ jobs:
         run: |
           root="$PWD"
           zip -qr "grab-extension-${TAG}.zip" . \
-            -x ".git/*" ".github/*" "build-aux/*" "test/*" "manifest.firefox.json" "grab-extension-*.zip"
+            -x ".git/*" ".github/*" "build-aux/*" "test/*" "amo-assets/*" "assets/*" "README.md" "manifest.firefox.json" "grab-extension-*.zip"
           zip -qr "grab-extension-firefox-${TAG}.zip" . \
-            -x ".git/*" ".github/*" "build-aux/*" "test/*" "manifest.json" "manifest.firefox.json" "grab-extension-*.zip"
+            -x ".git/*" ".github/*" "build-aux/*" "test/*" "amo-assets/*" "assets/*" "README.md" "manifest.json" "manifest.firefox.json" "grab-extension-*.zip"
           tmpdir="$(mktemp -d)"
           cp manifest.firefox.json "$tmpdir/manifest.json"
           (cd "$tmpdir" && zip -q "$root/grab-extension-firefox-${TAG}.zip" manifest.json)
