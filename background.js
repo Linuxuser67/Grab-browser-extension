@@ -348,9 +348,9 @@ async function handOff(url, ctx, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
 /// isn't reachable at all (connection failure). If Grab responded — even
 /// with 409 (card opened or declined) or 408 — it handled the URL; falling
 /// back would duplicate the handoff.
-async function explicitSend(url, tabId) {
+async function explicitSend(url, tabId, incognito) {
   if (!toGrabUrl(url)) return;
-  const status = await postToGrabWithRetry(url, { tabId });
+  const status = await postToGrabWithRetry(url, { tabId, incognito });
   const tabArg =
     Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
   if (status === 0) {
@@ -705,7 +705,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     // Try the paired HTTP handoff first (sends cookies, waits for Grab's
     // real answer); fall back to the grab:// navigation only when Grab isn't
     // reachable at all.
-    if (url) await explicitSend(url, tab && tab.id);
+    if (url) await explicitSend(url, tab && tab.id, tab && tab.incognito === true);
     return;
   }
   if (id !== "sendToGrab") return;
@@ -759,7 +759,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   // the browser — fall back to the page URL so yt-dlp can extract it there.
   // Try the paired HTTP handoff first (sends cookies); fall back to grab://
   // only when Grab isn't reachable at all.
-  if (target) await explicitSend(target, tab && tab.id);
+  if (target) await explicitSend(target, tab && tab.id, tab && tab.incognito === true);
 });
 
 // The toolbar button now opens popup.html (default_popup in the manifest),
@@ -771,7 +771,7 @@ chrome.commands.onCommand.addListener((command) => {
     const url = tabs[0] && tabs[0].url;
     // Paired HTTP handoff first (sends cookies); grab:// fallback only when
     // Grab isn't reachable at all.
-    if (url) await explicitSend(url, tabs[0].id);
+    if (url) await explicitSend(url, tabs[0].id, tabs[0].incognito === true);
   });
 });
 
