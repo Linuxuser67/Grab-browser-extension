@@ -1019,6 +1019,37 @@ describe("HTTP handoff to Grab", () => {
     }
   });
 
+  test("interceptDownload passes incognito through to cookies: []", async () => {
+    await pair();
+    mockPairedGrab({ addStatus: 200 });
+    // The default store has cookies; incognito interception must NOT send them.
+    const origGetAll = chrome.cookies.getAll;
+    chrome.cookies.getAll = async () => [
+      { name: "session", value: "abc", domain: "example.com" },
+    ];
+    try {
+      // Simulate an incognito download intercepted by the browser.
+      const item = {
+        id: 99,
+        url: "https://example.com/big.iso",
+        fileSize: 200 * 1024 * 1024,
+        incognito: true,
+      };
+      chrome._downloads.set(99, { ...item, state: "in_progress" });
+      await chrome._listeners["downloads.onCreated"](item);
+      const post = fetchCalls.find((c) => c.opts.method === "POST");
+      assert.ok(post, "handoff POST was sent");
+      const body = JSON.parse(post.opts.body);
+      assert.deepEqual(
+        body.cookies,
+        [],
+        "incognito interception must send no cookies even when the default store has them"
+      );
+    } finally {
+      chrome.cookies.getAll = origGetAll;
+    }
+  });
+
   test("handOff honors the retry delays (not the default 300/900)", async () => {
     mockFetch(429, 429, 200);
     const delays = [];
