@@ -1,0 +1,120 @@
+// Shadow-root video detection tests (jsdom).
+// Run with: node --test test/video-shadow.test.js
+// Requires the jsdom package (npm install jsdom); skipped if unavailable.
+const { test, describe } = require("node:test");
+const assert = require("node:assert/strict");
+const path = require("node:path");
+
+const CONTENT_PATH = path.join(__dirname, "..", "content.js");
+
+let JSDOM;
+try {
+  ({ JSDOM } = require("jsdom"));
+} catch {
+  JSDOM = null;
+}
+
+describe("shadow-root video detection (jsdom)", { skip: !JSDOM }, () => {
+
+  function loadContent(dom) {
+    const messages = [];
+    let messageListener = null;
+    const chrome = {
+      runtime: {
+        sendMessage: (msg) => messages.push(msg),
+        onMessage: { addListener: (fn) => { messageListener = fn; } },
+      },
+    };
+    // content.js runs its init at load time against globals.
+    const g = dom.window;
+    // Fake user activation: the play handler latches muted videos only
+    // when the user recently interacted.
+    g.navigator = { userActivation: { isActive: true } };
+    // Fresh module per test: the init block wires listeners on load.
+    delete require.cache[require.resolve(CONTENT_PATH)];
+    // Keep globals set for the test duration (reports are async).
+    // Caller must restore via the returned cleanup().
+    const prev = {
+      chrome: globalThis.chrome,
+      document: globalThis.document,
+      location: globalThis.location,
+      navigator: globalThis.navigator,
+    };
+    globalThis.chrome = chrome;
+    globalThis.document = g.document;
+    globalThis.location = g.location;
+    globalThis.navigator = g.navigator;
+    require(CONTENT_PATH);
+    const cleanup = () => {
+      // Install a dummy: pending debounce timers from this instance may
+      // still fire after the test ends; they must not throw.
+      globalThis.chrome = {
+        runtime: { sendMessage: () => {}, onMessage: { addListener: () => {} } },
+      };
+      globalThis.document = prev.document;
+      globalThis.location = prev.location;
+      globalThis.navigator = prev.navigator;
+    };
+    return { messages, document: g.document, window: g, messageListener, cleanup };
+  }
+
+  function makeVideo(doc, { muted = false, src = "https://example.com/v.mp4" } = {}) {
+    const v = doc.createElement("video");
+    v.src = src;
+    v.muted = muted;
+    // jsdom doesn't implement media playback; fake the "started" state.
+    Object.defineProperty(v, "paused", { value: false, configurable: true });
+    Object.defineProperty(v, "ended", { value: false, configurable: true });
+    Object.defineProperty(v, "readyState", { value: 4, configurable: true });
+    Object.defineProperty(v, "videoWidth", { value: 640, configurable: true });
+    Object.defineProperty(v, "videoHeight", { value: 360, configurable: true });
+    return v;
+  }
+
+  test("play event in a shadow root triggers a video report", async () => {
+    const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
+    const { messages, document, window, messageListener, cleanup } = loadContent(dom);
+    try {
+      messages.length = 0;
+      // Player lives inside an open shadow root, like Reddit's.
+      const host = document.createElement("div");
+      document.body.appendChild(host);
+      const root = host.attachShadow({ mode: "open" });
+      const video = makeVideo(document, { muted: false });
+      root.appendChild(video);
+      // Worker rescan (after sniffing a manifest) wires the shadow root.
+      messageListener({ type: "grab-rescan" });
+      // Play inside the shadow root: the event never leaves it, but the
+      // root-level capture listener must see it and latch the video.
+      video.dispatchEvent(new window.Event("play", { bubbles: false }));
+      await new Promise((r) => setTimeout(r, 500));
+      const reports = messages.filter((m) => m.type === "grab-videos-detected");
+      assert.ok(reports.length > 0, "a report was sent");
+      const last = reports[reports.length - 1];
+      assert.equal(last.videos.length, 1, "shadow-root video was detected");
+      assert.equal(last.videos[0].src, "https://example.com/v.mp4");
+      // Let the debounce timer settle before restoring globals.
+      await new Promise((r) => setTimeout(r, 500));
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("light-DOM video still reports (control)", async () => {
+    const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
+    const { messages, document, window, cleanup } = loadContent(dom);
+    try {
+      messages.length = 0;
+      const video = makeVideo(document, { muted: false });
+      document.body.appendChild(video);
+      video.dispatchEvent(new window.Event("play", { bubbles: false }));
+      await new Promise((r) => setTimeout(r, 500));
+      const reports = messages.filter((m) => m.type === "grab-videos-detected");
+      assert.ok(reports.length > 0, "a report was sent");
+      assert.equal(reports[reports.length - 1].videos.length, 1);
+      await new Promise((r) => setTimeout(r, 500));
+    } finally {
+      cleanup();
+    }
+  });
+});
