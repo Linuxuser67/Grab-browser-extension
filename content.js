@@ -76,18 +76,31 @@ function isStartedVideo(v, played) {
   if (played.has(v)) return true;
   // Not latched: muted autoplay is noise (ads), unmuted playing is real.
   if (v.muted) return false;
-  return !v.paused && !v.ended && (v.currentTime || 0) > 0;
+  // readyState > 2 (HAVE_FUTURE_DATA): playback actually proceeds, not
+  // stalled on buffering with a stale currentTime.
+  return !v.paused && !v.ended && (v.readyState || 0) > 2 && (v.currentTime || 0) > 0;
+}
+
+/// All <video> elements under `root`, piercing open shadow roots (custom
+/// players). Closed roots are unreachable by design; their play/playing
+/// events still reach the document listener.
+function allVideos(root) {
+  const out = [];
+  if (!root || !root.querySelectorAll) return out;
+  for (const v of root.querySelectorAll("video")) out.push(v);
+  for (const el of root.querySelectorAll("*")) {
+    if (el.shadowRoot) out.push(...allVideos(el.shadowRoot));
+  }
+  return out;
 }
 
 /// Pure over a document-like: [{src, blob, height?}] for each qualifying <video>.
 /// `isPlayed` decides which videos count as started by the user; the live
 /// wiring passes `(v) => isStartedVideo(v, played)`. Tests pass explicit
-/// predicates.
+/// predicates. Pierces shadow roots via allVideos.
 function collectVideos(doc, isPlayed) {
   const out = [];
-  if (!doc || !doc.querySelectorAll) return out;
-  const videos = doc.querySelectorAll("video");
-  for (const v of videos) {
+  for (const v of allVideos(doc)) {
     if (!isBigEnough(v)) continue;
     if (isPlayed && !isPlayed(v)) continue;
     const src = usableVideoSrc(v);
@@ -165,10 +178,16 @@ if (
 
   function onPlay(e) {
     const t = e && e.target;
-    // Latch only unmuted play: muted autoplay (feeds, ads, previews) is
-    // noise. A muted video the user unmutes fires volumechange, which
-    // re-reports and latches then.
-    if (t && t.tagName === "VIDEO" && !t.muted) {
+    if (!t || t.tagName !== "VIDEO") return;
+    // Latch unmuted play outright. Latch muted play too when the user just
+    // interacted (userActivation.isActive, ~5s after click/tap/key): a muted
+    // video the user started is intent, not autoplay noise. Muted autoplay
+    // with no recent interaction stays unlatched until unmute (volumechange).
+    const userActive =
+      typeof navigator !== "undefined" &&
+      navigator.userActivation &&
+      navigator.userActivation.isActive;
+    if (!t.muted || userActive) {
       played.add(t);
       scheduleReport();
     }
@@ -202,8 +221,8 @@ if (
   // audible check happens at collect time. Muted autoplay is noise.
   if (document.querySelectorAll) {
     let latched = false;
-    for (const v of document.querySelectorAll("video")) {
-      if (!v.muted && !v.paused && !v.ended && (v.currentTime || 0) > 0) {
+    for (const v of allVideos(document)) {
+      if (!v.muted && !v.paused && !v.ended && (v.readyState || 0) > 2) {
         played.add(v);
         latched = true;
       }
