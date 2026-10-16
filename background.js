@@ -440,7 +440,11 @@ async function interceptDownload(item) {
   if (!toGrabUrl(item.url)) return;
   // Hand off over Grab's local HTTP endpoint. If Grab isn't running or
   // refuses the request, the download is left to the browser.
-  if (!(await handOff(item.url, { incognito: item.incognito === true }))) return;
+  // Only cancel the browser download on HTTP 200 (queued). HTTP 202 means
+  // Grab opened the New Download card (nothing queued yet) — the user may
+  // not complete it, so the browser copy must stay.
+  const status = await postToGrabWithRetry(item.url, { incognito: item.incognito === true });
+  if (status !== 200) return;
 
   await claimDownload(item.id);
   // A tiny download can finish while the handoff is in flight, before the
