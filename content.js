@@ -187,38 +187,13 @@ if (
     sr.addEventListener("play", onPlay, true);
     sr.addEventListener("playing", onPlay, true);
     sr.addEventListener("emptied", onEmptied, true);
-    sr.addEventListener("volumechange", onVolumeChange, true);
     sr.addEventListener("loadedmetadata", () => scheduleReport(), true);
-  }
-
-  function onVolumeChange(e) {
-    const t = e && e.target;
-    const userActive =
-      typeof navigator !== "undefined" &&
-      navigator.userActivation &&
-      navigator.userActivation.isActive;
-    // Some players change volume/muted state during initialization. Only
-    // treat unmuting as intent when it happens during a user gesture on a
-    // video that is actually playing; a volumechange alone is not a play.
-    if (
-      t &&
-      t.tagName === "VIDEO" &&
-      !t.muted &&
-      !t.paused &&
-      !t.ended &&
-      (t.currentTime || 0) > 0 &&
-      userActive
-    ) {
-      played.add(t);
-    }
-    scheduleReport();
   }
 
   // play/playing don't bubble; capture at the document.
   document.addEventListener("play", onPlay, true);
   document.addEventListener("playing", onPlay, true);
   document.addEventListener("emptied", onEmptied, true);
-  document.addEventListener("volumechange", onVolumeChange, true);
   // The decoded height only exists once metadata has loaded.
   document.addEventListener("loadedmetadata", () => scheduleReport(), true);
 
