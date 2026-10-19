@@ -875,14 +875,8 @@ function classifyStream(url, contentType) {
   ) {
     return "manifest";
   }
-  // Reddit's DASH audio track is also an .mp4 URL, but it isn't a video
-  // candidate. Other explicitly audio-typed responses aren't video files.
-  if (
-    /^audio\//.test(ct) ||
-    /(?:^|\/)DASH_AUDIO_\d+\.mp4$/i.test(path)
-  ) {
-    return null;
-  }
+  // Explicitly audio-typed responses are not video candidates.
+  if (/^audio\\//.test(ct)) return null;
   if (/\.(mp4|m4v|webm|ogv|mov|mkv)$/.test(path)) return "media";
   return null;
 }
@@ -975,20 +969,9 @@ function uniqueLabels(labels) {
 }
 
 
-/// The same hosted video often has several transport/quality URLs:
-/// Reddit exposes HLS, DASH, and per-rendition MP4 paths; other sites may put
-/// a master playlist and direct renditions in one stream directory. Group
-/// those by video/stream identity and keep one usable representative URL.
-function redditVideoKey(url) {
-  try {
-    const p = new URL(url);
-    if (p.hostname.toLowerCase() !== "v.redd.it") return null;
-    const id = p.pathname.split("/").filter(Boolean)[0];
-    return id ? `${p.origin}/__reddit_video__/${id}` : null;
-  } catch {
-    return null;
-  }
-}
+/// Group HLS/DASH manifests and their sibling rendition URLs using a
+/// site-agnostic stream-directory key. Exact URLs with rotating auth tokens
+/// are also compared by origin + path.
 
 /// Directory key for standard-named HLS/DASH manifests. A direct rendition
 /// beside the manifest belongs to the same stream family, not a second video.
@@ -1010,9 +993,8 @@ function manifestFolderKey(url, kind) {
   }
 }
 
-/// Merge user-played DOM sources with sniffed requests. Exact path matches
-/// ignore rotating auth query strings; Reddit's video id and common HLS/DASH
-/// stream directories collapse the formats/renditions into one menu entry.
+/// Merge user-played DOM sources with sniffed requests. Ignore rotating auth
+/// query strings and group recognized manifest/rendition siblings by directory.
 function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
   const candidates = [];
   for (const v of domVideos || []) {
@@ -1038,24 +1020,21 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
   const groups = new Map();
   candidates.forEach((item, order) => {
     const kind = manifestKind(item.url) || item.kind;
-    const redditKey = redditVideoKey(item.url);
-    let key = redditKey;
-    if (!key) {
-      const folder = manifestFolderKey(item.url, kind);
-      if (folder) {
-        key = `${folder}/__stream__`;
-      } else {
-        try {
-          const p = new URL(item.url);
-          const slash = p.pathname.lastIndexOf("/");
-          const parent = slash > 0 ? p.pathname.slice(0, slash) : "/";
-          const siblingFolder = `${p.origin}${parent}`;
-          key = manifestFolders.has(siblingFolder)
-            ? `${siblingFolder}/__stream__`
-            : urlPathKey(item.url);
-        } catch {
-          key = urlPathKey(item.url);
-        }
+    const folder = manifestFolderKey(item.url, kind);
+    let key;
+    if (folder) {
+      key = `${folder}/__stream__`;
+    } else {
+      try {
+        const p = new URL(item.url);
+        const slash = p.pathname.lastIndexOf("/");
+        const parent = slash > 0 ? p.pathname.slice(0, slash) : "/";
+        const siblingFolder = `${p.origin}${parent}`;
+        key = manifestFolders.has(siblingFolder)
+          ? `${siblingFolder}/__stream__`
+          : urlPathKey(item.url);
+      } catch {
+        key = urlPathKey(item.url);
       }
     }
 
