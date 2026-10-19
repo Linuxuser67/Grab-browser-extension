@@ -87,6 +87,7 @@ function makeChrome(shared) {
       },
       session: {
         get: async (key) => {
+          if (key === null) return Object.fromEntries(session.entries());
           const v = session.get(key);
           return v === undefined ? {} : { [key]: v };
         },
@@ -115,6 +116,7 @@ function makeChrome(shared) {
       setBadgeText: async (args) => calls.push(["action.setBadgeText", args]),
       setBadgeBackgroundColor: async (args) =>
         calls.push(["action.setBadgeBackgroundColor", args]),
+      setTitle: async (args) => calls.push(["action.setTitle", args]),
     },
     commands: { onCommand: capture("commands.onCommand") },
     webRequest: {
@@ -135,6 +137,9 @@ function loadBackground(chrome) {
     const shared = require(SHARED_PATH);
     globalThis.SHARED_DEFAULTS = shared.SHARED_DEFAULTS;
     globalThis.SHARED_PAIRING_CODE_RE = shared.SHARED_PAIRING_CODE_RE;
+    globalThis.SHARED_EXCLUDED_HOSTS = shared.SHARED_EXCLUDED_HOSTS;
+    globalThis.sharedHostExcluded = shared.sharedHostExcluded;
+    globalThis.normalizePairingCode = shared.normalizePairingCode;
   };
   // Default: a Grab that accepts every handoff and records the URL it got.
   // Tests must not depend on a real Grab listening on 127.0.0.1:9412; the HTTP
@@ -509,6 +514,25 @@ describe("handoff tab separation (review fix 1)", () => {
     );
     assert.equal(viaSelectedTab, true);
     assert.equal(viaBackgroundTab, false);
+  });
+
+  test("explicit send shows a toolbar hint after exhausted 429 retries", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    bg._setSleep(async () => {});
+    globalThis.fetch = async () => ({ status: 429, ok: false });
+    await chrome._listeners["menus.onClicked"](
+      { menuItemId: "sendToGrab", linkUrl: "https://example.com/f.zip" },
+      { id: 5 }
+    );
+    assert.ok(
+      chrome._calls.some(([name, args]) => name === "action.setBadgeText" && args.tabId === 5 && args.text === "!"),
+      "failed explicit send should show a toolbar badge"
+    );
+    assert.ok(
+      chrome._calls.some(([name, args]) => name === "action.setTitle" && args.tabId === 5 && /queue is full/.test(args.title)),
+      "badge title should explain exhausted queue-full retries"
+    );
   });
 
   test("explicit send does not fall back to grab:// when Grab answers 409", async () => {

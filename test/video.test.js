@@ -84,6 +84,7 @@ function makeChrome(shared) {
       },
       session: {
         get: async (key) => {
+          if (key === null) return Object.fromEntries(session.entries());
           const v = session.get(key);
           return v === undefined ? {} : { [key]: v };
         },
@@ -112,6 +113,7 @@ function makeChrome(shared) {
       setBadgeText: async (args) => calls.push(["action.setBadgeText", args]),
       setBadgeBackgroundColor: async (args) =>
         calls.push(["action.setBadgeBackgroundColor", args]),
+      setTitle: async (args) => calls.push(["action.setTitle", args]),
     },
     commands: { onCommand: capture("commands.onCommand") },
     webRequest: {
@@ -129,6 +131,9 @@ function loadBackground(chrome) {
     const shared = require(SHARED_PATH);
     globalThis.SHARED_DEFAULTS = shared.SHARED_DEFAULTS;
     globalThis.SHARED_PAIRING_CODE_RE = shared.SHARED_PAIRING_CODE_RE;
+    globalThis.SHARED_EXCLUDED_HOSTS = shared.SHARED_EXCLUDED_HOSTS;
+    globalThis.sharedHostExcluded = shared.sharedHostExcluded;
+    globalThis.normalizePairingCode = shared.normalizePairingCode;
   };
   // Mock Grab's HTTP handoff: accept every handoff, record the URL.
   // If the test already set a fetch mock (for playlist content), wrap it
@@ -209,13 +214,13 @@ describe("classifyStream", () => {
         { type: "grab-videos-detected", videos: [{ src: "https://a.example.com/v.mp4", blob: false }], title },
         { tab: { id: 5 }, frameId }
       );
-    report(3, "From iframe");
+    await report(3, "From iframe");
     assert.equal(bg2._videoFinds.get(5).title, "From iframe", "gap filled by a subframe");
-    report(0, "First page title");
+    await report(0, "First page title");
     assert.equal(bg2._videoFinds.get(5).title, "First page title", "top frame wins");
-    report(3, "Another iframe");
+    await report(3, "Another iframe");
     assert.equal(bg2._videoFinds.get(5).title, "First page title", "subframe does not override");
-    report(0, "Next video after SPA navigation");
+    await report(0, "Next video after SPA navigation");
     assert.equal(bg2._videoFinds.get(5).title, "Next video after SPA navigation");
   });
 
@@ -595,6 +600,45 @@ describe("detection wiring", () => {
       chrome._calls.some(
         ([n, url]) => n === "handoff" && url === "https://cdn.example.com/s/stream.m3u8"
       )
+    );
+  });
+
+  test("blob-video menu survives a worker restart", async () => {
+    const shared = {};
+    const first = makeChrome(shared);
+    loadBackground(first);
+    await first._listeners["tabs.onActivated"]({ tabId: 9 });
+    await first._listeners["webRequest.onResponseStarted"]({
+      tabId: 9,
+      url: "https://cdn.example.com/s/stream.m3u8",
+      responseHeaders: [],
+    });
+    await first._listeners["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: null, blob: true }], title: "Live stream" },
+      { tab: { id: 9 }, frameId: 0 }
+    );
+    await tick();
+    const saved = shared.session.get("videoFinds:9");
+    assert.ok(saved, "per-tab findings are persisted in session storage");
+    assert.deepEqual(saved.sniffed, ["https://cdn.example.com/s/stream.m3u8"]);
+    assert.ok(saved.kinds.some(([key, kind]) => key.endsWith("/s/stream.m3u8") && kind === "manifest"));
+
+    const restarted = makeChrome(shared);
+    restarted.tabs.query = (q, cb) => cb([{ id: 9 }]);
+    loadBackground(restarted);
+    await restarted._listeners["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: null, blob: true }], title: "Live stream" },
+      { tab: { id: 9 }, frameId: 0 }
+    );
+    await tick();
+    assert.ok(
+      restarted._calls.some(([name, id]) => name === "menus.create" && id === "grabVideo:0"),
+      "the menu retains the stream URL after restart"
+    );
+    await restarted._listeners["menus.onClicked"]({ menuItemId: "grabVideo:0" }, { id: 9 });
+    assert.ok(
+      restarted._calls.some(([name, url]) => name === "handoff" && url === "https://cdn.example.com/s/stream.m3u8"),
+      "the restored menu entry hands the manifest to Grab"
     );
   });
 

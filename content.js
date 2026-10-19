@@ -10,31 +10,16 @@
 
 const MIN_VIDEO_PX = 120; // ignore tiny players (ads, trackers)
 
-// Video platforms yt-dlp extracts (auth-gated/expiring CDN URLs or DRM):
-// detection only produces noise there. Keep in sync with
-// YTDLP_EXCLUSIVE_HOSTS in background.js — the worker gates the menu too,
-// for manifests sniffed without a page report.
-const DETECT_EXCLUDED_HOSTS = [
-  "youtube.com",
-  "youtu.be",
-  "vimeo.com",
-  "dailymotion.com",
-  "dai.ly",
-  "tiktok.com",
-  "instagram.com",
-  "facebook.com",
-  "fb.com",
-  "fb.watch",
-  "twitter.com",
-  "x.com",
-  "twitch.tv",
-];
-
-/// True for the host itself and any subdomain, never for lookalikes.
-function hostExcluded(host) {
-  const h = String(host || "").toLowerCase();
-  return DETECT_EXCLUDED_HOSTS.some((d) => h === d || h.endsWith("." + d));
-}
+// The worker and content script use one shared host exclusion list.
+const contentShared = typeof SHARED_EXCLUDED_HOSTS !== "undefined"
+  ? null
+  : (typeof module !== "undefined" && module.exports ? require("./shared.js") : null);
+const excludedHostList = typeof SHARED_EXCLUDED_HOSTS !== "undefined"
+  ? SHARED_EXCLUDED_HOSTS
+  : contentShared.SHARED_EXCLUDED_HOSTS;
+const isExcludedHost = typeof sharedHostExcluded === "function"
+  ? sharedHostExcluded
+  : contentShared.sharedHostExcluded;
 
 /// First http(s) candidate among currentSrc, src and <source> children.
 function usableVideoSrc(video) {
@@ -66,8 +51,8 @@ function isBigEnough(video) {
   return false;
 }
 
-/// Pure: whether a video counts as started — played at least once (the latch)
-/// and audible right now. Muted autoplay (ads, previews) is noise: the latch
+/// Whether a video counts as started — latched after play, or actively
+/// playing with usable data. Muted autoplay (ads, previews) is noise: the latch
 /// is kept so unmuting counts immediately, but muted videos never report.
 function isStartedVideo(v, played) {
   if (!v) return false;
@@ -89,12 +74,7 @@ function allVideos(root) {
   if (!root || !root.querySelectorAll) return out;
   for (const v of root.querySelectorAll("video")) out.push(v);
   for (const el of root.querySelectorAll("*")) {
-    if (el.shadowRoot) {
-      // Wire the root's listeners while traversing: one pass collects
-      // videos and attaches listeners, instead of two full DOM walks.
-      wireShadowRoot(el.shadowRoot);
-      out.push(...allVideos(el.shadowRoot));
-    }
+    if (el.shadowRoot) out.push(...allVideos(el.shadowRoot));
   }
   return out;
 }
@@ -155,12 +135,15 @@ if (
   typeof document !== "undefined" &&
   // No reporting where detection can't produce a downloadable URL; the
   // worker applies the same gate to sniffed manifests.
-  (typeof location === "undefined" || !hostExcluded(location.hostname))
+  (typeof location === "undefined" || !isExcludedHost(location.hostname))
 ) {
   const played = new WeakSet();
   let lastSent = "";
 
   function report() {
+    // Full scans happen on startup, media events, and worker rescan requests,
+    // not on every pointer/click interaction.
+    wireOpenShadowRoots(document);
     const videos = collectVideos(document, (v) => isStartedVideo(v, played));
     const title = pageVideoTitle(document);
     // The title is part of the snapshot: an SPA can change it with no new
@@ -234,26 +217,29 @@ if (
   // The decoded height only exists once metadata has loaded.
   document.addEventListener("loadedmetadata", () => scheduleReport(), true);
 
-  // Composed events (click, pointerdown) DO cross shadow boundaries.
-  // A user interacting with a shadow-root player triggers a sweep, which
-  // wires the root's listeners so subsequent play events are caught.
-  // (keydown omitted: typing in a comment box would spam sweeps.)
-  const sweepOnInteract = () => scheduleReport();
-  document.addEventListener("click", sweepOnInteract, true);
-  document.addEventListener("pointerdown", sweepOnInteract, true);
-
-  // Initial sweep: latch videos already playing when this script ran; the
-  // audible check happens at collect time. Muted autoplay is noise.
-  if (document.querySelectorAll) {
-    let latched = false;
-    for (const v of allVideos(document)) {
-      if (!v.muted && !v.paused && !v.ended && (v.readyState || 0) > 2) {
-        played.add(v);
-        latched = true;
+  /// Discover roots during a deliberate scan, separately from pure collection.
+  function wireOpenShadowRoots(root) {
+    if (!root || !root.querySelectorAll) return;
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot) {
+        wireShadowRoot(el.shadowRoot);
+        wireOpenShadowRoots(el.shadowRoot);
       }
     }
-    if (latched) scheduleReport();
   }
+
+  // Pointer/click events expose the open shadow roots on the event path. Wire
+  // only those roots; don't walk every node on the page for each interaction.
+  function wireShadowRootsOnPath(event) {
+    if (!event || typeof event.composedPath !== "function") return;
+    for (const node of event.composedPath()) {
+      if (!node) continue;
+      if (node.nodeType === 11 && node.host) wireShadowRoot(node);
+      if (node.shadowRoot) wireShadowRoot(node.shadowRoot);
+    }
+  }
+  document.addEventListener("click", wireShadowRootsOnPath, true);
+  document.addEventListener("pointerdown", wireShadowRootsOnPath, true);
 
   chrome.runtime.onMessage.addListener((msg) => {
     // The worker is ephemeral; its in-memory finds die with it, so it asks
@@ -269,5 +255,5 @@ if (
 
 // Test hook for node:test.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { collectVideos, usableVideoSrc, hostExcluded, DETECT_EXCLUDED_HOSTS, MIN_VIDEO_PX, pageVideoTitle, isStartedVideo };
+  module.exports = { collectVideos, usableVideoSrc, hostExcluded: isExcludedHost, DETECT_EXCLUDED_HOSTS: excludedHostList, MIN_VIDEO_PX, pageVideoTitle, isStartedVideo };
 }

@@ -2,11 +2,9 @@
 // Single source of truth for the save normalization.
 
 // Shared defaults live in shared.js (loaded via <script> before this file).
-const DEFAULTS = SHARED_DEFAULTS;
-
 /// Load settings from sync storage, filling in defaults.
 async function loadSettings() {
-  return chrome.storage.sync.get(DEFAULTS);
+  return chrome.storage.sync.get(SHARED_DEFAULTS);
 }
 
 /// Normalize raw form values into storable settings.
@@ -85,14 +83,6 @@ function bindSettingsForm(doc) {
 // The pairing code is a secret for this machine's Grab, so it is kept in local
 // storage (never sync) and is not part of normalizeSettings().
 
-// Shared pattern lives in shared.js.
-const PAIRING_CODE_RE = SHARED_PAIRING_CODE_RE;
-
-/// Normalize what the user pasted: whitespace and case are forgiven.
-function normalizePairingCode(raw) {
-  return String(raw || "").replace(/\s+/g, "").toLowerCase();
-}
-
 async function loadPairingCode() {
   const { pairingCode } = await chrome.storage.local.get({ pairingCode: "" });
   return pairingCode;
@@ -101,7 +91,7 @@ async function loadPairingCode() {
 /// Store a code ("" clears it). Returns false for a malformed code.
 async function savePairingCode(raw) {
   const code = normalizePairingCode(raw);
-  if (code !== "" && !PAIRING_CODE_RE.test(code)) return false;
+  if (code !== "" && !SHARED_PAIRING_CODE_RE.test(code)) return false;
   await chrome.storage.local.set({ pairingCode: code });
   return true;
 }
