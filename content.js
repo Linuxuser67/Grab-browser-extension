@@ -9,6 +9,7 @@
 // same trick FDM/IDM-style downloaders use.
 
 const MIN_VIDEO_PX = 120; // ignore tiny players (ads, trackers)
+const RECENT_STOP_MS = 30_000; // keep a paused/ended video briefly for the context menu
 
 // The worker and content script use one shared host exclusion list.
 const contentShared = typeof SHARED_EXCLUDED_HOSTS !== "undefined"
@@ -51,11 +52,13 @@ function isBigEnough(video) {
   return false;
 }
 
-/// A video is eligible only after a user-initiated play (the `played` latch).
-/// Playback state alone is not enough: autoplay and inline previews must not
-/// appear in the detected-video menu.
-function isStartedVideo(v, played) {
-  return !!v && !!played && played.has(v);
+/// Only actively playing videos or recently paused/ended videos stay in
+/// the menu. The user-play latch still excludes autoplay and inline previews.
+function isStartedVideo(v, played, stoppedAt, now = Date.now()) {
+  if (!v || !played || !played.has(v)) return false;
+  if (!v.paused && !v.ended) return true;
+  const stopped = stoppedAt && stoppedAt.get(v);
+  return Number.isFinite(stopped) && now >= stopped && now - stopped < RECENT_STOP_MS;
 }
 
 /// All <video> elements under `root`, piercing open shadow roots (custom
@@ -128,13 +131,15 @@ if (
   (typeof location === "undefined" || !isExcludedHost(location.hostname))
 ) {
   const played = new WeakSet();
+  const stoppedAt = new WeakMap();
+  const stopTimers = new WeakMap();
   let lastSent = "";
 
   function report() {
     // Full scans happen on startup, media events, and worker rescan requests,
     // not on every pointer/click interaction.
     wireOpenShadowRoots(document);
-    const videos = collectVideos(document, (v) => isStartedVideo(v, played));
+    const videos = collectVideos(document, (v) => isStartedVideo(v, played, stoppedAt));
     const title = pageVideoTitle(document);
     // The title is part of the snapshot: an SPA can change it with no new
     // video, and the menu labels must follow.
@@ -154,25 +159,58 @@ if (
     timer = setTimeout(report, 400);
   }
 
+  function clearStoppedState(video) {
+    const timerId = stopTimers.get(video);
+    if (timerId !== undefined) clearTimeout(timerId);
+    stopTimers.delete(video);
+    stoppedAt.delete(video);
+  }
+
+  function markStopped(video) {
+    if (!played.has(video)) return;
+    stoppedAt.set(video, Date.now());
+    const oldTimer = stopTimers.get(video);
+    if (oldTimer !== undefined) clearTimeout(oldTimer);
+    // Remove the entry automatically after the grace period even if the page
+    // emits no further media events.
+    const timerId = setTimeout(() => {
+      stopTimers.delete(video);
+      if (video.paused || video.ended) scheduleReport();
+    }, RECENT_STOP_MS + 25);
+    stopTimers.set(video, timerId);
+    scheduleReport();
+  }
+
   function onPlay(e) {
     const t = e && e.target;
     if (!t || t.tagName !== "VIDEO") return;
-    // Only count play events while the browser reports transient user
-    // activation. Unmuted autoplay and inline previews must not be mistaken
-    // for media the user chose to play.
+    // Only latch a new video while the browser reports transient user
+    // activation; autoplay and inline previews stay out of the menu.
     const userActive =
       typeof navigator !== "undefined" &&
       navigator.userActivation &&
       navigator.userActivation.isActive;
     if (userActive) {
       played.add(t);
+      clearStoppedState(t);
+      scheduleReport();
+    } else if (played.has(t)) {
+      // A previously user-started video resumed without a fresh activation.
+      clearStoppedState(t);
       scheduleReport();
     }
   }
+
+  function onStopped(e) {
+    const t = e && e.target;
+    if (t && t.tagName === "VIDEO") markStopped(t);
+  }
+
   function onEmptied(e) {
     const t = e && e.target;
     if (t && t.tagName === "VIDEO") {
       played.delete(t);
+      clearStoppedState(t);
       scheduleReport();
     }
   }
@@ -186,6 +224,8 @@ if (
     shadowRootsWired.add(sr);
     sr.addEventListener("play", onPlay, true);
     sr.addEventListener("playing", onPlay, true);
+    sr.addEventListener("pause", onStopped, true);
+    sr.addEventListener("ended", onStopped, true);
     sr.addEventListener("emptied", onEmptied, true);
     sr.addEventListener("loadedmetadata", () => scheduleReport(), true);
   }
@@ -193,6 +233,8 @@ if (
   // play/playing don't bubble; capture at the document.
   document.addEventListener("play", onPlay, true);
   document.addEventListener("playing", onPlay, true);
+  document.addEventListener("pause", onStopped, true);
+  document.addEventListener("ended", onStopped, true);
   document.addEventListener("emptied", onEmptied, true);
   // The decoded height only exists once metadata has loaded.
   document.addEventListener("loadedmetadata", () => scheduleReport(), true);
@@ -235,5 +277,5 @@ if (
 
 // Test hook for node:test.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { collectVideos, usableVideoSrc, hostExcluded: isExcludedHost, DETECT_EXCLUDED_HOSTS: excludedHostList, MIN_VIDEO_PX, pageVideoTitle, isStartedVideo };
+  module.exports = { collectVideos, usableVideoSrc, hostExcluded: isExcludedHost, DETECT_EXCLUDED_HOSTS: excludedHostList, MIN_VIDEO_PX, RECENT_STOP_MS, pageVideoTitle, isStartedVideo };
 }
