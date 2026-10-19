@@ -254,13 +254,9 @@ describe("classifyStream", () => {
     }
   });
 
-  test("Reddit DASH audio-only files are not classified as video", () => {
+  test("MP4 URLs with an audio content type are not classified as video", () => {
     assert.equal(
-      bg.classifyStream("https://v.redd.it/abc123/DASH_AUDIO_128.mp4", "video/mp4"),
-      null
-    );
-    assert.equal(
-      bg.classifyStream("https://v.redd.it/abc123/DASH_AUDIO_128.mp4", "audio/mp4"),
+      bg.classifyStream("https://cdn.example.com/video-42/audio.mp4", "audio/mp4"),
       null
     );
   });
@@ -309,28 +305,28 @@ describe("mergeVideoFinds", () => {
     assert.deepEqual(merged, ["https://a.example/s.m3u8"]);
   });
 
-  test("Reddit HLS, DASH, and MP4 renditions produce one entry for a video", () => {
+  test("HLS, DASH, and direct renditions produce one entry for a stream", () => {
     const merged = bg.mergeVideoFinds(
-      [{ src: "https://v.redd.it/abc123/DASH_720.mp4?source=fallback", blob: false }],
+      [{ src: "https://cdn.example.com/clip-abc/DASH_720.mp4?source=fallback", blob: false }],
       [
-        "https://v.redd.it/abc123/DASH_360.mp4",
-        "https://v.redd.it/abc123/DASHPlaylist.mpd",
-        "https://v.redd.it/abc123/HLSPlaylist.m3u8",
+        "https://cdn.example.com/clip-abc/DASH_360.mp4",
+        "https://cdn.example.com/clip-abc/DASHPlaylist.mpd",
+        "https://cdn.example.com/clip-abc/HLSPlaylist.m3u8",
       ]
     );
-    assert.deepEqual(merged, ["https://v.redd.it/abc123/HLSPlaylist.m3u8"]);
+    assert.deepEqual(merged, ["https://cdn.example.com/clip-abc/HLSPlaylist.m3u8"]);
   });
 
-  test("distinct Reddit video ids remain separate entries", () => {
+  test("separate stream directories remain separate entries", () => {
     const merged = bg.mergeVideoFinds([], [
-      "https://v.redd.it/abc123/DASHPlaylist.mpd",
-      "https://v.redd.it/xyz789/HLSPlaylist.m3u8",
-      "https://v.redd.it/abc123/DASH_1080.mp4",
-      "https://v.redd.it/xyz789/DASH_720.mp4",
+      "https://cdn.example.com/clip-a/DASHPlaylist.mpd",
+      "https://cdn.example.com/clip-b/HLSPlaylist.m3u8",
+      "https://cdn.example.com/clip-a/DASH_1080.mp4",
+      "https://cdn.example.com/clip-b/DASH_720.mp4",
     ]);
     assert.deepEqual(merged, [
-      "https://v.redd.it/abc123/DASHPlaylist.mpd",
-      "https://v.redd.it/xyz789/HLSPlaylist.m3u8",
+      "https://cdn.example.com/clip-a/DASHPlaylist.mpd",
+      "https://cdn.example.com/clip-b/HLSPlaylist.m3u8",
     ]);
   });
 
@@ -467,6 +463,11 @@ describe("isStartedVideo (content script)", () => {
     for (const v of videos) s.add(v);
     return s;
   };
+  const stoppedMap = (entries = []) => {
+    const m = new WeakMap();
+    for (const [video, at] of entries) m.set(video, at);
+    return m;
+  };
   const pv = (opts) => ({
     muted: false,
     paused: true,
@@ -476,37 +477,48 @@ describe("isStartedVideo (content script)", () => {
     ...opts,
   });
 
-  test("latched videos count even when paused (pause to right-click)", () => {
+  test("user-started videos stay listed while actively playing", () => {
+    const video = pv({ paused: false, currentTime: 42 });
+    assert.equal(content.isStartedVideo(video, playedSet([video]), stoppedMap(), 100_000), true);
+  });
+
+  test("a recently paused or ended video stays listed briefly", () => {
+    const paused = pv({ paused: true, currentTime: 42 });
+    const ended = pv({ paused: true, ended: true, currentTime: 42 });
+    const played = playedSet([paused, ended]);
+    const stopped = stoppedMap([[paused, 80_000], [ended, 85_000]]);
+    assert.equal(content.isStartedVideo(paused, played, stopped, 100_000), true);
+    assert.equal(content.isStartedVideo(ended, played, stopped, 100_000), true);
+  });
+
+  test("paused or ended videos disappear after the grace period", () => {
     const video = pv({ paused: true, currentTime: 42 });
-    assert.equal(content.isStartedVideo(video, playedSet([video])), true);
-  });
-
-  test("latched muted videos count; unlatched muted autoplay does not", () => {
-    const latched = pv({ muted: true, paused: true, currentTime: 42 });
-    assert.equal(content.isStartedVideo(latched, playedSet([latched])), true);
-    const autoplaying = pv({ muted: true, paused: false, currentTime: 5 });
-    assert.equal(content.isStartedVideo(autoplaying, playedSet([])), false);
-  });
-
-  test("audibly playing autoplay videos do not count without a user-play latch", () => {
     assert.equal(
-      content.isStartedVideo(
-        pv({ muted: false, paused: false, currentTime: 5, readyState: 4 }),
-        playedSet([])
-      ),
+      content.isStartedVideo(video, playedSet([video]), stoppedMap([[video, 10_000]]), 10_000 + content.RECENT_STOP_MS),
       false
     );
   });
 
-  test("paused, ended, or unstarted videos do not count", () => {
+  test("unlatched autoplay and muted previews do not count", () => {
     const empty = playedSet([]);
-    assert.equal(content.isStartedVideo(pv({ paused: true, currentTime: 0 }), empty), false);
     assert.equal(
-      content.isStartedVideo(pv({ paused: false, ended: true, currentTime: 5 }), empty),
+      content.isStartedVideo(pv({ muted: false, paused: false, currentTime: 5 }), empty),
       false
     );
-    assert.equal(content.isStartedVideo(pv({ paused: false, currentTime: 0 }), empty), false);
-    assert.equal(content.isStartedVideo(null, empty), false);
+    assert.equal(
+      content.isStartedVideo(pv({ muted: true, paused: false, currentTime: 5 }), empty),
+      false
+    );
+  });
+
+  test("paused, ended, or unstarted videos with no recent-stop record do not count", () => {
+    const empty = playedSet([]);
+    const paused = pv({ paused: true, currentTime: 0 });
+    const ended = pv({ paused: false, ended: true, currentTime: 5 });
+    assert.equal(content.isStartedVideo(paused, playedSet([paused]), stoppedMap()), false);
+    assert.equal(content.isStartedVideo(ended, playedSet([ended]), stoppedMap()), false);
+    assert.equal(content.isStartedVideo(paused, empty, stoppedMap()), false);
+    assert.equal(content.isStartedVideo(null, empty, stoppedMap()), false);
   });
 });
 
