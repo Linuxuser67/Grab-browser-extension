@@ -37,8 +37,6 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 // Shared defaults live in shared.js (importScripts'd above).
-const DEFAULTS = SHARED_DEFAULTS;
-
 /// Wrap an http(s) URL for the Grab desktop app. Anything else (blob:, data:,
 /// file:, …) cannot be handed off and returns null. The original scheme is
 /// carried as the first path segment (grab://https/host/...) so Grab can
@@ -117,7 +115,6 @@ function _setSleep(fn) {
 const SERVER_CONTEXT = "grab-server\u0000";
 const CLIENT_CONTEXT = "grab-client\u0000";
 // Shared pattern lives in shared.js.
-const PAIRING_CODE_RE = SHARED_PAIRING_CODE_RE;
 const STATUS_UNVERIFIED = -1;
 /// The POST was sent but the answer never arrived (timeout or connection
 /// drop): Grab may have accepted it. Never fall back to grab:// here —
@@ -129,8 +126,8 @@ const STATUS_MAYBE_SENT = -2;
 async function getPairingCode() {
   try {
     const { pairingCode } = await chrome.storage.local.get({ pairingCode: "" });
-    const code = String(pairingCode || "").replace(/\s+/g, "").toLowerCase();
-    return PAIRING_CODE_RE.test(code) ? code : "";
+    const code = normalizePairingCode(pairingCode);
+    return SHARED_PAIRING_CODE_RE.test(code) ? code : "";
   } catch {
     return "";
   }
@@ -366,15 +363,30 @@ async function explicitSend(url, tabId, incognito) {
       if (Number.isInteger(tabId) && tabId >= 0) warnedTabs.add(tabId);
     } catch {}
   } else if (status >= 200 && status < 300) {
-    // Success: clear any earlier squatter warning.
+    // Success: clear any earlier warning.
     try {
       await chrome.action.setBadgeText({ ...tabArg, text: "" });
       await chrome.action.setTitle({ ...tabArg, title: "" });
       if (Number.isInteger(tabId) && tabId >= 0) warnedTabs.delete(tabId);
     } catch {}
+  } else if (status !== STATUS_MAYBE_SENT) {
+    // Concrete HTTP rejections (especially exhausted 429 retries, 408, or
+    // 409) need visible feedback. Never fall back to grab:// after a response.
+    const title = status === 408
+      ? "Grab did not respond in time (HTTP 408). Check Grab before retrying."
+      : status === 409
+        ? "Grab did not queue this URL (HTTP 409). Check the Grab dialog."
+        : status === 429
+          ? "Grab's queue is full after retries (HTTP 429). Try again after a download finishes."
+          : `Grab could not accept this URL (HTTP ${status}).`;
+    try {
+      await chrome.action.setBadgeText({ ...tabArg, text: "!" });
+      await chrome.action.setBadgeBackgroundColor({ ...tabArg, color: "#cc0000" });
+      await chrome.action.setTitle({ ...tabArg, title });
+    } catch {}
   }
-  // STATUS_MAYBE_SENT or other HTTP statuses: Grab (or the card) handled
-  // it, or may have. Never fall back — that risks a duplicate.
+  // STATUS_MAYBE_SENT may have been accepted; never fall back because that
+  // risks a duplicate download.
 }
 
 /// True when the URL's file extension is on the user's skip list.
@@ -395,7 +407,7 @@ function isSkipped(url, skipTypes) {
 }
 
 async function getSettings() {
-  return chrome.storage.sync.get(DEFAULTS);
+  return chrome.storage.sync.get(SHARED_DEFAULTS);
 }
 
 /// Per-download claim keys in session storage: one key per download id, so two
@@ -823,33 +835,7 @@ function removeContextMenu(id) {
 }
 const MAX_VIDEO_ITEMS = 8;
 
-/// Video platforms yt-dlp extracts: their players use auth-gated/expiring
-/// CDN URLs (or DRM), so a detected media URL handed to Grab can't succeed —
-/// listing them only produces noise. Detection stays off on these hosts;
-/// sending the page itself keeps going through yt-dlp the old way, which is
-/// what handles them. Subdomains are covered by hostExcluded below.
-const YTDLP_EXCLUSIVE_HOSTS = [
-  "youtube.com",
-  "youtu.be",
-  "vimeo.com",
-  "dailymotion.com",
-  "dai.ly",
-  "tiktok.com",
-  "instagram.com",
-  "facebook.com",
-  "fb.com",
-  "fb.watch",
-  "twitter.com",
-  "x.com",
-  "twitch.tv",
-];
-
-/// True for the host itself and any subdomain ("www.tiktok.com"), never for
-/// lookalikes ("tiktok.com.evil.com", "nottiktok.com").
-function hostExcluded(host) {
-  const h = String(host || "").toLowerCase();
-  return YTDLP_EXCLUSIVE_HOSTS.some((d) => h === d || h.endsWith("." + d));
-}
+// Host exclusion domains and their predicate are defined once in shared.js.
 
 /// True when the tab lives on an excluded host. Host permissions are granted,
 /// so tabs.get exposes the URL; anything odd (no tab, weird URL) is treated
@@ -858,7 +844,7 @@ async function isExcludedTab(tabId) {
   try {
     const tab = await chrome.tabs.get(tabId);
     const url = tab && tab.url;
-    return !!url && hostExcluded(new URL(url).hostname);
+    return !!url && sharedHostExcluded(new URL(url).hostname);
   } catch {
     return false;
   }
@@ -1004,6 +990,137 @@ function mergeVideoFinds(domVideos, sniffedUrls) {
 // runs in all frames; last-writer-wins per tab would drop other frames'
 // videos whenever two frames report at different times.
 const videoFinds = new Map();
+
+/// Storage.session outlives an MV3 service-worker instance and is cleared when
+/// the browser session ends. Persist the active discovery snapshot so a blob:
+/// player still has its sniffed manifest after the worker is restarted.
+const videoStateKey = (tabId) => `videoFinds:${tabId}`;
+const restoredVideoFinds = new Set();
+const restoringVideoFinds = new Map();
+const videoStateWrites = new Map();
+
+/// Serialize session-storage mutations per tab, so navigation cleanup cannot
+/// be overtaken by a write queued for the previous document.
+function enqueueVideoStateWrite(tabId, write) {
+  const previous = videoStateWrites.get(tabId) || Promise.resolve();
+  const next = previous.catch(() => {}).then(write);
+  videoStateWrites.set(tabId, next);
+  next.finally(() => {
+    if (videoStateWrites.get(tabId) === next) videoStateWrites.delete(tabId);
+  }).catch(() => {});
+  return next;
+}
+
+function snapshotVideoFinds(finds) {
+  const frames = [];
+  // The menu is capped at eight URLs. Bound persisted data on pages with many
+  // iframes/videos; retain a blob marker when present to pair with manifests.
+  let frameCount = 0;
+  for (const [frameId, videos] of finds.frames) {
+    if (frameCount++ >= 32) break;
+    const out = [];
+    const seen = new Set();
+    let hasBlob = false;
+    for (const video of videos || []) {
+      if (video && typeof video.src === "string" && video.src && !seen.has(video.src)) {
+        if (seen.size < MAX_VIDEO_ITEMS) {
+          seen.add(video.src);
+          const saved = { src: video.src, blob: video.blob === true };
+          if (Number.isFinite(video.height) && video.height > 0) saved.height = video.height;
+          out.push(saved);
+        }
+      } else if (video && video.blob === true && !hasBlob) {
+        hasBlob = true;
+        out.push({ src: null, blob: true });
+      }
+      if (out.length >= MAX_VIDEO_ITEMS + 1) break;
+    }
+    if (out.length) frames.push([frameId, out]);
+  }
+  return {
+    frames,
+    sniffed: (finds.sniffed || []).filter((url) => typeof url === "string" && url).slice(-50),
+    kinds: [...(finds.kinds || new Map()).entries()].slice(-200),
+    title: typeof finds.title === "string" ? finds.title : "",
+  };
+}
+
+async function restoreVideoFinds(tabId) {
+  if (!Number.isInteger(tabId) || tabId < 0 || restoredVideoFinds.has(tabId)) return;
+  const current = restoringVideoFinds.get(tabId);
+  if (current) {
+    await current;
+    return;
+  }
+  const restoring = (async () => {
+    try {
+      const queued = videoStateWrites.get(tabId);
+      if (queued) await queued.catch(() => {});
+      const key = videoStateKey(tabId);
+      const result = await chrome.storage.session.get(key);
+      // Navigation/removal may invalidate the tab while the read is pending.
+      if (restoredVideoFinds.has(tabId)) return;
+      const saved = result && result[key];
+      if (saved && typeof saved === "object") {
+        const frames = new Map();
+        for (const pair of Array.isArray(saved.frames) ? saved.frames : []) {
+          if (!Array.isArray(pair) || pair.length !== 2 || !Number.isInteger(pair[0]) || !Array.isArray(pair[1])) continue;
+          const videos = pair[1].filter((video) => video && typeof video === "object").map((video) => {
+            const item = { src: typeof video.src === "string" ? video.src : null, blob: video.blob === true };
+            if (Number.isFinite(video.height) && video.height > 0) item.height = video.height;
+            return item;
+          });
+          frames.set(pair[0], videos);
+        }
+        const sniffed = Array.isArray(saved.sniffed)
+          ? saved.sniffed.filter((url) => typeof url === "string" && url).slice(-50)
+          : [];
+        const kinds = new Map(
+          (Array.isArray(saved.kinds) ? saved.kinds : []).filter((pair) =>
+            Array.isArray(pair) && pair.length === 2 &&
+            typeof pair[0] === "string" &&
+            (pair[1] === "manifest" || pair[1] === "media")
+          ).slice(-200)
+        );
+        videoFinds.set(tabId, {
+          frames,
+          sniffed,
+          kinds,
+          title: typeof saved.title === "string" ? saved.title : "",
+        });
+      }
+    } catch {
+      // Session storage may be unavailable; fresh reports can still recover.
+    } finally {
+      restoredVideoFinds.add(tabId);
+      restoringVideoFinds.delete(tabId);
+    }
+  })();
+  restoringVideoFinds.set(tabId, restoring);
+  await restoring;
+}
+
+async function persistVideoFinds(tabId) {
+  const finds = videoFinds.get(tabId);
+  if (!finds || !Number.isInteger(tabId) || tabId < 0) return;
+  restoredVideoFinds.add(tabId);
+  const snapshot = snapshotVideoFinds(finds);
+  try {
+    await enqueueVideoStateWrite(tabId, () =>
+      chrome.storage.session.set({ [videoStateKey(tabId)]: snapshot })
+    );
+  } catch {
+    // Fresh reports can still rebuild the menu if session storage fails.
+  }
+}
+
+function forgetVideoFinds(tabId) {
+  if (!Number.isInteger(tabId) || tabId < 0) return;
+  restoredVideoFinds.add(tabId);
+  return enqueueVideoStateWrite(tabId, () =>
+    chrome.storage.session.remove(videoStateKey(tabId))
+  ).catch(() => {});
+}
 /// Tabs showing the "unverified Grab" warning badge. The video-menu code
 /// blanks badges on tab switches; warned tabs keep their "!" until Grab
 /// verifies successfully.
@@ -1012,7 +1129,7 @@ let activeTabId = null;
 /// The URLs behind the submenu items as last built (after filtering): a
 /// click index resolves here, never against a fresh, differently-ordered list.
 let menuUrls = [];
-let detectVideosOn = DEFAULTS.detectVideos;
+let detectVideosOn = SHARED_DEFAULTS.detectVideos;
 
 getSettings().then((s) => {
   detectVideosOn = s.detectVideos !== false;
@@ -1096,6 +1213,7 @@ function safeMenuCreate(props) {
 }
 
 async function doRefreshVideoMenu(tabId) {
+  await restoreVideoFinds(tabId);
   const rebuild = async () => {
     // Re-read: the finds may have changed while the remove was in flight.
     // Played-only menu: the content script reports just videos the user started,
@@ -1183,6 +1301,7 @@ async function doRefreshVideoMenu(tabId) {
 
 function clearVideoUi(tabId) {
   videoFinds.delete(tabId);
+  forgetVideoFinds(tabId);
   warnedTabs.delete(tabId);
   if (tabId === activeTabId) {
     refreshVideoMenu(tabId); // rebuild sees no finds: drops the menu
@@ -1194,8 +1313,21 @@ function clearVideoUi(tabId) {
 }
 
 function clearAllVideoUi() {
-  const tabIds = [...videoFinds.keys()];
+  const tabIds = [...new Set([...videoFinds.keys(), activeTabId])]
+    .filter((id) => Number.isInteger(id) && id >= 0);
   videoFinds.clear();
+  for (const id of tabIds) forgetVideoFinds(id);
+  // Clear records for inactive tabs restored by a previous worker instance.
+  chrome.storage.session.get(null).then((stored) => {
+    for (const key of Object.keys(stored || {})) {
+      if (!key.startsWith("videoFinds:")) continue;
+      const id = Number(key.slice("videoFinds:".length));
+      if (Number.isInteger(id) && id >= 0) {
+        videoFinds.delete(id);
+        forgetVideoFinds(id);
+      }
+    }
+  }).catch(() => {});
   refreshVideoMenu(activeTabId);
   for (const id of tabIds) {
     if (warnedTabs.has(id)) continue;
@@ -1254,7 +1386,9 @@ chrome.webRequest.onResponseStarted.addListener(
     // auth-gated URLs, so sniffed manifests are unusable noise. Filtering
     // here (not just at menu-build) keeps videoFinds clean.
     if (await isExcludedTab(details.tabId)) return;
+    await restoreVideoFinds(details.tabId);
     noteSniffed(details.tabId, details.url, kind);
+    await persistVideoFinds(details.tabId);
     onVideoEvent(details.tabId);
     // A sniffed manifest may belong to a shadow-root player whose play
     // events never reach the document. Nudge the tab to re-sweep (wiring
@@ -1278,10 +1412,11 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
   if (tabId == null || tabId < 0) return;
   // Same collection-time filter: sender.tab.url is available synchronously.
   try {
-    if (sender.tab.url && hostExcluded(new URL(sender.tab.url).hostname)) return;
+    if (sender.tab.url && sharedHostExcluded(new URL(sender.tab.url).hostname)) return;
   } catch {
     // Unparseable URL: fall through and let the menu-build check decide.
   }
+  await restoreVideoFinds(tabId);
   const frameId = sender && sender.frameId != null ? sender.frameId : 0;
   let f = videoFinds.get(tabId);
   if (!f) {
@@ -1307,7 +1442,10 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
   }
   // Skip the menu rebuild when nothing changed: a page with many iframes
   // would otherwise rebuild the menu once per frame on every load.
-  if (changed) onVideoEvent(tabId);
+  if (changed) {
+    await persistVideoFinds(tabId);
+    onVideoEvent(tabId);
+  }
 });
 
 chrome.tabs.onActivated.addListener((info) => {
@@ -1330,6 +1468,7 @@ if (chrome.windows && chrome.windows.onFocusChanged) {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   videoFinds.delete(tabId);
+  forgetVideoFinds(tabId);
   warnedTabs.delete(tabId);
 });
 
@@ -1373,7 +1512,7 @@ if (typeof module !== "undefined" && module.exports) {
     removeAllContextMenus,
     removeContextMenu,
     pendingKey,
-    hostExcluded,
+    hostExcluded: sharedHostExcluded,
     handOff,
     _setSleep,
     postToGrab,
@@ -1381,12 +1520,14 @@ if (typeof module !== "undefined" && module.exports) {
     requestRescan,
     postToGrabWithRetry,
     verifyGrab,
-    YTDLP_EXCLUSIVE_HOSTS,
-    DEFAULTS,
+    YTDLP_EXCLUSIVE_HOSTS: SHARED_EXCLUDED_HOSTS,
+    DEFAULTS: SHARED_DEFAULTS,
     SIZE_WAIT_MS,
     GRAB_SCHEME,
     // Test hook: inspect per-tab detections.
     _videoFinds: videoFinds,
     _warnedTabs: warnedTabs,
+    _restoreVideoFinds: restoreVideoFinds,
+    _persistVideoFinds: persistVideoFinds,
   };
 }

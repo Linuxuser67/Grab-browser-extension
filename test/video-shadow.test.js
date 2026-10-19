@@ -100,6 +100,24 @@ describe("shadow-root video detection (jsdom)", { skip: !JSDOM }, () => {
     }
   });
 
+  test("ordinary pointer/click events do not trigger a page-wide DOM sweep", () => {
+    const dom = new JSDOM("<!DOCTYPE html><body><div id='outside'></div></body>", { url: "https://example.com/" });
+    const { document, window, cleanup } = loadContent(dom);
+    try {
+      let wildcardQueries = 0;
+      const original = document.querySelectorAll.bind(document);
+      document.querySelectorAll = (selector) => {
+        if (selector === "*") wildcardQueries++;
+        return original(selector);
+      };
+      document.dispatchEvent(new window.MouseEvent("pointerdown", { bubbles: true, composed: true }));
+      document.dispatchEvent(new window.MouseEvent("click", { bubbles: true, composed: true }));
+      assert.equal(wildcardQueries, 0, "interaction handlers should inspect the event path only");
+    } finally {
+      cleanup();
+    }
+  });
+
   test("light-DOM video still reports (control)", async () => {
     const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
     const { messages, document, window, cleanup } = loadContent(dom);
