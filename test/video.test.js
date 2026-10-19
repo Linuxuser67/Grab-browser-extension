@@ -214,13 +214,13 @@ describe("classifyStream", () => {
         { type: "grab-videos-detected", videos: [{ src: "https://a.example.com/v.mp4", blob: false }], title },
         { tab: { id: 5 }, frameId }
       );
-    report(3, "From iframe");
+    await report(3, "From iframe");
     assert.equal(bg2._videoFinds.get(5).title, "From iframe", "gap filled by a subframe");
-    report(0, "First page title");
+    await report(0, "First page title");
     assert.equal(bg2._videoFinds.get(5).title, "First page title", "top frame wins");
-    report(3, "Another iframe");
+    await report(3, "Another iframe");
     assert.equal(bg2._videoFinds.get(5).title, "First page title", "subframe does not override");
-    report(0, "Next video after SPA navigation");
+    await report(0, "Next video after SPA navigation");
     assert.equal(bg2._videoFinds.get(5).title, "Next video after SPA navigation");
   });
 
