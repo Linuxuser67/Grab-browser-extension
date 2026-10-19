@@ -420,10 +420,13 @@ describe("isStartedVideo (content script)", () => {
     assert.equal(content.isStartedVideo(autoplaying, playedSet([])), false);
   });
 
-  test("audibly playing videos count without a latch (autoplay)", () => {
+  test("audibly playing autoplay videos do not count without a user-play latch", () => {
     assert.equal(
-      content.isStartedVideo(pv({ paused: false, currentTime: 5 }), playedSet([])),
-      true
+      content.isStartedVideo(
+        pv({ muted: false, paused: false, currentTime: 5, readyState: 4 }),
+        playedSet([])
+      ),
+      false
     );
   });
 

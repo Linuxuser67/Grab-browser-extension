@@ -1,9 +1,9 @@
 // Grab video detector (content script, isolated world, all frames).
 //
-// Reports <video> elements the user started playing (play-event latch; pause never
-// unlatches, a media reset does; muted autoplay is noise) that have usable
-// http(s) sources, to the background worker, which offers them in the
-// right-click menu ("Download video with Grab"). Videos whose source is a
+// Reports <video> elements the user chose to play (user-activated play-event
+// latch; pause never unlatches, a media reset does) that have usable http(s)
+// sources, to the background worker, which offers them in the right-click menu
+// ("Download video with Grab"). Videos whose source is a
 // blob: URL (MSE players) have no file behind them; those are flagged and the
 // worker pairs them with the stream manifests it sniffed via webRequest — the
 // same trick FDM/IDM-style downloaders use.
@@ -51,19 +51,11 @@ function isBigEnough(video) {
   return false;
 }
 
-/// Whether a video counts as started — latched after play, or actively
-/// playing with usable data. Muted autoplay (ads, previews) is noise: the latch
-/// is kept so unmuting counts immediately, but muted videos never report.
+/// A video is eligible only after a user-initiated play (the `played` latch).
+/// Playback state alone is not enough: autoplay and inline previews must not
+/// appear in the detected-video menu.
 function isStartedVideo(v, played) {
-  if (!v) return false;
-  // Latched (fired play): the user started it, count even if muted — a
-  // muted autoplay they later unmute must already be reported.
-  if (played.has(v)) return true;
-  // Not latched: muted autoplay is noise (ads), unmuted playing is real.
-  if (v.muted) return false;
-  // readyState > 2 (HAVE_FUTURE_DATA): playback actually proceeds, not
-  // stalled on buffering with a stale currentTime.
-  return !v.paused && !v.ended && (v.readyState || 0) > 2 && (v.currentTime || 0) > 0;
+  return !!v && !!played && played.has(v);
 }
 
 /// All <video> elements under `root`, piercing open shadow roots (custom
@@ -123,11 +115,9 @@ function pageVideoTitle(doc) {
 // --- Live wiring (browser only; the pure helpers above are unit-tested) ---
 //
 // Played-only detection: the menu offers a video only once the user started it.
-// A WeakSet latches each <video> on its first play event and never unlatches
-// on pause — the user pauses to right-click. A media reset (emptied) unlatches:
-// the new load is a video the user hasn't started. Muted videos are filtered at
-// collect time (muted autoplay is ad/preview noise); unmuting re-reports via
-// volumechange.
+// A WeakSet latches user-activated play events and never unlatches on pause —
+// the user pauses to right-click. A media reset (emptied) unlatches the new load.
+// Autoplay and player initialization events are not sufficient to latch a video.
 
 if (
   typeof chrome !== "undefined" &&
@@ -167,15 +157,14 @@ if (
   function onPlay(e) {
     const t = e && e.target;
     if (!t || t.tagName !== "VIDEO") return;
-    // Latch unmuted play outright. Latch muted play too when the user just
-    // interacted (userActivation.isActive, ~5s after click/tap/key): a muted
-    // video the user started is intent, not autoplay noise. Muted autoplay
-    // with no recent interaction stays unlatched until unmute (volumechange).
+    // Only count play events while the browser reports transient user
+    // activation. Unmuted autoplay and inline previews must not be mistaken
+    // for media the user chose to play.
     const userActive =
       typeof navigator !== "undefined" &&
       navigator.userActivation &&
       navigator.userActivation.isActive;
-    if (!t.muted || userActive) {
+    if (userActive) {
       played.add(t);
       scheduleReport();
     }
@@ -198,22 +187,13 @@ if (
     sr.addEventListener("play", onPlay, true);
     sr.addEventListener("playing", onPlay, true);
     sr.addEventListener("emptied", onEmptied, true);
-    sr.addEventListener("volumechange", onVolumeChange, true);
     sr.addEventListener("loadedmetadata", () => scheduleReport(), true);
-  }
-
-  function onVolumeChange(e) {
-    const t = e && e.target;
-    // Unmuting is user intent: latch it even if paused.
-    if (t && t.tagName === "VIDEO" && !t.muted) played.add(t);
-    scheduleReport();
   }
 
   // play/playing don't bubble; capture at the document.
   document.addEventListener("play", onPlay, true);
   document.addEventListener("playing", onPlay, true);
   document.addEventListener("emptied", onEmptied, true);
-  document.addEventListener("volumechange", onVolumeChange, true);
   // The decoded height only exists once metadata has loaded.
   document.addEventListener("loadedmetadata", () => scheduleReport(), true);
 
