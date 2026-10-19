@@ -876,7 +876,7 @@ function classifyStream(url, contentType) {
     return "manifest";
   }
   // Explicitly audio-typed responses are not video candidates.
-  if (/^audio\\//.test(ct)) return null;
+  if (/^audio\//.test(ct)) return null;
   if (/\.(mp4|m4v|webm|ogv|mov|mkv)$/.test(path)) return "media";
   return null;
 }
