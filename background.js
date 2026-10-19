@@ -875,6 +875,14 @@ function classifyStream(url, contentType) {
   ) {
     return "manifest";
   }
+  // Reddit's DASH audio track is also an .mp4 URL, but it isn't a video
+  // candidate. Other explicitly audio-typed responses aren't video files.
+  if (
+    /^audio\//.test(ct) ||
+    /(?:^|\/)DASH_AUDIO_\d+\.mp4$/i.test(path)
+  ) {
+    return null;
+  }
   if (/\.(mp4|m4v|webm|ogv|mov|mkv)$/.test(path)) return "media";
   return null;
 }
@@ -949,11 +957,10 @@ function manifestKind(url) {
 /// Menu model for one detected URL: {url, kind, rows}. `ctx.height` is
 /// the height the player reported for a direct file.
 function buildVideoEntry(url, ctx = {}) {
-  const kind = manifestKind(url);
-  const rows =
-    kind === "hls" || kind === "dash"
-      ? manifestMenuRows(url)
-      : [directMenuRow(url, ctx.height)];
+  const kind = manifestKind(url) || (ctx.kind === "manifest" ? "manifest" : null);
+  const rows = kind
+    ? manifestMenuRows(url)
+    : [directMenuRow(url, ctx.height)];
   return { url, kind, rows };
 }
 
@@ -968,21 +975,110 @@ function uniqueLabels(labels) {
 }
 
 
-/// Merge content-script reports (direct sources first) with sniffed stream
-/// URLs, deduplicated. blob: entries carry no URL; they fall back to the
-/// sniffed manifests.
-function mergeVideoFinds(domVideos, sniffedUrls) {
-  const out = [];
-  const seen = new Set();
-  const push = (u) => {
-    if (typeof u === "string" && u && !seen.has(u)) {
-      seen.add(u);
-      out.push(u);
+/// The same hosted video often has several transport/quality URLs:
+/// Reddit exposes HLS, DASH, and per-rendition MP4 paths; other sites may put
+/// a master playlist and direct renditions in one stream directory. Group
+/// those by video/stream identity and keep one usable representative URL.
+function redditVideoKey(url) {
+  try {
+    const p = new URL(url);
+    if (p.hostname.toLowerCase() !== "v.redd.it") return null;
+    const id = p.pathname.split("/").filter(Boolean)[0];
+    return id ? `${p.origin}/__reddit_video__/${id}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/// Directory key for standard-named HLS/DASH manifests. A direct rendition
+/// beside the manifest belongs to the same stream family, not a second video.
+function manifestFolderKey(url, kind) {
+  try {
+    const p = new URL(url);
+    const basename = p.pathname.split("/").filter(Boolean).pop() || "";
+    const namedManifest =
+      /^(?:hlsplaylist|dashplaylist|master|index|playlist|manifest|stream|dash|chunklist(?:[_-].*)?|prog_index(?:[_-].*)?)(?:[_-][a-z0-9]+)?\.(?:m3u8|m3u|mpd)$/i.test(basename);
+    const extensionlessManifest =
+      kind === "manifest" &&
+      !/\.[a-z0-9]{2,8}$/i.test(basename);
+    if (!namedManifest && !extensionlessManifest) return null;
+    const slash = p.pathname.lastIndexOf("/");
+    const parent = slash > 0 ? p.pathname.slice(0, slash) : "/";
+    return `${p.origin}${parent}`;
+  } catch {
+    return null;
+  }
+}
+
+/// Merge user-played DOM sources with sniffed requests. Exact path matches
+/// ignore rotating auth query strings; Reddit's video id and common HLS/DASH
+/// stream directories collapse the formats/renditions into one menu entry.
+function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
+  const candidates = [];
+  for (const v of domVideos || []) {
+    if (v && typeof v.src === "string" && v.src) {
+      candidates.push({ url: v.src, fromDom: true, kind: null });
     }
-  };
-  for (const v of domVideos || []) push(v && v.src);
-  for (const u of sniffedUrls || []) push(u);
-  return out;
+  }
+  for (const url of sniffedUrls || []) {
+    if (typeof url !== "string" || !url) continue;
+    const kind = (kinds && kinds.get(urlPathKey(url))) || null;
+    candidates.push({ url, fromDom: false, kind });
+  }
+
+  // First discover stream directories so sibling direct-file renditions can
+  // be grouped with their manifest regardless of request order.
+  const manifestFolders = new Set();
+  for (const item of candidates) {
+    const kind = manifestKind(item.url) || item.kind;
+    const folder = manifestFolderKey(item.url, kind);
+    if (folder) manifestFolders.add(folder);
+  }
+
+  const groups = new Map();
+  candidates.forEach((item, order) => {
+    const kind = manifestKind(item.url) || item.kind;
+    const redditKey = redditVideoKey(item.url);
+    let key = redditKey;
+    if (!key) {
+      const folder = manifestFolderKey(item.url, kind);
+      if (folder) {
+        key = `${folder}/__stream__`;
+      } else {
+        try {
+          const p = new URL(item.url);
+          const slash = p.pathname.lastIndexOf("/");
+          const parent = slash > 0 ? p.pathname.slice(0, slash) : "/";
+          const siblingFolder = `${p.origin}${parent}`;
+          key = manifestFolders.has(siblingFolder)
+            ? `${siblingFolder}/__stream__`
+            : urlPathKey(item.url);
+        } catch {
+          key = urlPathKey(item.url);
+        }
+      }
+    }
+
+    // Prefer a master playlist (HLS, then DASH) over a rendition-only MP4,
+    // which may omit the audio track. When no manifest exists, keep the
+    // player-reported URL ahead of a sniffed duplicate.
+    const priority =
+      kind === "hls" ? 30 :
+      kind === "dash" ? 20 :
+      kind === "manifest" ? 25 :
+      item.fromDom ? 10 : 5;
+    const existing = groups.get(key);
+    if (!existing) {
+      groups.set(key, { url: item.url, priority, order });
+    } else if (priority > existing.priority) {
+      existing.url = item.url;
+      existing.priority = priority;
+    }
+  });
+
+  return [...groups.values()]
+    .sort((a, b) => a.order - b.order)
+    .map((item) => item.url);
 }
 
 // Per-tab detections: tabId -> { frames: Map(frameId -> [{src, blob}]),
@@ -1145,7 +1241,9 @@ function domVideosFor(tabId) {
 
 function mergedVideoUrls(tabId) {
   const f = videoFinds.get(tabId);
-  return f ? mergeVideoFinds(domVideosFor(tabId), f.sniffed).slice(0, MAX_VIDEO_ITEMS) : [];
+  return f
+    ? mergeVideoFinds(domVideosFor(tabId), f.sniffed, f.kinds).slice(0, MAX_VIDEO_ITEMS)
+    : [];
 }
 
 function sniffedHeader(headers, name) {
@@ -1239,6 +1337,7 @@ async function doRefreshVideoMenu(tabId) {
       entries.push(
         buildVideoEntry(u, {
           height: heights.get(u),
+          kind: finds && finds.kinds && finds.kinds.get(urlPathKey(u)),
         }),
       );
     }
