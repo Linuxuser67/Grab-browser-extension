@@ -1,16 +1,14 @@
 // Grab video detector (content script, isolated world, all frames).
 //
-// Reports <video> elements the user chose to play (user-activated play-event
-// latch; pause never unlatches, a media reset does) that have usable http(s)
-// sources, to the background worker, which offers them in the right-click menu
+// Reports <video> elements the user chose to play that are still actively
+// playing and have usable http(s) sources. Pause/end reports explicitly retire
+// the entry from the background worker's right-click menu.
 // ("Download video with Grab"). Videos whose source is a
 // blob: URL (MSE players) have no file behind them; those are flagged and the
 // worker pairs them with the stream manifests it sniffed via webRequest — the
 // same trick FDM/IDM-style downloaders use.
 
 const MIN_VIDEO_PX = 120; // ignore tiny players (ads, trackers)
-const RECENT_STOP_MS = 30_000; // keep a paused/ended video briefly for the context menu
-
 // The worker and content script use one shared host exclusion list.
 const contentShared = typeof SHARED_EXCLUDED_HOSTS !== "undefined"
   ? null
@@ -52,13 +50,10 @@ function isBigEnough(video) {
   return false;
 }
 
-/// Only actively playing videos or recently paused/ended videos stay in
-/// the menu. The user-play latch still excludes autoplay and inline previews.
-function isStartedVideo(v, played, stoppedAt, now = Date.now()) {
-  if (!v || !played || !played.has(v)) return false;
-  if (!v.paused && !v.ended) return true;
-  const stopped = stoppedAt && stoppedAt.get(v);
-  return Number.isFinite(stopped) && now >= stopped && now - stopped < RECENT_STOP_MS;
+/// Only actively playing videos that the user started stay in the menu.
+/// A pause or end removes the entry immediately; autoplay is never latched.
+function isStartedVideo(v, played) {
+  return !!v && !!played && played.has(v) && !v.paused && !v.ended;
 }
 
 /// All <video> elements under `root`, piercing open shadow roots (custom
@@ -117,10 +112,9 @@ function pageVideoTitle(doc) {
 
 // --- Live wiring (browser only; the pure helpers above are unit-tested) ---
 //
-// Played-only detection: the menu offers a video only once the user started it.
-// A WeakSet latches user-activated play events and never unlatches on pause —
-// the user pauses to right-click. A media reset (emptied) unlatches the new load.
-// Autoplay and player initialization events are not sufficient to latch a video.
+// Currently-playing detection: the menu offers only actively playing videos
+// the user started. Autoplay and player initialization events cannot latch a
+// video, and pause/end must retire its entry immediately.
 
 if (
   typeof chrome !== "undefined" &&
@@ -131,54 +125,37 @@ if (
   (typeof location === "undefined" || !isExcludedHost(location.hostname))
 ) {
   const played = new WeakSet();
-  const stoppedAt = new WeakMap();
-  const stopTimers = new WeakMap();
+  let forceFrameReplace = false;
   let lastSent = "";
 
   function report() {
     // Full scans happen on startup, media events, and worker rescan requests,
     // not on every pointer/click interaction.
     wireOpenShadowRoots(document);
-    const videos = collectVideos(document, (v) => isStartedVideo(v, played, stoppedAt));
+    const videos = collectVideos(document, (v) => isStartedVideo(v, played));
     const title = pageVideoTitle(document);
+    // Pause/end reports must be able to clear stale frame state even when the
+    // resulting video list equals the last local snapshot.
+    const replaceFrame = forceFrameReplace;
+    forceFrameReplace = false;
     // The title is part of the snapshot: an SPA can change it with no new
     // video, and the menu labels must follow.
     const snapshot = JSON.stringify([videos, title]);
-    if (snapshot === lastSent) return;
+    if (snapshot === lastSent && !replaceFrame) return;
     lastSent = snapshot;
     chrome.runtime.sendMessage({
       type: "grab-videos-detected",
       videos,
       title,
+      replaceFrame,
     });
   }
 
   let timer = null;
-  function scheduleReport() {
+  function scheduleReport(replaceFrame = false) {
+    if (replaceFrame) forceFrameReplace = true;
     if (timer) clearTimeout(timer);
     timer = setTimeout(report, 400);
-  }
-
-  function clearStoppedState(video) {
-    const timerId = stopTimers.get(video);
-    if (timerId !== undefined) clearTimeout(timerId);
-    stopTimers.delete(video);
-    stoppedAt.delete(video);
-  }
-
-  function markStopped(video) {
-    if (!played.has(video)) return;
-    stoppedAt.set(video, Date.now());
-    const oldTimer = stopTimers.get(video);
-    if (oldTimer !== undefined) clearTimeout(oldTimer);
-    // Remove the entry automatically after the grace period even if the page
-    // emits no further media events.
-    const timerId = setTimeout(() => {
-      stopTimers.delete(video);
-      if (video.paused || video.ended) scheduleReport();
-    }, RECENT_STOP_MS + 25);
-    stopTimers.set(video, timerId);
-    scheduleReport();
   }
 
   function onPlay(e) {
@@ -192,26 +169,23 @@ if (
       navigator.userActivation.isActive;
     if (userActive) {
       played.add(t);
-      clearStoppedState(t);
       scheduleReport();
     } else if (played.has(t)) {
       // A previously user-started video resumed without a fresh activation.
-      clearStoppedState(t);
       scheduleReport();
     }
   }
 
   function onStopped(e) {
     const t = e && e.target;
-    if (t && t.tagName === "VIDEO") markStopped(t);
+    if (t && t.tagName === "VIDEO") scheduleReport(true);
   }
 
   function onEmptied(e) {
     const t = e && e.target;
     if (t && t.tagName === "VIDEO") {
       played.delete(t);
-      clearStoppedState(t);
-      scheduleReport();
+      scheduleReport(true);
     }
   }
 
@@ -277,5 +251,5 @@ if (
 
 // Test hook for node:test.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { collectVideos, usableVideoSrc, hostExcluded: isExcludedHost, DETECT_EXCLUDED_HOSTS: excludedHostList, MIN_VIDEO_PX, RECENT_STOP_MS, pageVideoTitle, isStartedVideo };
+  module.exports = { collectVideos, usableVideoSrc, hostExcluded: isExcludedHost, DETECT_EXCLUDED_HOSTS: excludedHostList, MIN_VIDEO_PX, pageVideoTitle, isStartedVideo };
 }
