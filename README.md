@@ -47,8 +47,8 @@ Grab must be installed with its desktop entry (it registers as the
 - **`Alt+G`**: sends the current tab to Grab (video pages open
   the New Download card, other links download normally).
 - **Right-click → Download with Grab**: on links, images, video, audio, and pages.
-- **Video detection** (on by default): videos you've started playing in the
-  tab — including streams behind `blob:` players — appear under right-click →
+- **Video detection** (on by default): videos you've started playing that
+  are currently playing — including streams behind `blob:` players — appear under right-click →
   **Videos detected by Grab**, with a count badge on the toolbar button.
   Picking one opens it in Grab, which probes it like any other link.
   Skipped on video platforms yt-dlp handles itself (YouTube, TikTok,
