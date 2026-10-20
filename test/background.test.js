@@ -653,6 +653,45 @@ describe("handoff tab separation (review fix 1)", () => {
     assert.equal(postedUrl, "https://cdn.example.com/v/clip.mp4");
   });
 
+  test("authoritative empty report removes a stopped video from the context menu", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    await chrome._listeners["tabs.onActivated"]({ tabId: 8 });
+    const sender = { tab: { id: 8, url: "https://example.com/" }, frameId: 0 };
+    await chrome._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{ src: "https://cdn.example.com/v/playing.mp4" }],
+      },
+      sender,
+      () => {}
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(
+      chrome._calls.some(([name, id]) => name === "menus.create" && id === "grabVideos"),
+      true,
+      "playing video should create the detected-video menu"
+    );
+
+    const callsBeforeStop = chrome._calls.length;
+    await chrome._listeners["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [], replaceFrame: true },
+      sender,
+      () => {}
+    );
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.deepEqual(chrome._calls.slice(callsBeforeStop).filter(([name]) => name === "menus.create").map(([, id]) => id).filter((id) => String(id).startsWith("grabVideo:")), []);
+    assert.ok(
+      chrome._calls.slice(callsBeforeStop).some(([name, id]) => name === "menus.remove" && id === "grabVideos"),
+      "detected-video menu should be removed after playback stops"
+    );
+    assert.ok(
+      chrome._calls.slice(callsBeforeStop).some(([name, args]) => name === "action.setBadgeText" && args.tabId === 8 && args.text === ""),
+      "video badge should clear after playback stops"
+    );
+  });
+
   test("a blob: media URL falls back to the page URL for extraction", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
