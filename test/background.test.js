@@ -937,54 +937,83 @@ describe("HTTP handoff to Grab", () => {
     });
   });
 
-  test("caps the cookie jar at Grab's 100-cookie limit", async () => {
+  test("caps the cookie jar at 100 while prioritizing authentication cookies", async () => {
     mockPairedGrab();
     await pair();
-    chrome.cookies.getAll = async () =>
-      Array.from({ length: 101 }, (_, i) => ({
+    chrome.cookies.getAll = async () => [
+      ...Array.from({ length: 101 }, (_, i) => ({
         name: `c${i}`,
         value: "v",
         domain: "example.com",
         hostOnly: false,
         path: "/",
         secure: true,
-      }));
+      })),
+      {
+        name: "cf_clearance",
+        value: "clearance-token",
+        domain: "example.com",
+        hostOnly: false,
+        path: "/",
+        secure: true,
+      },
+    ];
     assert.equal(await bg.handOff("https://example.com/f.zip"), true);
     assert.equal(posts().length, 1);
     const sent = JSON.parse(posts()[0].opts.body);
     assert.equal(sent.cookies.length, 100);
     assert.equal(sent.cookies[0].name, "c0");
+    assert.ok(sent.cookies.some((cookie) => cookie.name === "cf_clearance"));
   });
 
-  test("drops cookies when they would exceed Grab's body cap", async () => {
+  test("trims oversized cookie payloads while retaining critical auth cookies", async () => {
     mockPairedGrab();
     await pair();
     let reads = 0;
     chrome.cookies.getAll = async () => {
       reads += 1;
-      return Array.from({ length: 100 }, (_, i) => ({
-        name: `c${i}`,
-        value: "x".repeat(500),
-        domain: "example.com",
-        hostOnly: false,
-        path: "/",
-        secure: true,
-      }));
+      return [
+        ...Array.from({ length: 100 }, (_, i) => ({
+          name: `c${i}`,
+          value: "x".repeat(500),
+          domain: "example.com",
+          hostOnly: false,
+          path: "/",
+          secure: true,
+        })),
+        ...[
+          ["cf_clearance", "clearance-token"],
+          ["__Host-session", "host-session"],
+          ["__Secure-session", "secure-session"],
+        ].map(([name, value]) => ({
+          name,
+          value,
+          domain: "example.com",
+          hostOnly: name.startsWith("__Host-"),
+          path: "/",
+          secure: true,
+        })),
+      ];
     };
     assert.equal(await bg.handOff("https://example.com/f.zip"), true);
     assert.equal(reads, 1, "the cookie path ran");
     assert.equal(posts().length, 1);
     const post = posts()[0];
     const sent = JSON.parse(post.opts.body);
-    assert.deepEqual(sent.cookies, []);
+    assert.ok(sent.cookies.length > 0, "oversize trimming must not discard every cookie");
+    assert.ok(sent.cookies.length <= 100);
+    for (const name of ["cf_clearance", "__Host-session", "__Secure-session"]) {
+      assert.ok(sent.cookies.some((cookie) => cookie.name === name), `${name} survives trimming`);
+    }
+    assert.ok(sent.cookies.length < 100, "some low-priority cookies are removed to fit");
     assert.equal(sent.url, "https://example.com/f.zip");
     assert.equal(sent.user_agent, navigator.userAgent);
     assert.equal(
       post.opts.headers["X-Grab-Token"],
       hmac("grab-client\u0000", post.opts.body),
-      "token signs the cookie-dropped body"
+      "token signs the final cookie-trimmed body"
     );
-    assert.ok(Buffer.byteLength(post.opts.body) < 32 * 1024);
+    assert.ok(Buffer.byteLength(post.opts.body) <= 30 * 1024);
   });
 
   test("Grab not running is a failure and opens no tab", async () => {
