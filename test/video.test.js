@@ -668,7 +668,7 @@ describe("detection wiring", () => {
     const itemIds = [
       ...new Set(
         chrome._calls
-          .filter(([name, id]) => name === "menus.create" && String(id).startsWith("grabVideo:"))
+          .filter(([name, id]) => name === "menus.create" && /^grabVideo:\d+$/.test(String(id)))
           .map(([, id]) => id)
       ),
     ];
