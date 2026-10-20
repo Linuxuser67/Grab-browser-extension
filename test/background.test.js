@@ -989,7 +989,7 @@ describe("HTTP handoff to Grab", () => {
           name,
           value,
           domain: "example.com",
-          hostOnly: false,
+          hostOnly: name.startsWith("__Host-"),
           path: "/",
           secure: true,
         })),
@@ -1010,7 +1010,7 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(sent.user_agent, navigator.userAgent);
     assert.equal(
       post.opts.headers["X-Grab-Token"],
-      hmac("grab-client\\u0000", post.opts.body),
+      hmac("grab-client\u0000", post.opts.body),
       "token signs the final cookie-trimmed body"
     );
     assert.ok(Buffer.byteLength(post.opts.body) <= 30 * 1024);
