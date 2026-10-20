@@ -646,6 +646,42 @@ describe("detection wiring", () => {
     );
   });
 
+  test("all simultaneously playing videos appear beyond the old eight-item cap", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 12;
+
+    await L["tabs.onActivated"]({ tabId });
+    L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: Array.from({ length: 10 }, (_, i) => ({
+          src: "https://cdn.example.com/v/video-" + i + ".mp4",
+          blob: false,
+        })),
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 }
+    );
+    await tick();
+
+    const itemIds = [
+      ...new Set(
+        chrome._calls
+          .filter(([name, id]) => name === "menus.create" && String(id).startsWith("grabVideo:"))
+          .map(([, id]) => id)
+      ),
+    ];
+    assert.deepEqual(
+      itemIds,
+      Array.from({ length: 10 }, (_, i) => "grabVideo:" + i),
+      "every distinct actively playing video gets a menu entry"
+    );
+
+    const saved = chrome._session.get("videoFinds:" + tabId);
+    assert.equal(saved.frames[0][1].length, 10, "all active videos survive worker persistence");
+  });
+
   test("a blob: video is paired with the tab's sniffed manifest", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
