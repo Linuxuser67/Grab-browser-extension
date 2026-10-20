@@ -1515,13 +1515,14 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
     f = { frames: new Map(), sniffed: [] };
     videoFinds.set(tabId, f);
   }
-  // Don't let an empty re-report wipe known videos: on live streams the
-  // video element is replaced periodically, and the new element hasn't
-  // fired 'play' yet. Real navigations clear via tabs.onUpdated.
+  // Ordinary empty re-reports may be a live stream swapping its <video>
+  // element before the replacement fires play; preserve that snapshot. Pause,
+  // end, and media-reset reports are marked authoritative so stale entries
+  // disappear immediately instead of lingering in the context menu.
   const videos = Array.isArray(msg.videos) ? msg.videos : [];
   const hadFrame = f.frames.has(frameId);
   let changed = false;
-  if (videos.length > 0 || !hadFrame) {
+  if (videos.length > 0 || !hadFrame || msg.replaceFrame === true) {
     f.frames.set(frameId, videos);
     changed = true;
   }
