@@ -690,7 +690,6 @@ describe("handoff tab separation (review fix 1)", () => {
       chrome._calls.slice(callsBeforeStop).some(([name, args]) => name === "action.setBadgeText" && args.tabId === 8 && args.text === ""),
       "video badge should clear after playback stops"
     );
-    assert.deepEqual([...chrome._listeners["runtime.onMessage"] && []], []);
   });
 
   test("a blob: media URL falls back to the page URL for extraction", async () => {
