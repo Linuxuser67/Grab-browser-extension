@@ -200,6 +200,64 @@ async function verifyGrab(secret) {
   return constantTimeEqual(body && body.proof, expected);
 }
 
+/// Prefer cookies most likely to carry authentication when the 100-cookie
+/// server cap forces a choice. The original order breaks ties deterministically.
+function cookieRetentionPriority(cookie) {
+  const name = typeof cookie?.name === "string" ? cookie.name : "";
+  if (name.toLowerCase() === "cf_clearance") return 0;
+  if (name.startsWith("__Host-")) return 1;
+  if (name.startsWith("__Secure-")) return 2;
+  if (/(session|auth|token|sid|csrf|xsrf|login|jwt|clearance)/i.test(name)) return 3;
+  return 4;
+}
+
+function limitHandoffCookies(cookies) {
+  return cookies
+    .map((cookie, index) => ({ cookie, index }))
+    .sort((a, b) =>
+      cookieRetentionPriority(a.cookie) - cookieRetentionPriority(b.cookie) ||
+      a.index - b.index
+    )
+    .slice(0, MAX_HANDOFF_COOKIES)
+    .sort((a, b) => a.index - b.index)
+    .map(({ cookie }) => cookie);
+}
+
+function serializeHandoffBody(url, cookies, userAgent) {
+  return JSON.stringify({ url, cookies, user_agent: userAgent });
+}
+
+/// Keep a valid URL handoff even if a site exposes a very large cookie jar.
+/// Drop lower-priority cookies first; among equal priorities, remove the
+/// largest serialized cookies first. Critical auth cookies are retained unless
+/// they alone prevent the body from fitting.
+function fitHandoffBody(url, cookies, userAgent) {
+  let body = serializeHandoffBody(url, cookies, userAgent);
+  const byteLength = (value) => new TextEncoder().encode(value).length;
+  if (byteLength(body) <= MAX_HANDOFF_BODY_BYTES) return body;
+
+  const dropOrder = cookies
+    .map((cookie, index) => ({
+      index,
+      priority: cookieRetentionPriority(cookie),
+      size: byteLength(JSON.stringify(cookie)),
+    }))
+    .sort((a, b) =>
+      b.priority - a.priority || b.size - a.size || b.index - a.index
+    );
+  const retained = new Set(cookies.map((_, index) => index));
+  for (const candidate of dropOrder) {
+    retained.delete(candidate.index);
+    body = serializeHandoffBody(
+      url,
+      cookies.filter((_, index) => retained.has(index)),
+      userAgent
+    );
+    if (byteLength(body) <= MAX_HANDOFF_BODY_BYTES) break;
+  }
+  return body;
+}
+
 /// The site's cookies in the shape Grab expects. Needs the optional `cookies`
 /// permission; without it (or on any failure) the handoff is URL-only.
 /// `storeId` scopes the read to the tab's cookie store (incognito, Firefox
@@ -208,8 +266,7 @@ async function readCookies(url, storeId) {
   try {
     const filter = storeId ? { url, storeId } : { url };
     const all = await chrome.cookies.getAll(filter);
-    // Grab's jar cap: keep the browser's order and drop the excess.
-    return all.slice(0, MAX_HANDOFF_COOKIES).map((c) => ({
+    const cookies = all.map((c) => ({
       name: c.name,
       value: c.value,
       domain: c.domain,
@@ -218,6 +275,7 @@ async function readCookies(url, storeId) {
       secure: c.secure,
       expiration_date: c.expirationDate,
     }));
+    return limitHandoffCookies(cookies);
   } catch {
     return [];
   }
@@ -302,13 +360,9 @@ async function postToGrab(url, ctx) {
       typeof navigator !== "undefined" && navigator.userAgent
         ? navigator.userAgent
         : undefined;
-    body = JSON.stringify({ url, cookies, user_agent: userAgent });
-    // Grab caps the body at 32 KiB. A URL-only handoff still works; an
-    // oversized one would be rejected outright (and never reach grab://).
-    // The measured body already includes url and user_agent.
-    if (new TextEncoder().encode(body).length > MAX_HANDOFF_BODY_BYTES) {
-      body = JSON.stringify({ url, cookies: [], user_agent: userAgent });
-    }
+    // Preserve the URL and retain the highest-value auth cookies within the
+    // payload budget; don't drop the whole jar as the first fallback.
+    body = fitHandoffBody(url, cookies, userAgent);
     headers = { "Content-Type": "application/json" };
     if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
   } catch {
