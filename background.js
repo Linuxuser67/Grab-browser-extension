@@ -901,7 +901,6 @@ function removeContextMenu(id) {
     }
   });
 }
-const MAX_VIDEO_ITEMS = 8;
 
 // Host exclusion domains and their predicate are defined once in shared.js.
 
@@ -1156,27 +1155,23 @@ function enqueueVideoStateWrite(tabId, write) {
 
 function snapshotVideoFinds(finds) {
   const frames = [];
-  // The menu is capped at eight URLs. Bound persisted data on pages with many
-  // iframes/videos; retain a blob marker when present to pair with manifests.
-  let frameCount = 0;
+  // Persist every active DOM-video report so simultaneous videos survive a
+  // worker restart. Empty frame reports are omitted; sniffed network URLs
+  // remain separately bounded to avoid unbounded growth on long-lived tabs.
   for (const [frameId, videos] of finds.frames) {
-    if (frameCount++ >= 32) break;
     const out = [];
     const seen = new Set();
     let hasBlob = false;
     for (const video of videos || []) {
       if (video && typeof video.src === "string" && video.src && !seen.has(video.src)) {
-        if (seen.size < MAX_VIDEO_ITEMS) {
-          seen.add(video.src);
-          const saved = { src: video.src, blob: video.blob === true };
-          if (Number.isFinite(video.height) && video.height > 0) saved.height = video.height;
-          out.push(saved);
-        }
+        seen.add(video.src);
+        const saved = { src: video.src, blob: video.blob === true };
+        if (Number.isFinite(video.height) && video.height > 0) saved.height = video.height;
+        out.push(saved);
       } else if (video && video.blob === true && !hasBlob) {
         hasBlob = true;
         out.push({ src: null, blob: true });
       }
-      if (out.length >= MAX_VIDEO_ITEMS + 1) break;
     }
     if (out.length) frames.push([frameId, out]);
   }
@@ -1288,9 +1283,7 @@ function domVideosFor(tabId) {
 
 function mergedVideoUrls(tabId) {
   const f = videoFinds.get(tabId);
-  return f
-    ? mergeVideoFinds(domVideosFor(tabId), f.sniffed, f.kinds).slice(0, MAX_VIDEO_ITEMS)
-    : [];
+  return f ? mergeVideoFinds(domVideosFor(tabId), f.sniffed, f.kinds) : [];
 }
 
 function sniffedHeader(headers, name) {
