@@ -463,11 +463,6 @@ describe("isStartedVideo (content script)", () => {
     for (const v of videos) s.add(v);
     return s;
   };
-  const stoppedMap = (entries = []) => {
-    const m = new WeakMap();
-    for (const [video, at] of entries) m.set(video, at);
-    return m;
-  };
   const pv = (opts) => ({
     muted: false,
     paused: true,
@@ -479,24 +474,17 @@ describe("isStartedVideo (content script)", () => {
 
   test("user-started videos stay listed while actively playing", () => {
     const video = pv({ paused: false, currentTime: 42 });
-    assert.equal(content.isStartedVideo(video, playedSet([video]), stoppedMap(), 100_000), true);
+    assert.equal(content.isStartedVideo(video, playedSet([video])), true);
   });
 
-  test("a recently paused or ended video stays listed briefly", () => {
-    const paused = pv({ paused: true, currentTime: 42 });
-    const ended = pv({ paused: true, ended: true, currentTime: 42 });
-    const played = playedSet([paused, ended]);
-    const stopped = stoppedMap([[paused, 80_000], [ended, 85_000]]);
-    assert.equal(content.isStartedVideo(paused, played, stopped, 100_000), true);
-    assert.equal(content.isStartedVideo(ended, played, stopped, 100_000), true);
-  });
-
-  test("paused or ended videos disappear after the grace period", () => {
+  test("paused videos are removed immediately even though they were user-started", () => {
     const video = pv({ paused: true, currentTime: 42 });
-    assert.equal(
-      content.isStartedVideo(video, playedSet([video]), stoppedMap([[video, 10_000]]), 10_000 + content.RECENT_STOP_MS),
-      false
-    );
+    assert.equal(content.isStartedVideo(video, playedSet([video])), false);
+  });
+
+  test("ended videos are removed immediately even if paused is false", () => {
+    const video = pv({ paused: false, ended: true, currentTime: 42 });
+    assert.equal(content.isStartedVideo(video, playedSet([video])), false);
   });
 
   test("unlatched autoplay and muted previews do not count", () => {
@@ -511,14 +499,11 @@ describe("isStartedVideo (content script)", () => {
     );
   });
 
-  test("paused, ended, or unstarted videos with no recent-stop record do not count", () => {
+  test("missing videos or play latches do not count", () => {
     const empty = playedSet([]);
-    const paused = pv({ paused: true, currentTime: 0 });
-    const ended = pv({ paused: false, ended: true, currentTime: 5 });
-    assert.equal(content.isStartedVideo(paused, playedSet([paused]), stoppedMap()), false);
-    assert.equal(content.isStartedVideo(ended, playedSet([ended]), stoppedMap()), false);
-    assert.equal(content.isStartedVideo(paused, empty, stoppedMap()), false);
-    assert.equal(content.isStartedVideo(null, empty, stoppedMap()), false);
+    const playing = pv({ paused: false, currentTime: 5 });
+    assert.equal(content.isStartedVideo(playing, empty), false);
+    assert.equal(content.isStartedVideo(null, empty), false);
   });
 });
 
