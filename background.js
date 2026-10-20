@@ -96,6 +96,13 @@ const CONFIRM_TIMEOUT_MS = 130_000;
 /// A pairing handshake is a loopback round trip.
 const HELLO_TIMEOUT_MS = 3_000;
 
+/// Grab rejects handoffs with more than 100 cookies or a JSON body over
+/// 32 KiB. Stay under both so a cookie-heavy site still hands off: dropping
+/// cookies beats losing the URL. 30 KiB leaves ~2 KiB under the cap; the
+/// measured body already includes the URL and UA.
+const MAX_HANDOFF_COOKIES = 100;
+const MAX_HANDOFF_BODY_BYTES = 30 * 1024;
+
 let sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Test hook: swap the sleep implementation to observe retry delays.
@@ -201,7 +208,8 @@ async function readCookies(url, storeId) {
   try {
     const filter = storeId ? { url, storeId } : { url };
     const all = await chrome.cookies.getAll(filter);
-    return all.map((c) => ({
+    // Grab's jar cap: keep the browser's order and drop the excess.
+    return all.slice(0, MAX_HANDOFF_COOKIES).map((c) => ({
       name: c.name,
       value: c.value,
       domain: c.domain,
@@ -295,6 +303,12 @@ async function postToGrab(url, ctx) {
         ? navigator.userAgent
         : undefined;
     body = JSON.stringify({ url, cookies, user_agent: userAgent });
+    // Grab caps the body at 32 KiB. A URL-only handoff still works; an
+    // oversized one would be rejected outright (and never reach grab://).
+    // The measured body already includes url and user_agent.
+    if (new TextEncoder().encode(body).length > MAX_HANDOFF_BODY_BYTES) {
+      body = JSON.stringify({ url, cookies: [], user_agent: userAgent });
+    }
     headers = { "Content-Type": "application/json" };
     if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
   } catch {

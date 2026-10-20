@@ -898,6 +898,56 @@ describe("HTTP handoff to Grab", () => {
     });
   });
 
+  test("caps the cookie jar at Grab's 100-cookie limit", async () => {
+    mockPairedGrab();
+    await pair();
+    chrome.cookies.getAll = async () =>
+      Array.from({ length: 101 }, (_, i) => ({
+        name: `c${i}`,
+        value: "v",
+        domain: "example.com",
+        hostOnly: false,
+        path: "/",
+        secure: true,
+      }));
+    assert.equal(await bg.handOff("https://example.com/f.zip"), true);
+    assert.equal(posts().length, 1);
+    const sent = JSON.parse(posts()[0].opts.body);
+    assert.equal(sent.cookies.length, 100);
+    assert.equal(sent.cookies[0].name, "c0");
+  });
+
+  test("drops cookies when they would exceed Grab's body cap", async () => {
+    mockPairedGrab();
+    await pair();
+    let reads = 0;
+    chrome.cookies.getAll = async () => {
+      reads += 1;
+      return Array.from({ length: 100 }, (_, i) => ({
+        name: `c${i}`,
+        value: "x".repeat(500),
+        domain: "example.com",
+        hostOnly: false,
+        path: "/",
+        secure: true,
+      }));
+    };
+    assert.equal(await bg.handOff("https://example.com/f.zip"), true);
+    assert.equal(reads, 1, "the cookie path ran");
+    assert.equal(posts().length, 1);
+    const post = posts()[0];
+    const sent = JSON.parse(post.opts.body);
+    assert.deepEqual(sent.cookies, []);
+    assert.equal(sent.url, "https://example.com/f.zip");
+    assert.equal(sent.user_agent, navigator.userAgent);
+    assert.equal(
+      post.opts.headers["X-Grab-Token"],
+      hmac("grab-client\u0000", post.opts.body),
+      "token signs the cookie-dropped body"
+    );
+    assert.ok(Buffer.byteLength(post.opts.body) < 32 * 1024);
+  });
+
   test("Grab not running is a failure and opens no tab", async () => {
     mockFetch("down");
     assert.equal(await bg.handOff("https://example.com/f.zip"), false);
