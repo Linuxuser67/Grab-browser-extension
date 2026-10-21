@@ -400,7 +400,7 @@ async function postToGrab(url, ctx) {
       if (acceptedHeader !== null && acceptedHeader !== undefined) {
         const accepted = Number(acceptedHeader);
         const sentCount = JSON.parse(body).cookies.length;
-        if (Number.isSafeInteger(accepted) && accepted < sentCount && !ctx.cookieWarning) {
+        if (Number.isSafeInteger(accepted) && accepted >= 0 && accepted < sentCount && !ctx.cookieWarning) {
           ctx.cookieWarning = `Grab accepted the URL but discarded ${sentCount - accepted} of ${sentCount} supplied cookies.`;
         }
       }
@@ -492,7 +492,6 @@ async function explicitSend(url, tabId, incognito) {
   // risks a duplicate download.
 }
 
-
 /// Show why a handoff was accepted without a fully usable cookie jar.
 async function showCookieWarning(ctx) {
   const tabId = ctx && ctx.tabId;
@@ -565,9 +564,13 @@ async function removeBrowserCopy(id) {
 }
 
 async function interceptDownload(item) {
-  // Prefer the post-redirect URL when the browser exposes it. This lets Grab
-  // fetch the actual target and read cookies for that host.
-  const url = toGrabUrl(item.finalUrl) ? item.finalUrl : item.url;
+  // Prefer the post-redirect URL only when Grab can accept its length.
+  // Otherwise preserve the original URL so Grab can follow the redirect.
+  const finalUrl = toGrabUrl(item.finalUrl) ? item.finalUrl : null;
+  const url = finalUrl &&
+    new TextEncoder().encode(finalUrl).length <= MAX_GRAB_URL_BYTES
+      ? finalUrl
+      : item.url;
   // Non-http(s) URLs (blob:, data:) and URLs with credentials can't be
   // handed over.
   if (!toGrabUrl(url)) return;
