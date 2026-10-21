@@ -1048,6 +1048,9 @@ describe("HTTP handoff to Grab", () => {
 
   test("fitHandoffBody refuses an oversized body after exhausting cookie drops", () => {
     assert.equal(bg.fitHandoffBody("x".repeat(33 * 1024), [], navigator.userAgent), null);
+    const accepted = bg.fitHandoffBody("x".repeat(31 * 1024), [], navigator.userAgent);
+    assert.ok(accepted !== null, "body below the server cap should be preserved");
+    assert.ok(Buffer.byteLength(accepted) <= 32 * 1024);
   });
 
   test("cookie read failures are visible while preserving the URL handoff", async () => {
@@ -1218,6 +1221,28 @@ describe("HTTP handoff to Grab", () => {
     }
   });
 
+
+
+  test("overlong finalUrl falls back to a valid original URL", async () => {
+    await pair();
+    mockPairedGrab();
+    chrome.cookies.getAll = async () => [];
+    const originalUrl = "https://origin.example.com/download";
+    const finalUrl = `https://cdn.example.com/${"a".repeat(2048)}`;
+    const item = {
+      id: 96,
+      url: originalUrl,
+      finalUrl,
+      cookieStoreId: "firefox-default",
+      fileSize: 10 * 1024 * 1024,
+      incognito: false,
+    };
+    chrome._downloads.set(96, { ...item, state: "in_progress" });
+    await chrome._listeners["downloads.onCreated"](item);
+    const post = fetchCalls.find((c) => c.opts.method === "POST");
+    assert.ok(post, "download was posted");
+    assert.equal(JSON.parse(post.opts.body).url, originalUrl);
+  });
 
   test("automatic interception uses finalUrl and a Firefox store ID without a tabId", async () => {
     await pair();
