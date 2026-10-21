@@ -1064,6 +1064,35 @@ describe("HTTP handoff to Grab", () => {
     assert.deepEqual(JSON.parse(post.opts.body).cookies, []);
   });
 
+
+  test("partitioned cookies are not widened into the Netscape cookie jar", async () => {
+    await pair();
+    mockPairedGrab();
+    chrome.cookies.getAll = async (options) => {
+      assert.ok(options.partitionKey, "query should detect partitioned cookies where supported");
+      return [
+        {
+          name: "session", value: "abc", domain: "example.com",
+          hostOnly: true, path: "/", secure: true,
+        },
+        {
+          name: "chips", value: "partitioned", domain: "example.com",
+          hostOnly: true, path: "/", secure: true,
+          partitionKey: { topLevelSite: "https://example.com" },
+        },
+      ];
+    };
+    const ctx = { tabId: 7 };
+    assert.equal(await bg.handOff("https://example.com/file.zip", ctx, [0, 0]), true);
+    const post = fetchCalls.find((c) => c.opts.method === "POST");
+    assert.deepEqual(
+      JSON.parse(post.opts.body).cookies.map((cookie) => cookie.name),
+      ["session"],
+      "partitioned cookies must not become unpartitioned cookies in Grab"
+    );
+    assert.match(ctx.cookieWarning, /partitioned cookie.*not forwarded/i);
+  });
+
   test("Grab-reported cookie drops are visible to the caller", async () => {
     await pair();
     mockPairedGrab({ acceptedCookies: 0 });
