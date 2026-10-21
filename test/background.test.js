@@ -887,7 +887,7 @@ describe("HTTP handoff to Grab", () => {
 
   /// A Grab that answers GET /hello like the real one (a proof computed from
   /// the shared secret) unless told otherwise, and POST /add with `addStatus`.
-  function mockPairedGrab({ proof, helloStatus = 200, helloDown = false, addStatus = 200 } = {}) {
+  function mockPairedGrab({ proof, helloStatus = 200, helloDown = false, addStatus = 200, acceptedCookies } = {}) {
     fetchCalls = [];
     globalThis.fetch = async (url, opts = {}) => {
       fetchCalls.push({ url, opts });
@@ -900,7 +900,18 @@ describe("HTTP handoff to Grab", () => {
           json: async () => ({ proof: proof ?? hmac("grab-server\u0000", nonce) }),
         };
       }
-      return { status: addStatus, ok: addStatus >= 200 && addStatus < 300 };
+      return {
+        status: addStatus,
+        ok: addStatus >= 200 && addStatus < 300,
+        headers: {
+          get(name) {
+            if (name.toLowerCase() === "x-grab-cookies-accepted" && acceptedCookies !== undefined) {
+              return String(acceptedCookies);
+            }
+            return null;
+          },
+        },
+      };
     };
   }
   const pair = () => chrome.storage.local.set({ pairingCode: SECRET });
@@ -1013,7 +1024,53 @@ describe("HTTP handoff to Grab", () => {
       hmac("grab-client\u0000", post.opts.body),
       "token signs the final cookie-trimmed body"
     );
-    assert.ok(Buffer.byteLength(post.opts.body) <= 30 * 1024);
+    assert.ok(Buffer.byteLength(post.opts.body) <= 32 * 1024);
+  });
+
+
+  test("handoff rejects URLs over Grab's byte limit before network access", async () => {
+    mockPairedGrab();
+    const url = `https://example.com/${"a".repeat(2048)}`;
+    assert.equal(await bg.handOff(url, undefined, [0, 0]), false);
+    assert.equal(fetchCalls.length, 0, "oversized URL must not trigger hello or add requests");
+  });
+
+  test("handoff accepts a URL exactly at Grab's byte limit", async () => {
+    mockPairedGrab();
+    await pair();
+    // https://example.com/ is 20 ASCII bytes; fill the URL to exactly 2048.
+    const url = `https://example.com/${"a".repeat(2028)}`;
+    assert.equal(new TextEncoder().encode(url).length, 2048);
+    assert.equal(await bg.handOff(url, undefined, [0, 0]), true);
+    const post = fetchCalls.find((c) => c.opts.method === "POST");
+    assert.ok(post, "exactly-at-limit URL should be posted");
+  });
+
+  test("fitHandoffBody refuses an oversized body after exhausting cookie drops", () => {
+    assert.equal(bg.fitHandoffBody("x".repeat(33 * 1024), [], navigator.userAgent), null);
+  });
+
+  test("cookie read failures are visible while preserving the URL handoff", async () => {
+    await pair();
+    mockPairedGrab();
+    chrome.cookies.getAll = async () => { throw new Error("cookies permission denied"); };
+    const ctx = { tabId: 7 };
+    assert.equal(await bg.handOff("https://example.com/f.zip", ctx, [0, 0]), true);
+    assert.match(ctx.cookieWarning, /optional Cookies permission|first-party isolation/);
+    const post = fetchCalls.find((c) => c.opts.method === "POST");
+    assert.deepEqual(JSON.parse(post.opts.body).cookies, []);
+  });
+
+  test("Grab-reported cookie drops are visible to the caller", async () => {
+    await pair();
+    mockPairedGrab({ acceptedCookies: 0 });
+    chrome.cookies.getAll = async () => [{
+      name: "session", value: "abc", domain: "example.com",
+      hostOnly: true, path: "/", secure: true,
+    }];
+    const ctx = { tabId: 7 };
+    assert.equal(await bg.handOff("https://example.com/f.zip", ctx, [0, 0]), true);
+    assert.match(ctx.cookieWarning, /discarded 1 of 1 supplied cookies/);
   });
 
   test("Grab not running is a failure and opens no tab", async () => {
@@ -1161,21 +1218,61 @@ describe("HTTP handoff to Grab", () => {
     }
   });
 
+
+  test("automatic interception uses finalUrl and a Firefox store ID without a tabId", async () => {
+    await pair();
+    mockPairedGrab();
+    const getAllCalls = [];
+    chrome.cookies.getAll = async (options) => {
+      getAllCalls.push(options);
+      return [{
+        name: "container-session", value: "abc", domain: "cdn.example.com",
+        hostOnly: true, path: "/", secure: true,
+      }];
+    };
+    const item = {
+      id: 97,
+      url: "https://origin.example.com/download",
+      finalUrl: "https://cdn.example.com/file.iso",
+      cookieStoreId: "firefox-container-3",
+      fileSize: 200 * 1024 * 1024,
+      incognito: false,
+    };
+    chrome._downloads.set(97, { ...item, state: "in_progress" });
+    await chrome._listeners["downloads.onCreated"](item);
+    const post = fetchCalls.find((c) => c.opts.method === "POST");
+    assert.ok(post, "download was posted");
+    const body = JSON.parse(post.opts.body);
+    assert.equal(body.url, item.finalUrl);
+    assert.deepEqual(body.cookies.map((cookie) => cookie.name), ["container-session"]);
+    assert.ok(
+      getAllCalls.some((options) => options.storeId === "firefox-container-3"),
+      "cookie lookup must use DownloadItem.cookieStoreId without a tab lookup"
+    );
+  });
+
   test("interceptDownload passes incognito through to cookies: []", async () => {
     await pair();
     mockPairedGrab({ addStatus: 200 });
     // The default store has cookies; incognito interception must NOT send them.
     const origGetAll = chrome.cookies.getAll;
-    chrome.cookies.getAll = async () => [
-      { name: "session", value: "abc", domain: "example.com" },
+    const getAllCalls = [];
+    chrome.cookies.getAll = async (options) => {
+      getAllCalls.push(options);
+      return [{ name: "session", value: "abc", domain: "example.com" }];
+    };
+    chrome.cookies.getAllCookieStores = async () => [
+      { id: "1", tabIds: [99] },
     ];
     try {
-      // Simulate an incognito download intercepted by the browser.
+      // Simulate an incognito download. Even a resolvable private store must
+      // never be queried or forwarded.
       const item = {
         id: 99,
         url: "https://example.com/big.iso",
         fileSize: 200 * 1024 * 1024,
         incognito: true,
+        cookieStoreId: "1",
       };
       chrome._downloads.set(99, { ...item, state: "in_progress" });
       await chrome._listeners["downloads.onCreated"](item);
@@ -1185,10 +1282,12 @@ describe("HTTP handoff to Grab", () => {
       assert.deepEqual(
         body.cookies,
         [],
-        "incognito interception must send no cookies even when the default store has them"
+        "incognito interception must send no cookies even when the private store is resolvable"
       );
+      assert.equal(getAllCalls.length, 0, "incognito cookie stores must not be read at all");
     } finally {
       chrome.cookies.getAll = origGetAll;
+      delete chrome.cookies.getAllCookieStores;
     }
   });
 
