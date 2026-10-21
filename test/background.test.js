@@ -1093,6 +1093,30 @@ describe("HTTP handoff to Grab", () => {
     assert.match(ctx.cookieWarning, /partitioned cookie.*not forwarded/i);
   });
 
+
+  test("unsupported partitionKey filter falls back to unpartitioned cookies", async () => {
+    await pair();
+    mockPairedGrab();
+    const filters = [];
+    chrome.cookies.getAll = async (options) => {
+      filters.push(options);
+      if (options.partitionKey) throw new Error("partitionKey filter is not supported");
+      return [{
+        name: "session", value: "abc", domain: "example.com",
+        hostOnly: true, path: "/", secure: true,
+      }];
+    };
+    const ctx = { tabId: 7 };
+    assert.equal(await bg.handOff("https://example.com/file.zip", ctx, [0, 0]), true);
+    assert.equal(filters.length, 2, "unsupported filter should be retried without partitionKey");
+    const post = fetchCalls.find((c) => c.opts.method === "POST");
+    assert.deepEqual(
+      JSON.parse(post.opts.body).cookies.map((cookie) => cookie.name),
+      ["session"]
+    );
+    assert.equal(ctx.cookieWarning, undefined);
+  });
+
   test("Grab-reported cookie drops are visible to the caller", async () => {
     await pair();
     mockPairedGrab({ acceptedCookies: 0 });
