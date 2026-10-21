@@ -102,6 +102,8 @@ const HELLO_TIMEOUT_MS = 3_000;
 /// measured body already includes the URL and UA.
 const MAX_HANDOFF_COOKIES = 100;
 const MAX_HANDOFF_BODY_BYTES = 30 * 1024;
+// Bound menu creation and per-tab DOM snapshots while retaining many videos.
+const MAX_VIDEO_ITEMS = 50;
 
 let sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -207,7 +209,10 @@ function cookieRetentionPriority(cookie) {
   if (name.toLowerCase() === "cf_clearance") return 0;
   if (name.startsWith("__Host-")) return 1;
   if (name.startsWith("__Secure-")) return 2;
-  if (/(session|auth|token|sid|csrf|xsrf|login|jwt|clearance)/i.test(name)) return 3;
+  if (
+    /(session|sessid|auth|token|csrf|xsrf|login|jwt|clearance)/i.test(name) ||
+    /(?:^|[^a-z0-9])sid(?:$|[^a-z0-9])/i.test(name)
+  ) return 3;
   return 4;
 }
 
@@ -1155,22 +1160,27 @@ function enqueueVideoStateWrite(tabId, write) {
 
 function snapshotVideoFinds(finds) {
   const frames = [];
-  // Persist every active DOM-video report so simultaneous videos survive a
-  // worker restart. Empty frame reports are omitted; sniffed network URLs
-  // remain separately bounded to avoid unbounded growth on long-lived tabs.
+  let remaining = MAX_VIDEO_ITEMS;
+  // Persist active DOM-video reports across worker restarts, with a per-tab
+  // cap so pathological pages cannot grow session storage without bound.
+  // Empty frame reports are omitted; sniffed URLs are bounded separately.
   for (const [frameId, videos] of finds.frames) {
+    if (remaining <= 0) break;
     const out = [];
     const seen = new Set();
     let hasBlob = false;
     for (const video of videos || []) {
+      if (remaining <= 0) break;
       if (video && typeof video.src === "string" && video.src && !seen.has(video.src)) {
         seen.add(video.src);
         const saved = { src: video.src, blob: video.blob === true };
         if (Number.isFinite(video.height) && video.height > 0) saved.height = video.height;
         out.push(saved);
+        remaining -= 1;
       } else if (video && video.blob === true && !hasBlob) {
         hasBlob = true;
         out.push({ src: null, blob: true });
+        remaining -= 1;
       }
     }
     if (out.length) frames.push([frameId, out]);
@@ -1283,7 +1293,7 @@ function domVideosFor(tabId) {
 
 function mergedVideoUrls(tabId) {
   const f = videoFinds.get(tabId);
-  return f ? mergeVideoFinds(domVideosFor(tabId), f.sniffed, f.kinds) : [];
+  return f ? mergeVideoFinds(domVideosFor(tabId), f.sniffed, f.kinds).slice(0, MAX_VIDEO_ITEMS) : [];
 }
 
 function sniffedHeader(headers, name) {
@@ -1644,6 +1654,11 @@ if (typeof module !== "undefined" && module.exports) {
     videoName,
     menuRowTitle,
     mergeVideoFinds,
+    mergedVideoUrls,
+    snapshotVideoFinds,
+    cookieRetentionPriority,
+    limitHandoffCookies,
+    MAX_VIDEO_ITEMS,
     manifestMenuRows,
     directMenuRow,
     manifestKind,
