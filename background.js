@@ -262,13 +262,28 @@ function fitHandoffBody(url, cookies, userAgent) {
   return byteLength(body) <= MAX_HANDOFF_BODY_BYTES ? body : null;
 }
 
-/// Read cookies in the shape Grab expects. Errors propagate to the caller so
-/// the URL-only fallback can be accompanied by a visible diagnostic. The
-/// optional `cookies` permission may be absent or denied.
-async function readCookies(url, storeId) {
+/// Read cookies in the shape Grab expects. Partitioned cookies are detected but
+/// deliberately excluded: Grab's Netscape cookie jar cannot preserve their
+/// partition key, so exporting them as ordinary cookies would widen their scope.
+/// Errors propagate so the URL-only fallback can be accompanied by a warning.
+async function readCookies(url, storeId, ctx) {
   const filter = storeId ? { url, storeId } : { url };
-  const all = await chrome.cookies.getAll(filter);
-  const cookies = all.map((c) => ({
+  let all;
+  try {
+    // With partitionKey={} modern browsers return partitioned and unpartitioned
+    // cookies. Older browser versions may reject this filter; fall back to the
+    // supported unpartitioned-only query.
+    all = await chrome.cookies.getAll({ ...filter, partitionKey: {} });
+  } catch {
+    all = await chrome.cookies.getAll(filter);
+  }
+
+  const partitioned = all.filter((cookie) => cookie.partitionKey != null);
+  if (partitioned.length > 0 && ctx && typeof ctx === "object" && !ctx.cookieWarning) {
+    ctx.cookieWarning =
+      `${partitioned.length} partitioned cookie(s) were not forwarded because Grab's cookie-file format cannot preserve their partition isolation.`;
+  }
+  const cookies = all.filter((cookie) => cookie.partitionKey == null).map((c) => ({
     name: c.name,
     value: c.value,
     domain: c.domain,
@@ -360,7 +375,7 @@ async function postToGrab(url, ctx) {
           ctx.cookieWarning = "Incognito cookie forwarding is disabled; Grab received the URL without cookies.";
         }
       } else {
-        cookies = await readCookies(url, storeId);
+        cookies = await readCookies(url, storeId, ctx);
       }
     } catch {
       cookies = [];
