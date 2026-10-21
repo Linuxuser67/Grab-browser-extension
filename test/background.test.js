@@ -1221,8 +1221,6 @@ describe("HTTP handoff to Grab", () => {
     }
   });
 
-
-
   test("overlong finalUrl falls back to a valid original URL", async () => {
     await pair();
     mockPairedGrab();
