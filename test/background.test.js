@@ -1539,3 +1539,54 @@ describe("video detection bounds and cookie-priority names", () => {
     assert.equal(bg.cookieRetentionPriority({ name: "residual" }), 4);
   });
 });
+
+
+describe("explicit context-menu page URL", () => {
+  test("uses the active tab's full URL when pageUrl contains only the domain root", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    const expected = "https://example.com/watch/episode-42?from=home#player";
+
+    await chrome._listeners["menus.onClicked"](
+      { menuItemId: "sendToGrab", pageUrl: "https://example.com/", mediaType: "page" },
+      { id: 77, url: expected, incognito: false },
+    );
+
+    assert.ok(
+      chrome._calls.some(([name, url]) => name === "handoff" && url === expected),
+      "Grab should receive the complete active-tab URL, including path, query, and fragment",
+    );
+  });
+
+  test("a detected video still takes priority over the page URL", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const videoUrl = "https://cdn.example.com/watch/720p.m3u8";
+
+    bg._videoFinds.set(77, {
+      frames: new Map([[0, [{ src: videoUrl, blob: false }]]]),
+      sniffed: [],
+      kinds: new Map(),
+      title: "Episode",
+    });
+
+    await chrome._listeners["menus.onClicked"](
+      {
+        menuItemId: "sendToGrab",
+        mediaType: "video",
+        srcUrl: "blob:https://example.com/uuid",
+        pageUrl: "https://example.com/",
+      },
+      {
+        id: 77,
+        url: "https://example.com/watch/episode-42?from=home#player",
+        incognito: false,
+      },
+    );
+
+    assert.ok(
+      chrome._calls.some(([name, url]) => name === "handoff" && url === videoUrl),
+      "a detected stream should still be handed off instead of the page URL",
+    );
+  });
+});
