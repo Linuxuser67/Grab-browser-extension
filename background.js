@@ -798,7 +798,11 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
   if (id !== "sendToGrab") return;
-  const candidates = [info.linkUrl, info.srcUrl, info.pageUrl];
+  // Prefer the top-level tab URL: some context-menu invocations report only
+  // a frame/origin URL in info.pageUrl, which is not enough for site extractors.
+  // Keep info.pageUrl as a fallback when the browser omits tab.url.
+  const pageUrl = tab && typeof tab.url === "string" ? tab.url : info.pageUrl;
+  const candidates = [info.linkUrl, info.srcUrl, pageUrl];
   // Magnet links already open in Grab through the OS handler; pass them
   // through unwrapped.
   const magnet = candidates.find(
@@ -817,7 +821,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     info.mediaType === "video" &&
     tab &&
     Number.isInteger(tab.id) &&
-    target === info.pageUrl
+    target === pageUrl
   ) {
     const detected = mergedVideoUrls(tab.id);
     // Try to match the clicked video's srcUrl against detected videos.
@@ -832,7 +836,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         }
       }
     }
-    if (matched && toGrabUrl(matched.src) && matched.src !== info.pageUrl) {
+    if (matched && toGrabUrl(matched.src) && matched.src !== pageUrl) {
       // Direct URL: use it.
       target = matched.src;
     } else if (detected.length === 1 && toGrabUrl(detected[0])) {
