@@ -1483,3 +1483,59 @@ describe("P2/P3 regression tests", () => {
     assert.equal(stored2[bg.pendingKey(7)], originalDeadline);
   });
 });
+
+
+describe("video detection bounds and cookie-priority names", () => {
+  test("keeps more than eight videos but caps menu results at the backstop", () => {
+    const bg = loadBackground(makeChrome());
+    const videos = Array.from({ length: bg.MAX_VIDEO_ITEMS + 10 }, (_, i) => ({
+      src: `https://cdn.example.com/files/video-${i}.mp4`,
+      blob: false,
+    }));
+    bg._videoFinds.set(17, {
+      frames: new Map([[0, videos]]),
+      sniffed: [],
+      kinds: new Map(),
+      title: "Multiple videos",
+    });
+
+    const urls = bg.mergedVideoUrls(17);
+    assert.equal(bg.MAX_VIDEO_ITEMS, 50);
+    assert.equal(urls.length, bg.MAX_VIDEO_ITEMS);
+    assert.ok(urls.includes("https://cdn.example.com/files/video-9.mp4"));
+    assert.ok(!urls.includes("https://cdn.example.com/files/video-50.mp4"));
+  });
+
+  test("caps persisted DOM detections across all frames", () => {
+    const bg = loadBackground(makeChrome());
+    const frames = new Map([
+      [0, Array.from({ length: 35 }, (_, i) => ({
+        src: `https://cdn.example.com/frame0/${i}.mp4`,
+        blob: false,
+      }))],
+      [1, Array.from({ length: 35 }, (_, i) => ({
+        src: `https://cdn.example.com/frame1/${i}.mp4`,
+        blob: false,
+      }))],
+    ]);
+    const snapshot = bg.snapshotVideoFinds({
+      frames,
+      sniffed: [],
+      kinds: new Map(),
+      title: "Many videos",
+    });
+    assert.equal(
+      snapshot.frames.reduce((sum, [, videos]) => sum + videos.length, 0),
+      bg.MAX_VIDEO_ITEMS,
+    );
+  });
+
+  test("session ID matching does not promote unrelated cookie-name substrings", () => {
+    const bg = loadBackground(makeChrome());
+    assert.equal(bg.cookieRetentionPriority({ name: "sid" }), 3);
+    assert.equal(bg.cookieRetentionPriority({ name: "session_id" }), 3);
+    assert.equal(bg.cookieRetentionPriority({ name: "PHPSESSID" }), 3);
+    assert.equal(bg.cookieRetentionPriority({ name: "inside" }), 4);
+    assert.equal(bg.cookieRetentionPriority({ name: "residual" }), 4);
+  });
+});
