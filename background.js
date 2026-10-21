@@ -96,12 +96,11 @@ const CONFIRM_TIMEOUT_MS = 130_000;
 /// A pairing handshake is a loopback round trip.
 const HELLO_TIMEOUT_MS = 3_000;
 
-/// Grab rejects handoffs with more than 100 cookies or a JSON body over
-/// 32 KiB. Stay under both so a cookie-heavy site still hands off: dropping
-/// cookies beats losing the URL. 30 KiB leaves ~2 KiB under the cap; the
-/// measured body already includes the URL and UA.
+/// Keep URL and body limits aligned with Grab's server-side validation.
+/// The body limit is measured as UTF-8 bytes over the exact JSON string sent.
+const MAX_GRAB_URL_BYTES = 2048;
 const MAX_HANDOFF_COOKIES = 100;
-const MAX_HANDOFF_BODY_BYTES = 30 * 1024;
+const MAX_HANDOFF_BODY_BYTES = 32 * 1024;
 // Bound menu creation and per-tab DOM snapshots while retaining many videos.
 const MAX_VIDEO_ITEMS = 50;
 
@@ -260,41 +259,41 @@ function fitHandoffBody(url, cookies, userAgent) {
     );
     if (byteLength(body) <= MAX_HANDOFF_BODY_BYTES) break;
   }
-  return body;
+  return byteLength(body) <= MAX_HANDOFF_BODY_BYTES ? body : null;
 }
 
-/// The site's cookies in the shape Grab expects. Needs the optional `cookies`
-/// permission; without it (or on any failure) the handoff is URL-only.
-/// `storeId` scopes the read to the tab's cookie store (incognito, Firefox
-/// containers); without it the default store's cookies would leak in.
+/// Read cookies in the shape Grab expects. Errors propagate to the caller so
+/// the URL-only fallback can be accompanied by a visible diagnostic. The
+/// optional `cookies` permission may be absent or denied.
 async function readCookies(url, storeId) {
-  try {
-    const filter = storeId ? { url, storeId } : { url };
-    const all = await chrome.cookies.getAll(filter);
-    const cookies = all.map((c) => ({
-      name: c.name,
-      value: c.value,
-      domain: c.domain,
-      host_only: c.hostOnly,
-      path: c.path,
-      secure: c.secure,
-      expiration_date: c.expirationDate,
-    }));
-    return limitHandoffCookies(cookies);
-  } catch {
-    return [];
-  }
+  const filter = storeId ? { url, storeId } : { url };
+  const all = await chrome.cookies.getAll(filter);
+  const cookies = all.map((c) => ({
+    name: c.name,
+    value: c.value,
+    domain: c.domain,
+    host_only: c.hostOnly,
+    path: c.path,
+    secure: c.secure,
+    expiration_date: c.expirationDate,
+  }));
+  return limitHandoffCookies(cookies);
 }
 
 /// Resolve the cookie store for a handoff context. Returns a store ID string,
-/// undefined for the default store, or null to fail closed (send no cookies).
-/// Firefox exposes tab.cookieStoreId directly; Chrome needs a lookup through
-/// getAllCookieStores() matching tabIds. Chrome's store list has no incognito
-/// flag, so an incognito context with no resolvable store fails closed rather
-/// than guessing.
+/// undefined for the default store, or null when cookies must not be sent.
+/// Incognito cookie forwarding is intentionally disabled. Firefox download items
+/// carry cookieStoreId, preserving non-private container isolation without a
+/// tab ID; Chrome tabs can still be resolved through their store list.
 async function resolveStoreId(ctx) {
+  if (ctx && ctx.incognito === true) return null;
+
+  const explicitStoreId = ctx && ctx.cookieStoreId;
+  if (typeof explicitStoreId === "string" && explicitStoreId) {
+    return explicitStoreId;
+  }
+
   const tabId = ctx && ctx.tabId;
-  const ctxIncognito = ctx && ctx.incognito === true;
   if (Number.isInteger(tabId) && tabId >= 0) {
     let tab;
     try {
@@ -302,9 +301,11 @@ async function resolveStoreId(ctx) {
     } catch {
       tab = undefined;
     }
-    if (tab && tab.cookieStoreId) {
-      return tab.cookieStoreId; // Firefox (containers, incognito).
-    }
+    // A tab lookup can reveal a private context even when the caller lacked
+    // incognito metadata; never read that store's cookies.
+    if (tab && tab.incognito === true) return null;
+    if (tab && tab.cookieStoreId) return tab.cookieStoreId; // Firefox containers.
+
     // Chrome: match the tab against the stores' tabIds.
     try {
       const stores = await chrome.cookies.getAllCookieStores();
@@ -315,11 +316,6 @@ async function resolveStoreId(ctx) {
         if (match) return match.id;
       }
     } catch {}
-    if (ctxIncognito || (tab && tab.incognito === true)) {
-      return null; // Fail closed: never send default-store cookies for incognito.
-    }
-  } else if (ctxIncognito) {
-    return null; // Incognito interception with no tab: fail closed.
   }
   return undefined; // Default store.
 }
@@ -331,6 +327,12 @@ async function resolveStoreId(ctx) {
 /// was lost (timeout). The caller must not fall back to grab:// on
 /// STATUS_MAYBE_SENT — that would risk a duplicate download.
 async function postToGrab(url, ctx) {
+  if (ctx && typeof ctx === "object") delete ctx.cookieWarning;
+  // Match Grab's Rust String::len() check (UTF-8 bytes), avoiding a network
+  // round trip for URLs that Grab will reject with HTTP 414.
+  if (typeof url !== "string" || new TextEncoder().encode(url).length > MAX_GRAB_URL_BYTES) {
+    return 414;
+  }
   let secret;
   try {
     secret = await getPairingCode();
@@ -348,13 +350,23 @@ async function postToGrab(url, ctx) {
     if (!verified) return STATUS_UNVERIFIED;
     // Cookies let Grab's yt-dlp pass bot challenges (Cloudflare etc.).
     // They go only to a Grab that has proven it holds the pairing code.
-    // Scope to the tab's cookie store: incognito/container tabs must not
-    // send the default store's cookies.
+    // Never export incognito cookies; retain Firefox container scoping for
+    // ordinary downloads using DownloadItem.cookieStoreId.
     try {
       const storeId = await resolveStoreId(ctx);
-      cookies = storeId === null ? [] : await readCookies(url, storeId);
+      if (storeId === null) {
+        cookies = [];
+        if (ctx && typeof ctx === "object") {
+          ctx.cookieWarning = "Incognito cookie forwarding is disabled; Grab received the URL without cookies.";
+        }
+      } else {
+        cookies = await readCookies(url, storeId);
+      }
     } catch {
-      cookies = []; // Cookie read failure: URL-only handoff.
+      cookies = [];
+      if (ctx && typeof ctx === "object") {
+        ctx.cookieWarning = "Grab could not read this site's cookies. Check the extension's optional Cookies permission or Firefox first-party isolation; the URL was sent without cookies.";
+      }
     }
   }
   let body, headers;
@@ -368,6 +380,7 @@ async function postToGrab(url, ctx) {
     // Preserve the URL and retain the highest-value auth cookies within the
     // payload budget; don't drop the whole jar as the first fallback.
     body = fitHandoffBody(url, cookies, userAgent);
+    if (body === null) return 413; // Do not send a body Grab will reject.
     headers = { "Content-Type": "application/json" };
     if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
   } catch {
@@ -382,6 +395,16 @@ async function postToGrab(url, ctx) {
       { method: "POST", headers, body },
       CONFIRM_TIMEOUT_MS,
     );
+    if (resp.status >= 200 && resp.status < 300 && ctx && typeof ctx === "object") {
+      const acceptedHeader = resp.headers?.get?.("x-grab-cookies-accepted");
+      if (acceptedHeader !== null && acceptedHeader !== undefined) {
+        const accepted = Number(acceptedHeader);
+        const sentCount = JSON.parse(body).cookies.length;
+        if (Number.isSafeInteger(accepted) && accepted < sentCount && !ctx.cookieWarning) {
+          ctx.cookieWarning = `Grab accepted the URL but discarded ${sentCount - accepted} of ${sentCount} supplied cookies.`;
+        }
+      }
+    }
     return resp.status;
   } catch {
     // Fast failure (connection refused): Grab isn't running, the POST never
@@ -420,7 +443,8 @@ async function handOff(url, ctx, retryDelays = HANDOFF_RETRY_DELAYS_MS) {
 /// back would duplicate the handoff.
 async function explicitSend(url, tabId, incognito) {
   if (!toGrabUrl(url)) return;
-  const status = await postToGrabWithRetry(url, { tabId, incognito });
+  const ctx = { tabId, incognito };
+  const status = await postToGrabWithRetry(url, ctx);
   const tabArg =
     Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
   if (status === 0) {
@@ -436,12 +460,16 @@ async function explicitSend(url, tabId, incognito) {
       if (Number.isInteger(tabId) && tabId >= 0) warnedTabs.add(tabId);
     } catch {}
   } else if (status >= 200 && status < 300) {
-    // Success: clear any earlier warning.
-    try {
-      await chrome.action.setBadgeText({ ...tabArg, text: "" });
-      await chrome.action.setTitle({ ...tabArg, title: "" });
-      if (Number.isInteger(tabId) && tabId >= 0) warnedTabs.delete(tabId);
-    } catch {}
+    if (ctx.cookieWarning) {
+      await showCookieWarning(ctx);
+    } else {
+      // Success: clear any earlier warning.
+      try {
+        await chrome.action.setBadgeText({ ...tabArg, text: "" });
+        await chrome.action.setTitle({ ...tabArg, title: "" });
+        if (Number.isInteger(tabId) && tabId >= 0) warnedTabs.delete(tabId);
+      } catch {}
+    }
   } else if (status !== STATUS_MAYBE_SENT) {
     // Concrete HTTP rejections (especially exhausted 429 retries, 408, or
     // 409) need visible feedback. Never fall back to grab:// after a response.
@@ -449,9 +477,11 @@ async function explicitSend(url, tabId, incognito) {
       ? "Grab did not respond in time (HTTP 408). Check Grab before retrying."
       : status === 409
         ? "Grab did not queue this URL (HTTP 409). Check the Grab dialog."
-        : status === 429
-          ? "Grab's queue is full after retries (HTTP 429). Try again after a download finishes."
-          : `Grab could not accept this URL (HTTP ${status}).`;
+        : status === 414
+          ? "URL exceeds Grab's 2048-byte handoff limit; the original download was not handed off."
+          : status === 429
+            ? "Grab's queue is full after retries (HTTP 429). Try again after a download finishes."
+            : `Grab could not accept this URL (HTTP ${status}).`;
     try {
       await chrome.action.setBadgeText({ ...tabArg, text: "!" });
       await chrome.action.setBadgeBackgroundColor({ ...tabArg, color: "#cc0000" });
@@ -460,6 +490,21 @@ async function explicitSend(url, tabId, incognito) {
   }
   // STATUS_MAYBE_SENT may have been accepted; never fall back because that
   // risks a duplicate download.
+}
+
+
+/// Show why a handoff was accepted without a fully usable cookie jar.
+async function showCookieWarning(ctx) {
+  const tabId = ctx && ctx.tabId;
+  const tabArg = Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
+  const title = ctx && ctx.cookieWarning;
+  if (!title) return;
+  try {
+    await chrome.action.setBadgeText({ ...tabArg, text: "!" });
+    await chrome.action.setBadgeBackgroundColor({ ...tabArg, color: "#cc0000" });
+    await chrome.action.setTitle({ ...tabArg, title });
+    if (Number.isInteger(tabId) && tabId >= 0) warnedTabs.add(tabId);
+  } catch {}
 }
 
 /// True when the URL's file extension is on the user's skip list.
@@ -520,16 +565,24 @@ async function removeBrowserCopy(id) {
 }
 
 async function interceptDownload(item) {
+  // Prefer the post-redirect URL when the browser exposes it. This lets Grab
+  // fetch the actual target and read cookies for that host.
+  const url = toGrabUrl(item.finalUrl) ? item.finalUrl : item.url;
   // Non-http(s) URLs (blob:, data:) and URLs with credentials can't be
   // handed over.
-  if (!toGrabUrl(item.url)) return;
+  if (!toGrabUrl(url)) return;
   // Hand off over Grab's local HTTP endpoint. If Grab isn't running or
   // refuses the request, the download is left to the browser.
   // Only cancel the browser download on HTTP 200 (queued). HTTP 202 means
   // Grab opened the New Download card (nothing queued yet) — the user may
   // not complete it, so the browser copy must stay.
-  const status = await postToGrabWithRetry(item.url, { incognito: item.incognito === true });
+  const ctx = {
+    incognito: item.incognito === true,
+    cookieStoreId: item.cookieStoreId,
+  };
+  const status = await postToGrabWithRetry(url, ctx);
   if (status !== 200) return;
+  if (ctx.cookieWarning) await showCookieWarning(ctx);
 
   await claimDownload(item.id);
   // A tiny download can finish while the handoff is in flight, before the
@@ -1662,6 +1715,9 @@ if (typeof module !== "undefined" && module.exports) {
     snapshotVideoFinds,
     cookieRetentionPriority,
     limitHandoffCookies,
+    fitHandoffBody,
+    MAX_GRAB_URL_BYTES,
+    MAX_HANDOFF_BODY_BYTES,
     MAX_VIDEO_ITEMS,
     manifestMenuRows,
     directMenuRow,
