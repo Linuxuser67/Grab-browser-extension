@@ -111,7 +111,7 @@ test("saved code stays pending until the background worker verifies it", async (
 
   assert.equal(
     status.textContent,
-    "Verified — Grab recognizes this code; cookie access is granted.",
+    "Verified — Grab recognizes this code. Cookie access is granted.",
   );
 });
 
