@@ -2,110 +2,238 @@
 <html>
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Grab Options</title>
     <style>
       :root {
         color-scheme: light dark;
-      }
-      body {
-        font-family: system-ui, sans-serif;
-        font-size: 14px;
-        max-width: 480px;
-        margin: 24px;
-        color: #1e1e1e;
-        background: #ffffff;
+        --bg: #ffffff;
+        --fg: #1e1e1e;
+        --hint: #666666;
+        --border: #d0d0d0;
+        --input-bg: #ffffff;
+        --accent: #1a73e8;
+        --saved: #1a7f37;
+        --danger: #c5221f;
+        --button-fg: #ffffff;
       }
       @media (prefers-color-scheme: dark) {
-        body {
-          color: #e0e0e0;
-          background: #1e1e1e;
+        :root {
+          --bg: #1e1e1e;
+          --fg: #e8e8e8;
+          --hint: #b0b0b0;
+          --border: #484848;
+          --input-bg: #2d2d2d;
+          --accent: #8ab4f8;
+          --saved: #4caf50;
+          --danger: #f28b82;
+          --button-fg: #1e1e1e;
         }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        max-width: 640px;
+        margin: 32px auto;
+        padding: 0 24px;
+        color: var(--fg);
+        background: var(--bg);
+        font: 14px/1.5 system-ui, sans-serif;
+      }
+      h1 {
+        margin: 0 0 24px;
+        font-size: 22px;
+        line-height: 1.25;
+        font-weight: 600;
+      }
+      fieldset {
+        min-width: 0;
+        margin: 0 0 24px;
+        padding: 0;
+        border: 0;
+      }
+      legend {
+        width: 100%;
+        margin: 0 0 12px;
+        padding: 0;
+        font-size: 16px;
+        font-weight: 600;
+      }
+      .setting {
+        margin: 0 0 16px;
       }
       label {
         display: block;
-        margin: 16px 0 4px;
+        margin: 0 0 4px;
+      }
+      label.checkbox {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        cursor: pointer;
+      }
+      label.checkbox input {
+        flex: 0 0 auto;
+        margin: 4px 0 0;
+        accent-color: var(--accent);
       }
       .hint {
-        color: #666;
-        font-size: 12px;
-        margin: 2px 0 0;
+        margin: 4px 0 0;
+        color: var(--hint);
+        font-size: 14px;
+        line-height: 1.5;
       }
-      @media (prefers-color-scheme: dark) {
-        .hint {
-          color: #aaa;
-        }
+      input[type="text"],
+      input[type="number"] {
+        min-height: 34px;
+        padding: 6px 8px;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        background: var(--input-bg);
+        color: var(--fg);
+        font: inherit;
       }
       input[type="text"] {
         width: 100%;
-        box-sizing: border-box;
-        padding: 6px 8px;
-        margin-top: 4px;
+      }
+      input[type="number"] {
+        width: 88px;
+      }
+      input[aria-invalid="true"] {
+        border-color: var(--danger);
+      }
+      input:focus-visible,
+      button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .size-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      button {
+        min-height: 34px;
+        padding: 6px 14px;
+        border: 1px solid var(--accent);
+        border-radius: 5px;
+        background: var(--accent);
+        color: var(--button-fg);
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover {
+        filter: brightness(0.96);
+      }
+      #pairingStatus {
+        display: inline-block;
+        margin-left: 8px;
       }
       #saved {
-        color: #1a7f37;
+        min-height: 1.5em;
+        margin: 8px 0 0;
+        color: var(--saved);
         opacity: 0;
-        transition: opacity 0.3s;
-        margin-top: 16px;
+        transition: opacity 150ms ease-out;
+      }
+      #saved.show {
+        opacity: 1;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #saved {
+          transition: none;
+        }
+      }
+      @media (max-width: 560px) {
+        body {
+          margin: 20px auto;
+          padding: 0 16px;
+        }
       }
     </style>
   </head>
   <body>
-    <h2>Grab</h2>
-    <label>
-      <input type="checkbox" id="interceptDownloads" />
-      Automatically send browser downloads to Grab
-    </label>
-    <p class="hint">
-      When on, downloads are cancelled in the browser and opened in Grab
-      instead. Blob and data URLs can't be handed off and always stay in the
-      browser.
-    </p>
-    <label for="minSizeMB">Only intercept downloads of at least</label>
-    <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px">
-      <input
-        type="number"
-        id="minSizeMB"
-        min="0"
-        step="1"
-        style="width: 80px; padding: 6px 8px"
-      />
-      <span>MB</span>
-    </div>
-    <p class="hint">
-      Smaller downloads stay in the browser. 0 intercepts everything.
-    </p>
-    <label for="skipTypes">Don't intercept these file types</label>
-    <input type="text" id="skipTypes" placeholder="pdf, jpg, png" />
-    <p class="hint">Comma-separated extensions, e.g. <code>pdf, jpg</code>.</p>
-    <label>
-      <input type="checkbox" id="showContextMenu" />
-      Show “Download with Grab” in the right-click menu
-    </label>
-    <label>
-      <input type="checkbox" id="detectVideos" />
-      Detect videos playing in tabs
-    </label>
-    <p class="hint">
-      Offered qualities appear in the right-click menu under “Videos detected
-      by Grab”.
-    </p>
-    <h3>Pairing</h3>
-    <label for="pairingCode">Pairing code from Grab</label>
-    <input
-      type="text"
-      id="pairingCode"
-      autocomplete="off"
-      spellcheck="false"
-      placeholder="Grab → Preferences → Browser extension"
-    />
-    <p class="hint">
-      With a code, the extension checks that it is talking to Grab, signs what
-      it sends, and shares the site's cookies so Grab can download pages that
-      need them. Without one, only links are sent. Leave empty to unpair.
-    </p>
-    <button type="button" id="savePairing">Pair</button>
-    <span id="pairingStatus" class="hint" role="status"></span>
-    <p id="saved">Saved</p>
+    <h1>Grab Options</h1>
+    <main>
+      <fieldset>
+        <legend>Downloads</legend>
+        <div class="setting">
+          <label class="checkbox">
+            <input type="checkbox" id="interceptDownloads" />
+            <span>Automatically send browser downloads to Grab</span>
+          </label>
+          <p class="hint">
+            When on, downloads are cancelled in the browser and opened in Grab
+            instead. Blob and data URLs can't be handed off and always stay in the
+            browser.
+          </p>
+        </div>
+
+        <div class="setting">
+          <label for="minSizeMB">Only intercept downloads of at least</label>
+          <div class="size-row">
+            <input type="number" id="minSizeMB" min="0" step="1" />
+            <span>MB</span>
+          </div>
+          <p class="hint">
+            Smaller downloads stay in the browser. 0 intercepts everything.
+          </p>
+        </div>
+
+        <div class="setting">
+          <label for="skipTypes">Don't intercept these file types</label>
+          <input type="text" id="skipTypes" placeholder="pdf, jpg, png" />
+          <p class="hint">Comma-separated extensions, e.g. <code>pdf, jpg</code>.</p>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Browser integration</legend>
+        <div class="setting">
+          <label class="checkbox">
+            <input type="checkbox" id="showContextMenu" />
+            <span>Show “Download with Grab” in the right-click menu</span>
+          </label>
+        </div>
+
+        <div class="setting">
+          <label class="checkbox">
+            <input type="checkbox" id="detectVideos" />
+            <span>Detect videos playing in tabs</span>
+          </label>
+          <p class="hint">
+            Offered qualities appear in the right-click menu under “Videos detected
+            by Grab”.
+          </p>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Pairing</legend>
+        <div class="setting">
+          <label for="pairingCode">Pairing code from Grab</label>
+          <input
+            type="text"
+            id="pairingCode"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Grab → Preferences → Browser extension"
+            aria-describedby="pairingHelp pairingStatus"
+          />
+          <p class="hint" id="pairingHelp">
+            With a code, the extension checks that it is talking to Grab, signs what
+            it sends, and shares the site's cookies so Grab can download pages that
+            need them. Without one, only links are sent. Leave empty to unpair.
+          </p>
+        </div>
+        <button type="button" id="savePairing">Pair</button>
+        <span id="pairingStatus" class="hint" role="status" aria-live="polite"></span>
+      </fieldset>
+
+      <p id="saved" role="status" aria-live="polite"></p>
+    </main>
     <script src="shared.js"></script>
     <script src="settings.js"></script>
     <script src="options.js"></script>

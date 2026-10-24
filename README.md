@@ -55,7 +55,7 @@ Grab must be installed with its desktop entry (it registers as the
   Instagram, Facebook, X, Twitch, Vimeo, …) — a detected media URL can't
   work there, so sending the page goes through yt-dlp the usual way.
 - **Options page**: same settings as the popup, in a full page (via the
-  popup's "Full options page" link or right-click → Options).
+  gear button in the popup header or right-click → Options).
 
 Magnet links are passed to the OS untouched — Grab already handles `magnet:`.
 `blob:` and `data:` URLs can't be handed off and always stay in the browser.

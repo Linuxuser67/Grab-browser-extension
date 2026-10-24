@@ -60,6 +60,9 @@ function bindSettingsForm(doc) {
       detectVideos: els.detect.checked,
       minSizeMB: els.minSize.value,
     });
+    // Populate the live region only after a save so it does not announce
+    // "Saved" when the popup or Options page first opens.
+    els.saved.textContent = "Saved";
     // Flash the "saved" indicator. popup.html styles #saved.show,
     // options.html styles #saved's inline opacity; set both, the unused
     // one is harmless.
