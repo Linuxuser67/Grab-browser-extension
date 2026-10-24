@@ -1938,3 +1938,27 @@ describe("review hardening (1.5.8)", () => {
     assert.deepEqual(await ask(), { state: "down" });
   });
 });
+
+
+describe("automatic interception pairing race", () => {
+  test("unpairing between the guard and POST cannot trigger an unsigned interception", async () => {
+    const chrome = makeChrome({
+      localSettings: pairedLocal(),
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    });
+    loadBackground(chrome);
+    let reads = 0;
+    chrome.storage.local.get = async (defaults) => {
+      reads += 1;
+      return { ...defaults, pairingCode: reads === 1 ? pairedLocal().pairingCode : "" };
+    };
+    await chrome._listeners["downloads.onCreated"]({
+      id: 8,
+      url: "https://example.com/a.iso",
+      fileSize: 100,
+    });
+    assert.ok(reads >= 2, "the pairing code was re-read at the POST boundary");
+    assert.equal(chrome._calls.some(([name]) => name === "handoff"), false);
+    assert.equal(chrome._calls.some(([name]) => name === "cancel"), false);
+  });
+});

@@ -387,6 +387,9 @@ async function postToGrab(url, ctx) {
   } catch {
     return 0; // Storage unreachable; treat as Grab not running.
   }
+  // Explicit sends may remain URL-only, but automatic interception must never
+  // accept an unsigned POST if the user unpairs between the outer guard and here.
+  if (ctx && ctx.requirePairing === true && !secret) return STATUS_UNVERIFIED;
   let cookies = [];
   if (secret) {
     let verified;
@@ -648,6 +651,7 @@ async function interceptDownload(item) {
   const ctx = {
     incognito: item.incognito === true,
     cookieStoreId: item.cookieStoreId,
+    requirePairing: true,
   };
   const status = await postToGrabWithRetry(url, ctx);
   if (status !== 200) return;
