@@ -1931,7 +1931,7 @@ describe("review hardening (1.5.8)", () => {
       const nonce = new URL(url).searchParams.get("n");
       const proof = nodeCrypto
         .createHmac("sha256", Buffer.from(serverSecret, "hex"))
-        .update("grab-server\\u0000" + nonce)
+        .update("grab-server\u0000" + nonce)
         .digest("hex");
       return { status: 200, ok: true, json: async () => ({ proof }) };
     };
