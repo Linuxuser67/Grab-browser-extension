@@ -11,6 +11,10 @@
         --input-bg: #ffffff;
         --saved: #1a7f37;
         --accent: #1a73e8;
+        --status-ok: #188038;
+        --status-warning: #9a6700;
+        --status-down: #b3261e;
+        --status-neutral: #6b7280;
       }
       @media (prefers-color-scheme: dark) {
         :root {
@@ -20,6 +24,10 @@
           --input-bg: #2d2d2d;
           --saved: #4caf50;
           --accent: #8ab4f8;
+          --status-ok: #4caf50;
+          --status-warning: #e5c07b;
+          --status-down: #f28b82;
+          --status-neutral: #b0b0b0;
         }
       }
       body {
@@ -35,7 +43,7 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 12px;
+        gap: 10px;
         margin-bottom: 12px;
       }
       h2 {
@@ -130,28 +138,36 @@
         margin: 12px 0 0;
       }
       .status {
-        font-size: 12px;
-        padding: 6px 10px;
-        border-radius: 6px;
-        margin: 0 0 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        flex: 0 1 auto;
+        min-width: 0;
+        margin: 0 0 0 auto;
+        color: var(--status-neutral);
+        font-size: 11px;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+      .status::before {
+        width: 6px;
+        height: 6px;
+        flex: 0 0 6px;
+        border-radius: 50%;
+        background: currentColor;
+        content: "";
       }
       .status.ok {
-        background: #e6f4ea;
-        color: #1a7f37;
+        color: var(--status-ok);
+      }
+      .status.warning {
+        color: var(--status-warning);
       }
       .status.down {
-        background: #fce8e6;
-        color: #c5221f;
+        color: var(--status-down);
       }
-      @media (prefers-color-scheme: dark) {
-        .status.ok {
-          background: #1a3a24;
-          color: #4caf50;
-        }
-        .status.down {
-          background: #3a1a1a;
-          color: #f28b82;
-        }
+      .status.neutral {
+        color: var(--status-neutral);
       }
       @media (prefers-reduced-motion: reduce) {
         #saved {
@@ -163,6 +179,7 @@
   <body>
     <header class="header">
       <h2><img src="icons/icon32.png" alt="" />Grab</h2>
+      <span id="grabStatus" class="status neutral" role="status" aria-live="polite" aria-atomic="true">Checking…</span>
       <button
         type="button"
         id="openOptions"
@@ -186,8 +203,7 @@
         </svg>
       </button>
     </header>
-    <div id="grabStatus" class="status" role="status" aria-live="polite" aria-atomic="true">Checking Grab…</div>
-
+    
     <label class="checkbox">
       <input type="checkbox" id="interceptDownloads" />
       <span>Automatically send browser downloads to Grab</span>

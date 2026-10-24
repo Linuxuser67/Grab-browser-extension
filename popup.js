@@ -6,8 +6,8 @@ bindSettingsForm(document);
 // The worker does the check: it knows the pairing code and the port.
 const STATUS_TEXT = {
   verified: ["Connected", "status ok"],
-  unverified: ["Unverified", "status down"],
-  unpaired: ["Not paired", "status down"],
+  unverified: ["Unverified", "status warning"],
+  unpaired: ["Not paired", "status neutral"],
   down: ["Not running", "status down"],
 };
 
