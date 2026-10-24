@@ -1434,7 +1434,11 @@ describe("HTTP handoff to Grab", () => {
     await pair();
     mockPairedGrab();
     assert.equal(await bg.handOff("https://videos.example.com/watch/1"), true);
-    assert.deepEqual(JSON.parse(posts()[0].opts.body), {
+    const sent = JSON.parse(posts()[0].opts.body);
+    const { timestamp_ms, nonce, ...payload } = sent;
+    assert.ok(Number.isSafeInteger(timestamp_ms) && timestamp_ms > 0);
+    assert.match(nonce, /^[0-9a-f]{32}$/);
+    assert.deepEqual(payload, {
       url: "https://videos.example.com/watch/1",
       cookies: [
         {
@@ -1467,7 +1471,11 @@ describe("HTTP handoff to Grab", () => {
     await pair();
     mockPairedGrab();
     assert.equal(await bg.handOff("https://example.com/f.zip"), true);
-    assert.deepEqual(JSON.parse(posts()[0].opts.body), {
+    const sent = JSON.parse(posts()[0].opts.body);
+    const { timestamp_ms, nonce, ...payload } = sent;
+    assert.ok(Number.isSafeInteger(timestamp_ms) && timestamp_ms > 0);
+    assert.match(nonce, /^[0-9a-f]{32}$/);
+    assert.deepEqual(payload, {
       url: "https://example.com/f.zip",
       cookies: [],
       user_agent: navigator.userAgent,
@@ -1503,16 +1511,56 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(post.url, ENDPOINT);
     const token = post.opts.headers["X-Grab-Token"];
     assert.equal(token, hmac("grab-client\u0000", post.opts.body), "token signs the exact body");
-    assert.equal(JSON.parse(post.opts.body).cookies.length, 1);
+    const signedBody = JSON.parse(post.opts.body);
+    assert.ok(Number.isSafeInteger(signedBody.timestamp_ms) && signedBody.timestamp_ms > 0);
+    assert.match(signedBody.nonce, /^[0-9a-f]{32}$/);
+    assert.equal(signedBody.cookies.length, 1);
   });
 
-  test("every handshake uses a fresh nonce", async () => {
+  test("every handshake and authenticated handoff uses a fresh nonce", async () => {
     await pair();
     mockPairedGrab();
     await bg.handOff("https://example.com/a.zip");
     await bg.handOff("https://example.com/b.zip");
-    const nonces = hellos().map((c) => new URL(c.url).searchParams.get("n"));
-    assert.equal(new Set(nonces).size, 2);
+    const helloNonces = hellos().map((c) => new URL(c.url).searchParams.get("n"));
+    assert.equal(new Set(helloNonces).size, 2);
+    const bodyNonces = posts().map((c) => JSON.parse(c.opts.body).nonce);
+    assert.equal(bodyNonces.length, 2);
+    assert.ok(bodyNonces.every((nonce) => /^[0-9a-f]{32}$/.test(nonce)));
+    assert.equal(new Set(bodyNonces).size, 2, "POST nonces must be unique");
+  });
+
+  test("a 429 retry signs a new body nonce", async () => {
+    await pair();
+    fetchCalls = [];
+    let addCount = 0;
+    globalThis.fetch = async (url, opts = {}) => {
+      fetchCalls.push({ url, opts });
+      if (url.includes("/hello")) {
+        const helloNonce = new URL(url).searchParams.get("n");
+        return {
+          status: 200,
+          ok: true,
+          json: async () => ({ proof: hmac("grab-server\u0000", helloNonce) }),
+        };
+      }
+      addCount += 1;
+      const status = addCount === 1 ? 429 : 200;
+      return { status, ok: status >= 200 && status < 300 };
+    };
+    assert.equal(await bg.handOff("https://example.com/retry.zip"), true);
+    const sent = posts().map((post) => JSON.parse(post.opts.body));
+    assert.equal(sent.length, 2);
+    assert.notEqual(sent[0].nonce, sent[1].nonce, "retry must use a fresh nonce");
+    assert.notEqual(sent[0].timestamp_ms, undefined);
+    assert.notEqual(sent[1].timestamp_ms, undefined);
+    for (const post of posts()) {
+      assert.equal(
+        post.opts.headers["X-Grab-Token"],
+        hmac("grab-client\u0000", post.opts.body),
+        "each retry signs its own exact body"
+      );
+    }
   });
 
   test("an impostor that cannot prove the code gets nothing: no cookies, no POST", async () => {

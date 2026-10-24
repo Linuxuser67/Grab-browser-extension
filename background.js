@@ -227,16 +227,21 @@ function limitHandoffCookies(cookies) {
     .map(({ cookie }) => cookie);
 }
 
-function serializeHandoffBody(url, cookies, userAgent) {
-  return JSON.stringify({ url, cookies, user_agent: userAgent });
+function serializeHandoffBody(url, cookies, userAgent, requestMetadata) {
+  return JSON.stringify({
+    url,
+    cookies,
+    user_agent: userAgent,
+    ...(requestMetadata || {}),
+  });
 }
 
 /// Keep a valid URL handoff even if a site exposes a very large cookie jar.
 /// Drop lower-priority cookies first; among equal priorities, remove the
 /// largest serialized cookies first. Critical auth cookies are retained unless
 /// they alone prevent the body from fitting.
-function fitHandoffBody(url, cookies, userAgent) {
-  let body = serializeHandoffBody(url, cookies, userAgent);
+function fitHandoffBody(url, cookies, userAgent, requestMetadata) {
+  let body = serializeHandoffBody(url, cookies, userAgent, requestMetadata);
   const byteLength = (value) => new TextEncoder().encode(value).length;
   if (byteLength(body) <= MAX_HANDOFF_BODY_BYTES) return body;
 
@@ -255,7 +260,8 @@ function fitHandoffBody(url, cookies, userAgent) {
     body = serializeHandoffBody(
       url,
       cookies.filter((_, index) => retained.has(index)),
-      userAgent
+      userAgent,
+      requestMetadata
     );
     if (byteLength(body) <= MAX_HANDOFF_BODY_BYTES) break;
   }
@@ -394,7 +400,15 @@ async function postToGrab(url, ctx) {
         : undefined;
     // Preserve the URL and retain the highest-value auth cookies within the
     // payload budget; don't drop the whole jar as the first fallback.
-    body = fitHandoffBody(url, cookies, userAgent);
+    // Every authenticated POST gets fresh signed metadata. Retrying postToGrab
+    // generates a new nonce, so a network retry can never replay an earlier body.
+    const requestMetadata = secret
+      ? {
+          timestamp_ms: Date.now(),
+          nonce: bytesToHex(crypto.getRandomValues(new Uint8Array(16))),
+        }
+      : undefined;
+    body = fitHandoffBody(url, cookies, userAgent, requestMetadata);
     if (body === null) return 413; // Do not send a body Grab will reject.
     headers = { "Content-Type": "application/json" };
     if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
