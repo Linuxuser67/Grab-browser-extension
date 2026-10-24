@@ -3,23 +3,43 @@
 
 bindSettingsForm(document);
 
-// The worker does the check: it knows the pairing code and the port.
+const STATUS_REFRESH_INTERVAL_MS = 5_000;
+const STATUS_MESSAGE_TIMEOUT_MS = 4_000;
+let statusCheckInFlight = false;
+
+// The worker probes the local endpoint and verifies the pairing proof when
+// a code is saved.
 const STATUS_TEXT = {
   verified: ["Connected", "status ok"],
-  unverified: ["Unverified", "status warning"],
-  unpaired: ["Not paired", "status neutral"],
+  "running-unpaired": ["Running · Not paired", "status warning"],
+  unverified: ["Running · Unverified", "status warning"],
   down: ["Not running", "status down"],
+  unknown: ["Status unavailable", "status neutral"],
 };
 
 async function checkGrabStatus() {
   const el = document.getElementById("grabStatus");
-  let state = "down";
+  if (!el || statusCheckInFlight) return;
+  statusCheckInFlight = true;
+
+  let state = "unknown";
+  let timeoutId;
   try {
-    const reply = await chrome.runtime.sendMessage({ type: "grab-status" });
+    const timeout = new Promise((resolve) => {
+      timeoutId = setTimeout(() => resolve(null), STATUS_MESSAGE_TIMEOUT_MS);
+    });
+    const reply = await Promise.race([
+      chrome.runtime.sendMessage({ type: "grab-status" }),
+      timeout,
+    ]);
     if (reply && STATUS_TEXT[reply.state]) state = reply.state;
   } catch {
-    // No worker answer: treat as not running.
+    // A missing worker response is not evidence that Grab itself is down.
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    statusCheckInFlight = false;
   }
+
   const [text, className] = STATUS_TEXT[state];
   el.textContent = text;
   el.className = className;
@@ -30,3 +50,7 @@ document.getElementById("openOptions").addEventListener("click", () => {
 });
 
 checkGrabStatus();
+setInterval(checkGrabStatus, STATUS_REFRESH_INTERVAL_MS);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) checkGrabStatus();
+});

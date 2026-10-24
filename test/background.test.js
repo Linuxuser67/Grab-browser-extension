@@ -1921,17 +1921,36 @@ describe("review hardening (1.5.8)", () => {
     assert.equal(ctx.cookieWarning, undefined);
   });
 
-  test("popup status distinguishes unpaired, verified and down", async () => {
+  test("popup status separates app reachability from pairing verification", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
+    const serverSecret = "cd".repeat(32);
+    const requested = [];
+    const runningFetch = async (url) => {
+      requested.push(url);
+      const nonce = new URL(url).searchParams.get("n");
+      const proof = nodeCrypto
+        .createHmac("sha256", Buffer.from(serverSecret, "hex"))
+        .update("grab-server\\u0000" + nonce)
+        .digest("hex");
+      return { status: 200, ok: true, json: async () => ({ proof }) };
+    };
+    globalThis.fetch = runningFetch;
     const ask = () =>
       new Promise((resolve) => {
         const kept = chrome._listeners["runtime.onMessage"]({ type: "grab-status" }, {}, resolve);
         assert.equal(kept, true, "channel stays open for the async answer");
       });
-    assert.deepEqual(await ask(), { state: "unpaired" });
-    await chrome.storage.local.set({ pairingCode: "cd".repeat(32) });
+
+    assert.deepEqual(await ask(), { state: "running-unpaired" });
+    assert.match(requested[0], /^http:\/\/127\.0\.0\.1:9412\/hello\?n=[0-9a-f]{32}$/);
+    globalThis.fetch = async () => ({ status: 503, ok: false });
+    assert.deepEqual(await ask(), { state: "unverified" });
+    globalThis.fetch = runningFetch;
+    await chrome.storage.local.set({ pairingCode: serverSecret });
     assert.deepEqual(await ask(), { state: "verified" });
+    await chrome.storage.local.set({ pairingCode: "ef".repeat(32) });
+    assert.deepEqual(await ask(), { state: "unverified" });
     globalThis.fetch = async () => {
       throw new Error("connection refused");
     };

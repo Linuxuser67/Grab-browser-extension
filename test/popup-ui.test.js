@@ -35,6 +35,10 @@ test("popup status uses a compact dot and distinct semantic states", () => {
   assert.ok(html.includes("color: var(--status-down)"));
   assert.ok(html.includes(".status.neutral"));
   assert.ok(html.includes("color: var(--status-neutral)"));
-  assert.ok(js.includes('unverified: ["Unverified", "status warning"]'));
-  assert.ok(js.includes('unpaired: ["Not paired", "status neutral"]'));
+  assert.ok(js.includes('unverified: ["Running · Unverified", "status warning"]'));
+  assert.ok(js.includes('"running-unpaired": ["Running · Not paired", "status warning"]'));
+  assert.ok(js.includes('down: ["Not running", "status down"]'));
+  assert.ok(js.includes('unknown: ["Status unavailable", "status neutral"]'));
+  assert.ok(js.includes("setInterval(checkGrabStatus, STATUS_REFRESH_INTERVAL_MS)"));
+  assert.ok(js.includes('document.addEventListener("visibilitychange"'));
 });

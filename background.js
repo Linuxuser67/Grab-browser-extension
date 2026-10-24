@@ -1740,11 +1740,49 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 /// a plain listener on the port is not enough.
 async function grabStatus() {
   const secret = await getPairingCode();
-  if (!secret) return { state: "unpaired" };
+  let nonce;
+  let response;
+
+  // Probe even when no pairing code is saved: reachability and identity are
+  // separate states. Only a matching HMAC earns the "Connected" status.
   try {
-    return { state: (await verifyGrab(secret)) ? "verified" : "unverified" };
+    nonce = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+    response = await fetchWithTimeout(
+      `${GRAB_BASE_URL}/hello?n=${nonce}`,
+      { method: "GET" },
+      HELLO_TIMEOUT_MS,
+    );
   } catch {
     return { state: "down" };
+  }
+
+  // A response means the local endpoint is reachable, even if it cannot be
+  // authenticated. Do not mistake an HTTP/protocol error for a stopped app.
+  if (!response.ok) return { state: "unverified" };
+
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    return { state: "unverified" };
+  }
+  const proof = body && body.proof;
+  if (typeof proof !== "string" || !/^[0-9a-f]{64}$/i.test(proof)) {
+    return { state: "unverified" };
+  }
+
+  // The extension can report reachability without a saved code, but cannot
+  // claim an authenticated connection until the proof matches that code.
+  if (!secret) return { state: "running-unpaired" };
+
+  try {
+    const expected = await hmacHex(secret, SERVER_CONTEXT, nonce);
+    return {
+      state: constantTimeEqual(proof, expected) ? "verified" : "unverified",
+    };
+  } catch {
+    // Crypto/response failures are not proof that the app is stopped.
+    return { state: "unverified" };
   }
 }
 
