@@ -215,6 +215,6 @@ test("saving a new code shows Saved first and then the verification result", asy
 
   assert.equal(
     status.textContent,
-    "Verified — cookie access is not granted, so handoffs are URL-only.",
+    "Verified — Grab recognizes this code. Cookie access is not granted, so handoffs are URL-only.",
   );
 });
