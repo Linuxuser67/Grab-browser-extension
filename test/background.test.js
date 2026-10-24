@@ -938,8 +938,9 @@ describe("HTTP handoff to Grab", () => {
   const pair = () => chrome.storage.local.set({ pairingCode: SECRET });
 
   beforeEach(() => {
+    // Most handoff tests intentionally start unpaired; cases that need the
+    // authenticated path call pair() explicitly.
     chrome = makeChrome({
-      localSettings: pairedLocal(),
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
     bg = loadBackground(chrome);
