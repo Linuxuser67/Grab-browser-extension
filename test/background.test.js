@@ -28,6 +28,7 @@ function makeChrome(shared) {
   });
 
   const chrome = {
+    _local: localSettings,
     _listeners: listeners,
     _calls: calls,
     _alarms: alarms,
@@ -144,7 +145,17 @@ function loadBackground(chrome) {
   // Default: a Grab that accepts every handoff and records the URL it got.
   // Tests must not depend on a real Grab listening on 127.0.0.1:9412; the HTTP
   // handoff suite installs its own fetch for failure cases.
+  // A paired Grab answers the /hello challenge with the proof for the stored code.
   globalThis.fetch = async (url, opts) => {
+    if (!opts || opts.method === "GET") {
+      const code = chrome._local && chrome._local.pairingCode;
+      const nonce = new URL(url).searchParams.get("n");
+      const proof = code
+        ? nodeCrypto.createHmac("sha256", Buffer.from(code, "hex"))
+            .update("grab-server\u0000" + nonce).digest("hex")
+        : "";
+      return { status: 200, ok: true, json: async () => ({ proof }) };
+    }
     chrome._calls.push(["handoff", JSON.parse(opts.body).url]);
     return { status: 200, ok: true };
   };
@@ -152,6 +163,9 @@ function loadBackground(chrome) {
 }
 
 const MiB = 1024 * 1024;
+/// Interception only cancels browser downloads for a paired Grab, so the
+/// interception tests start paired. Unpaired behaviour has its own tests.
+const pairedLocal = () => ({ pairingCode: "cd".repeat(32) });
 
 describe("toGrabUrl", () => {
   let bg;
@@ -257,6 +271,7 @@ describe("size-wait interception", () => {
 
   beforeEach(() => {
     const shared = {
+      localSettings: pairedLocal(),
       syncSettings: { interceptDownloads: true, minSizeMB: 100, skipTypes: "" },
     };
     chrome = makeChrome(shared);
@@ -339,6 +354,7 @@ describe("size-wait interception", () => {
     const shared = {
       session: chrome._session,
       downloads: chrome._downloads,
+      localSettings: pairedLocal(),
       syncSettings: { interceptDownloads: true, minSizeMB: 100, skipTypes: "" },
     };
     shared.downloads.set(7, { ...bigItem(7), fileSize: 200 * MiB });
@@ -384,6 +400,7 @@ describe("master interception toggle", () => {
 
   test("onCreated ignores downloads from before browser startup", async () => {
     const chrome = makeChrome({
+      localSettings: pairedLocal(),
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
     const bg = loadBackground(chrome);
@@ -401,6 +418,7 @@ describe("master interception toggle", () => {
 
   test("onCreated intercepts downloads from after browser startup", async () => {
     const chrome = makeChrome({
+      localSettings: pairedLocal(),
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
     const bg = loadBackground(chrome);
@@ -417,6 +435,7 @@ describe("master interception toggle", () => {
 
   test("the size-wait decision respects a toggle flipped off mid-wait", async () => {
     const shared = {
+      localSettings: pairedLocal(),
       syncSettings: { interceptDownloads: true, minSizeMB: 100, skipTypes: "" },
     };
     const chrome = makeChrome(shared);
@@ -462,6 +481,7 @@ describe("context menu toggle", () => {
 describe("handoff tab separation (review fix 1)", () => {
   test("automatic interception hands off over HTTP, never navigating any tab", async () => {
     const chrome = makeChrome({
+      localSettings: pairedLocal(),
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
     loadBackground(chrome);
@@ -748,6 +768,7 @@ describe("handoff tab separation (review fix 1)", () => {
 
 describe("size-wait deadline design (review fixes 2 and 3)", () => {
   const settings = () => ({
+    localSettings: pairedLocal(),
     syncSettings: { interceptDownloads: true, minSizeMB: 100, skipTypes: "" },
   });
   const item = (id) => ({
@@ -918,6 +939,7 @@ describe("HTTP handoff to Grab", () => {
 
   beforeEach(() => {
     chrome = makeChrome({
+      localSettings: pairedLocal(),
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
     bg = loadBackground(chrome);
@@ -1387,19 +1409,21 @@ describe("HTTP handoff to Grab", () => {
   });
 
   test("automatic interception cancels the browser download after a 200", async () => {
-    mockFetch(200);
+    mockPairedGrab({ addStatus: 200 });
+    await pair();
     await chrome._listeners["downloads.onCreated"]({
       id: 77,
       url: "https://example.com/big.iso",
       fileSize: -1,
     });
-    assert.equal(fetchCalls.length, 1);
+    assert.equal(posts().length, 1);
     assert.equal(tabsCreated().length, 0);
     assert.ok(chrome._calls.some(([name, id]) => name === "cancel" && id === 77));
   });
 
   test("automatic interception leaves the download in the browser when Grab is down", async () => {
-    mockFetch("down");
+    await pair();
+    mockPairedGrab({ helloDown: true });
     await chrome._listeners["downloads.onCreated"]({
       id: 78,
       url: "https://example.com/big.iso",
@@ -1597,13 +1621,14 @@ describe("HTTP handoff to Grab", () => {
 
   for (const status of [408, 409]) {
     test(`HTTP ${status} (declined / no answer) keeps the browser download`, async () => {
-      mockFetch(status);
+      mockPairedGrab({ addStatus: status });
+      await pair();
       await chrome._listeners["downloads.onCreated"]({
         id: 90,
         url: "https://example.com/big.iso",
         fileSize: -1,
       });
-      assert.equal(fetchCalls.length, 1, "no retry");
+      assert.equal(posts().length, 1, "no retry");
       assert.equal(chrome._calls.some(([name]) => name === "cancel"), false);
       assert.equal(chrome._calls.some(([name]) => name === "removeFile"), false);
     });
@@ -1622,6 +1647,7 @@ describe("interception across worker restarts and fast downloads", () => {
 
   test("a freshly woken worker still intercepts a download that began before it started", async () => {
     const shared = {
+      localSettings: pairedLocal(),
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     };
     const first = makeChrome(shared);
@@ -1645,6 +1671,7 @@ describe("interception across worker restarts and fast downloads", () => {
 
   test("a download that completed during the handoff leaves no history entry or claim", async () => {
     const chrome = makeChrome({
+      localSettings: pairedLocal(),
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
     loadBackground(chrome);
@@ -1692,6 +1719,7 @@ describe("P2/P3 regression tests", () => {
 
   test("parkForSize preserves existing deadline on re-park", async () => {
     const chrome = makeChrome({
+      localSettings: pairedLocal(),
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
     const bg = loadBackground(chrome);
@@ -1811,5 +1839,101 @@ describe("explicit context-menu page URL", () => {
       chrome._calls.some(([name, url]) => name === "handoff" && url === videoUrl),
       "a detected stream should still be handed off instead of the page URL",
     );
+  });
+});
+
+
+describe("review hardening (1.5.8)", () => {
+  test("unpaired: automatic interception never cancels or hands off a browser download", async () => {
+    const chrome = makeChrome({
+      localSettings: {},
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    });
+    loadBackground(chrome);
+    await chrome._listeners["downloads.onCreated"]({
+      id: 5,
+      url: "https://example.com/a.iso",
+      fileSize: 100,
+    });
+    assert.equal(chrome._calls.some(([name]) => name === "cancel"), false);
+    assert.equal(chrome._calls.some(([name]) => name === "handoff"), false);
+  });
+
+  test("URLs Grab would refuse (over 2048 bytes) are dropped from the persisted snapshot", () => {
+    const bg = loadBackground(makeChrome());
+    const huge = "https://a.example.com/x.m3u8?" + "A".repeat(3000);
+    const ok = "https://a.example.com/ok.m3u8";
+    const snap = bg.snapshotVideoFinds({
+      frames: new Map([[0, [{ src: huge, blob: false }, { src: ok, blob: false }]]]),
+      sniffed: [huge, ok],
+      kinds: new Map(),
+      title: "",
+    });
+    assert.deepEqual(snap.sniffed, [ok]);
+    assert.deepEqual(snap.frames, [[0, [{ src: ok, blob: false }]]]);
+  });
+
+  test("an oversized sniffed stream is not tracked at collection time", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const huge = "https://a.example.com/x.m3u8?" + "A".repeat(3000);
+    chrome._listeners["webRequest.onResponseStarted"]({
+      tabId: 5,
+      url: huge,
+      responseHeaders: [],
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(bg._videoFinds.get(5), undefined);
+  });
+
+  test("skip list also matches the post-redirect file name", async () => {
+    const chrome = makeChrome({
+      localSettings: pairedLocal(),
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "pdf" },
+    });
+    loadBackground(chrome);
+    await chrome._listeners["downloads.onCreated"]({
+      id: 6,
+      url: "https://example.com/download.php?id=1",
+      finalUrl: "https://example.com/file.pdf",
+      fileSize: 100,
+    });
+    assert.equal(chrome._calls.some(([name]) => name === "cancel" || name === "handoff"), false);
+  });
+
+  test("a declined cookies permission sends the URL without cookies and without a warning", async () => {
+    const chrome = makeChrome({ localSettings: pairedLocal() });
+    chrome.permissions = { contains: async () => false };
+    chrome.cookies.getAll = async () => {
+      throw new Error("cookies must not be read without the permission");
+    };
+    const bg = loadBackground(chrome);
+    let body = null;
+    const inner = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {
+      if (opts && opts.method === "POST") body = JSON.parse(opts.body);
+      return inner(url, opts);
+    };
+    const ctx = {};
+    assert.equal(await bg.postToGrab("https://example.com/f.zip", ctx), 200);
+    assert.deepEqual(body.cookies, []);
+    assert.equal(ctx.cookieWarning, undefined);
+  });
+
+  test("popup status distinguishes unpaired, verified and down", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    const ask = () =>
+      new Promise((resolve) => {
+        const kept = chrome._listeners["runtime.onMessage"]({ type: "grab-status" }, {}, resolve);
+        assert.equal(kept, true, "channel stays open for the async answer");
+      });
+    assert.deepEqual(await ask(), { state: "unpaired" });
+    await chrome.storage.local.set({ pairingCode: "cd".repeat(32) });
+    assert.deepEqual(await ask(), { state: "verified" });
+    globalThis.fetch = async () => {
+      throw new Error("connection refused");
+    };
+    assert.deepEqual(await ask(), { state: "down" });
   });
 });

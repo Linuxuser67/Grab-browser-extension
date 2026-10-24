@@ -23,6 +23,12 @@ async function savePairing() {
   const code = normalizePairingCode(pairingEl.value);
   if (code === "") {
     await savePairingCode("");
+    // Unpairing also gives back the cookies permission granted with the code.
+    try {
+      await chrome.permissions.remove({ permissions: ["cookies"] });
+    } catch {
+      // Permissions API unavailable, or already removed.
+    }
     showPairingStatus("Not paired: links only");
     return;
   }

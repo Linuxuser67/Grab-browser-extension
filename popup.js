@@ -3,24 +3,26 @@
 
 bindSettingsForm(document);
 
+// The worker does the check: it knows the pairing code and the port.
+const STATUS_TEXT = {
+  verified: ["Grab is running and paired", "status ok"],
+  unverified: ["Something else answers on Grab's port. Pair again in Options.", "status down"],
+  unpaired: ["Not paired: automatic interception is off until you pair in Options", "status down"],
+  down: ["Grab isn't running — downloads will stay in the browser", "status down"],
+};
+
 async function checkGrabStatus() {
   const el = document.getElementById("grabStatus");
-  // GET the root: Grab's router 404s (no route there), but any HTTP response
-  // means it's listening. We avoid POSTing to /add because even an empty URL
-  // would trigger Grab's "Invalid URL" toast.
-  // 3s timeout: a port that accepts but never answers shouldn't hang the UI.
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 3000);
+  let state = "down";
   try {
-    await fetch("http://127.0.0.1:9412/", { method: "GET", signal: ctrl.signal });
-    el.textContent = "Grab is running";
-    el.className = "status ok";
+    const reply = await chrome.runtime.sendMessage({ type: "grab-status" });
+    if (reply && STATUS_TEXT[reply.state]) state = reply.state;
   } catch {
-    el.textContent = "Grab isn't running — downloads will stay in the browser";
-    el.className = "status down";
-  } finally {
-    clearTimeout(timer);
+    // No worker answer: treat as not running.
   }
+  const [text, className] = STATUS_TEXT[state];
+  el.textContent = text;
+  el.className = className;
 }
 
 document.getElementById("openOptions").addEventListener("click", (e) => {

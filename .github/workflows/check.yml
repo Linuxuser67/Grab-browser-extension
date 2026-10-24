@@ -9,7 +9,7 @@ jobs:
         with:
           node-version: "22"
       - name: syntax check
-        run: node --check background.js && node --check content.js && node --check popup.js && node --check options.js && node --check settings.js
+        run: find . -type f -name '*.js' -not -path './.git/*' -print0 | xargs -0 -n1 node --check
       - name: firefox manifest in sync
         run: python3 build-aux/gen-firefox-manifest.py --check
       - name: tests

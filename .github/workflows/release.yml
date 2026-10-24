@@ -27,6 +27,8 @@ jobs:
             echo "Tag $TAG does not match manifest version $VERSION"
             exit 1
           fi
+      - name: regenerate the Firefox manifest from manifest.json
+        run: python3 build-aux/gen-firefox-manifest.py
       - name: package the extension
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
