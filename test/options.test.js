@@ -31,10 +31,25 @@ function makeElement(id) {
   };
 }
 
-function makeOptions({ storedCode = VALID_CODE, cookiePermission = true } = {}) {
+function makeOptions({
+  storedCode = VALID_CODE,
+  cookiePermission = true,
+  delayInitialLoad = false,
+} = {}) {
   const elements = new Map();
   const pendingMessages = [];
   let savedCode = storedCode;
+  let initialReadStartedResolve;
+  let releaseInitialRead;
+  let initialReadConsumed = false;
+  const initialReadStarted = new Promise((resolve) => {
+    initialReadStartedResolve = resolve;
+  });
+  const initialReadGate = delayInitialLoad
+    ? new Promise((resolve) => {
+        releaseInitialRead = resolve;
+      })
+    : null;
 
   const document = {
     getElementById(id) {
@@ -68,6 +83,11 @@ function makeOptions({ storedCode = VALID_CODE, cookiePermission = true } = {}) 
     normalizePairingCode,
     bindSettingsForm() {},
     async loadPairingCode() {
+      if (delayInitialLoad && !initialReadConsumed) {
+        initialReadConsumed = true;
+        initialReadStartedResolve();
+        await initialReadGate;
+      }
       return savedCode;
     },
     async savePairingCode(raw) {
@@ -83,6 +103,8 @@ function makeOptions({ storedCode = VALID_CODE, cookiePermission = true } = {}) 
   return {
     elements,
     pendingMessages,
+    initialReadStarted,
+    releaseInitialRead,
     get savedCode() {
       return savedCode;
     },
@@ -96,6 +118,24 @@ async function waitFor(predicate, message) {
   }
   assert.fail(message || "Timed out waiting for Options page state");
 }
+
+
+test("typing before the initial storage read completes is not overwritten", async () => {
+  const ui = makeOptions({ delayInitialLoad: true });
+  const codeInput = ui.elements.get("pairingCode");
+  const status = ui.elements.get("pairingStatus");
+  const editedCode = "cd".repeat(32);
+
+  await ui.initialReadStarted;
+  codeInput.value = editedCode;
+  codeInput.listeners.get("input")();
+  ui.releaseInitialRead();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(codeInput.value, editedCode);
+  assert.equal(status.textContent, "Unsaved changes — save to verify or unpair.");
+  assert.equal(ui.pendingMessages.length, 0, "an edited code must not be verified before saving");
+});
 
 test("saved code stays pending until the background worker verifies it", async () => {
   const ui = makeOptions();
