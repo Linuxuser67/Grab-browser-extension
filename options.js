@@ -7,53 +7,157 @@ const pairingEl = document.getElementById("pairingCode");
 const pairingBtn = document.getElementById("savePairing");
 const pairingStatusEl = document.getElementById("pairingStatus");
 
+let pairingStatusRevision = 0;
+
 function showPairingStatus(text) {
   pairingStatusEl.textContent = text;
 }
 
-async function loadPairing() {
-  pairingEl.value = await loadPairingCode();
-  showPairingStatus(pairingEl.value ? "Paired" : "Not paired: links only");
+function invalidatePairingStatus() {
+  pairingStatusRevision += 1;
+  return pairingStatusRevision;
 }
 
-/// Pair (or unpair, with an empty field). The click is the user gesture the
-/// browser requires to grant the optional cookies permission, which is asked
-/// for only when a code is being stored.
+function isCurrentPairingOperation(revision, code) {
+  return (
+    revision === pairingStatusRevision &&
+    normalizePairingCode(pairingEl.value) === code
+  );
+}
+
+async function hasCookiePermission() {
+  try {
+    return await chrome.permissions.contains({ permissions: ["cookies"] });
+  } catch {
+    // Permission API unavailable, or the browser refused the query.
+    return false;
+  }
+}
+
+/// The background worker runs the same nonce/HMAC handshake used before a
+/// paired handoff. A saved or well-formed code alone is never "Verified".
+async function verifySavedPairing(code, cookieAccessGranted, revision) {
+  let reply;
+  try {
+    reply = await chrome.runtime.sendMessage({ type: "grab-status" });
+  } catch {
+    // The worker may be restarting or unavailable.
+  }
+
+  if (!isCurrentPairingOperation(revision, code)) return;
+
+  // Protect against the code being changed from another Options page while
+  // the handshake was in flight.
+  let storedCode;
+  try {
+    storedCode = normalizePairingCode(await loadPairingCode());
+  } catch {
+    if (isCurrentPairingOperation(revision, code)) {
+      showPairingStatus("Saved, but verification status is unavailable.");
+    }
+    return;
+  }
+
+  if (!isCurrentPairingOperation(revision, code)) return;
+  if (storedCode !== code) {
+    showPairingStatus("Pairing code changed elsewhere; reload before verifying.");
+    return;
+  }
+
+  if (reply && reply.state === "verified") {
+    showPairingStatus(
+      cookieAccessGranted
+        ? "Verified — Grab recognizes this code; cookie access is granted."
+        : "Verified — cookie access is not granted, so handoffs are URL-only.",
+    );
+  } else if (reply && reply.state === "unverified") {
+    showPairingStatus(
+      "Saved, but not verified — Grab could not prove this pairing code.",
+    );
+  } else if (reply && reply.state === "down") {
+    showPairingStatus(
+      "Saved, but Grab is not reachable; verification is pending.",
+    );
+  } else if (reply && reply.state === "unpaired") {
+    showPairingStatus(
+      "Saved, but the background worker found no valid pairing code.",
+    );
+  } else {
+    showPairingStatus("Saved, but verification status is unavailable.");
+  }
+}
+
+async function loadPairing() {
+  const code = normalizePairingCode(await loadPairingCode());
+  pairingEl.value = code;
+  const revision = invalidatePairingStatus();
+
+  if (!code) {
+    showPairingStatus("Not paired: links only");
+    return;
+  }
+  if (!SHARED_PAIRING_CODE_RE.test(code)) {
+    showPairingStatus("Saved code has an invalid format; enter it again.");
+    return;
+  }
+
+  showPairingStatus("Saved; verifying with Grab…");
+  const cookieAccessGranted = await hasCookiePermission();
+  await verifySavedPairing(code, cookieAccessGranted, revision);
+}
+
+/// Save a code (or unpair when empty), request optional cookie access, then
+/// ask the background worker to cryptographically verify the saved code.
 async function savePairing() {
+  const revision = invalidatePairingStatus();
   pairingEl.removeAttribute("aria-invalid");
   const code = normalizePairingCode(pairingEl.value);
+
   if (code === "") {
     await savePairingCode("");
-    // Unpairing also gives back the cookies permission granted with the code.
+    // Always revoke cookie access when unpairing, even if the input is edited
+    // again while the storage operation is in flight.
     try {
       await chrome.permissions.remove({ permissions: ["cookies"] });
     } catch {
       // Permissions API unavailable, or already removed.
     }
-    showPairingStatus("Not paired: links only");
+    if (isCurrentPairingOperation(revision, "")) {
+      pairingEl.value = "";
+      showPairingStatus("Not paired: links only");
+    }
     return;
   }
-  if (!(await savePairingCode(code))) {
-    pairingEl.setAttribute("aria-invalid", "true");
-    showPairingStatus("That isn't a pairing code (64 letters and digits).");
+
+  if (!SHARED_PAIRING_CODE_RE.test(code) || !(await savePairingCode(code))) {
+    if (revision === pairingStatusRevision) {
+      pairingEl.setAttribute("aria-invalid", "true");
+      showPairingStatus("That isn't a pairing code (64 hexadecimal characters).");
+    }
     return;
   }
+
+  if (!isCurrentPairingOperation(revision, code)) return;
   pairingEl.value = code;
-  let granted = false;
+  showPairingStatus("Saved; verifying with Grab…");
+
+  // The click is the user gesture the browser requires to grant optional
+  // cookie access. Verification is separate from this permission decision.
   try {
-    granted = await chrome.permissions.request({ permissions: ["cookies"] });
+    await chrome.permissions.request({ permissions: ["cookies"] });
   } catch {
-    // Permission API unavailable: pair anyway; handoffs stay URL-only.
+    // The code can still be verified; handoffs remain URL-only without cookies.
   }
-  showPairingStatus(
-    granted
-      ? "Paired: cookies are shared with Grab"
-      : "Paired, but cookie access was not granted: links only",
-  );
+  if (!isCurrentPairingOperation(revision, code)) return;
+
+  const cookieAccessGranted = await hasCookiePermission();
+  await verifySavedPairing(code, cookieAccessGranted, revision);
 }
 
 pairingEl.addEventListener("input", () => {
+  invalidatePairingStatus();
   pairingEl.removeAttribute("aria-invalid");
+  showPairingStatus("Unsaved changes — save to verify or unpair.");
 });
 
 pairingBtn.addEventListener("click", savePairing);
