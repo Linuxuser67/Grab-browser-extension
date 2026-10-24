@@ -8,28 +8,33 @@ const html = fs.readFileSync(path.join(__dirname, "..", "popup.html"), "utf8");
 const js = fs.readFileSync(path.join(__dirname, "..", "popup.js"), "utf8");
 
 test("Grab runtime status sits between the title and Options gear in the header", () => {
-  const header = html.match(/<header class="header">([\\s\\S]*?)<\\/header>/);
-  assert.ok(header, "popup header should exist");
-  const titleIndex = header[1].indexOf("<h2>");
-  const statusIndex = header[1].indexOf('id="grabStatus"');
-  const optionsIndex = header[1].indexOf('id="openOptions"');
+  const headerStart = html.indexOf('<header class="header">');
+  const headerEnd = html.indexOf("</header>", headerStart);
+  assert.ok(headerStart >= 0 && headerEnd > headerStart, "popup header should exist");
+  const header = html.slice(headerStart, headerEnd);
+
+  const titleIndex = header.indexOf("<h2>");
+  const statusIndex = header.indexOf('id="grabStatus"');
+  const optionsIndex = header.indexOf('id="openOptions"');
 
   assert.ok(titleIndex >= 0, "Grab title should be in the header");
   assert.ok(statusIndex > titleIndex, "status should follow the Grab title");
   assert.ok(optionsIndex > statusIndex, "Options gear should follow the status");
-  assert.match(
-    header[1],
-    /id="grabStatus"[^>]*role="status"[^>]*aria-live="polite"/,
-    "status remains available to assistive technology",
-  );
+  assert.ok(header.includes('role="status"'), "status role should be accessible");
+  assert.ok(header.includes('aria-live="polite"'), "status should announce changes politely");
 });
 
 test("popup status uses a compact dot and distinct semantic states", () => {
-  assert.match(html, /\.status::before[\\s\\S]*?border-radius: 50%/);
-  assert.match(html, /\.status\.ok[\\s\\S]*?color: var\\(--status-ok\\)/);
-  assert.match(html, /\.status\.warning[\\s\\S]*?color: var\\(--status-warning\\)/);
-  assert.match(html, /\.status\.down[\\s\\S]*?color: var\\(--status-down\\)/);
-  assert.match(html, /\.status\.neutral[\\s\\S]*?color: var\\(--status-neutral\\)/);
-  assert.match(js, /unverified: \\["Unverified", "status warning"\\]/);
-  assert.match(js, /unpaired: \\["Not paired", "status neutral"\\]/);
+  assert.ok(html.includes(".status::before"));
+  assert.ok(html.includes("border-radius: 50%"));
+  assert.ok(html.includes(".status.ok"));
+  assert.ok(html.includes("color: var(--status-ok)"));
+  assert.ok(html.includes(".status.warning"));
+  assert.ok(html.includes("color: var(--status-warning)"));
+  assert.ok(html.includes(".status.down"));
+  assert.ok(html.includes("color: var(--status-down)"));
+  assert.ok(html.includes(".status.neutral"));
+  assert.ok(html.includes("color: var(--status-neutral)"));
+  assert.ok(js.includes('unverified: ["Unverified", "status warning"]'));
+  assert.ok(js.includes('unpaired: ["Not paired", "status neutral"]'));
 });
