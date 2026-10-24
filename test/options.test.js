@@ -59,7 +59,7 @@ function makeOptions({ storedCode = VALID_CODE, cookiePermission = true } = {}) 
   };
 
   const normalizePairingCode = (raw) =>
-    String(raw || "").replace(/\\s+/g, "").toLowerCase();
+    String(raw || "").replaceAll(" ", "").replaceAll("\n", "").replaceAll("\t", "").toLowerCase();
   const pairingCodePattern = /^[0-9a-f]{64}$/;
   const context = vm.createContext({
     document,
