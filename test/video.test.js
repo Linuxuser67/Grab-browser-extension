@@ -869,7 +869,7 @@ describe("excluded hosts", () => {
       "www.twitch.tv",
       "INSTAGRAM.COM",
     ]) {
-      assert.ok(bg.hostExcluded(h), h);
+      assert.ok(bg.sharedHostExcluded(h), h);
     }
     for (const h of [
       "example.com",
@@ -879,21 +879,21 @@ describe("excluded hosts", () => {
       "x.com.evil.com",
       "",
     ]) {
-      assert.equal(bg.hostExcluded(h), false, h);
+      assert.equal(bg.sharedHostExcluded(h), false, h);
     }
-    assert.equal(bg.hostExcluded(null), false);
+    assert.equal(bg.sharedHostExcluded(null), false);
   });
 
   test("content script hostExcluded agrees with the worker's", () => {
     const bg = loadBackground(makeChrome());
     const content = loadContent();
     assert.deepEqual(
-      [...content.DETECT_EXCLUDED_HOSTS].sort(),
-      [...bg.YTDLP_EXCLUSIVE_HOSTS].sort(),
+      [...content.SHARED_EXCLUDED_HOSTS].sort(),
+      [...bg.SHARED_EXCLUDED_HOSTS].sort(),
       "the two exclusion lists must stay in sync"
     );
     for (const h of ["instagram.com", "www.tiktok.com", "youtube.com", "x.com", "example.com"]) {
-      assert.equal(content.hostExcluded(h), bg.hostExcluded(h), h);
+      assert.equal(content.sharedHostExcluded(h), bg.sharedHostExcluded(h), h);
     }
   });
 

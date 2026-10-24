@@ -1,24 +1,21 @@
 // Grab video detector (content script, isolated world, all frames).
 //
-// Reports <video> elements the user chose to play that are still actively
+// Reports <video> elements the user started playing that are still actively
 // playing and have usable http(s) sources. Pause/end reports explicitly retire
-// the entry from the background worker's right-click menu.
-// ("Download video with Grab"). Videos whose source is a
-// blob: URL (MSE players) have no file behind them; those are flagged and the
-// worker pairs them with the stream manifests it sniffed via webRequest — the
-// same trick FDM/IDM-style downloaders use.
+// the entry from the background worker's right-click menu
+// ("Download video with Grab"). Videos whose source is a blob: URL (MSE
+// players) have no file behind them; those are flagged and the worker pairs
+// them with the stream manifests it sniffed via webRequest, the same approach
+// FDM/IDM-style downloaders use.
 
 const MIN_VIDEO_PX = 120; // ignore tiny players (ads, trackers)
 // The worker and content script use one shared host exclusion list.
-const contentShared = typeof SHARED_EXCLUDED_HOSTS !== "undefined"
-  ? null
-  : (typeof module !== "undefined" && module.exports ? require("./shared.js") : null);
-const excludedHostList = typeof SHARED_EXCLUDED_HOSTS !== "undefined"
-  ? SHARED_EXCLUDED_HOSTS
-  : contentShared.SHARED_EXCLUDED_HOSTS;
-const isExcludedHost = typeof sharedHostExcluded === "function"
-  ? sharedHostExcluded
-  : contentShared.sharedHostExcluded;
+// In the browser these come from shared.js globals; under Node tests, from require.
+const sharedModule = typeof SHARED_EXCLUDED_HOSTS !== "undefined"
+  ? { SHARED_EXCLUDED_HOSTS, sharedHostExcluded }
+  : require("./shared.js");
+const excludedHostList = sharedModule.SHARED_EXCLUDED_HOSTS;
+const isExcludedHost = sharedModule.sharedHostExcluded;
 
 /// First http(s) candidate among currentSrc, src and <source> children.
 function usableVideoSrc(video) {
@@ -58,13 +55,17 @@ function isStartedVideo(v, played) {
 
 /// All <video> elements under `root`, piercing open shadow roots (custom
 /// players). Closed roots are unreachable by design, and their media events
-/// never reach the document listener.
-function allVideos(root) {
+/// never reach the document listener. `onShadowRoot`, when given, sees each
+/// open root during the same walk, so the caller needs no second traversal.
+function allVideos(root, onShadowRoot) {
   const out = [];
   if (!root || !root.querySelectorAll) return out;
   for (const v of root.querySelectorAll("video")) out.push(v);
   for (const el of root.querySelectorAll("*")) {
-    if (el.shadowRoot) out.push(...allVideos(el.shadowRoot));
+    if (el.shadowRoot) {
+      if (onShadowRoot) onShadowRoot(el.shadowRoot);
+      out.push(...allVideos(el.shadowRoot, onShadowRoot));
+    }
   }
   return out;
 }
@@ -73,9 +74,9 @@ function allVideos(root) {
 /// `isPlayed` decides which videos count as started by the user; the live
 /// wiring passes `(v) => isStartedVideo(v, played)`. Tests pass explicit
 /// predicates. Pierces shadow roots via allVideos.
-function collectVideos(doc, isPlayed) {
+function collectVideos(doc, isPlayed, onShadowRoot) {
   const out = [];
-  for (const v of allVideos(doc)) {
+  for (const v of allVideos(doc, onShadowRoot)) {
     if (!isBigEnough(v)) continue;
     if (isPlayed && !isPlayed(v)) continue;
     const src = usableVideoSrc(v);
@@ -131,8 +132,7 @@ if (
   function report() {
     // Full scans happen on startup, media events, and worker rescan requests,
     // not on every pointer/click interaction.
-    wireOpenShadowRoots(document);
-    const videos = collectVideos(document, (v) => isStartedVideo(v, played));
+    const videos = collectVideos(document, (v) => isStartedVideo(v, played), wireShadowRoot);
     const title = pageVideoTitle(document);
     // Pause/end reports must be able to clear stale frame state even when the
     // resulting video list equals the last local snapshot.
@@ -143,12 +143,15 @@ if (
     const snapshot = JSON.stringify([videos, title]);
     if (snapshot === lastSent && !replaceFrame) return;
     lastSent = snapshot;
-    chrome.runtime.sendMessage({
+    const sent = chrome.runtime.sendMessage({
       type: "grab-videos-detected",
       videos,
       title,
       replaceFrame,
     });
+    // Rejects when no receiver is listening (worker restarting, or a stale
+    // script after an extension update). Nothing to recover.
+    if (sent && typeof sent.catch === "function") sent.catch(() => {});
   }
 
   let timer = null;
@@ -213,17 +216,6 @@ if (
   // The decoded height only exists once metadata has loaded.
   document.addEventListener("loadedmetadata", () => scheduleReport(), true);
 
-  /// Discover roots during a deliberate scan, separately from pure collection.
-  function wireOpenShadowRoots(root) {
-    if (!root || !root.querySelectorAll) return;
-    for (const el of root.querySelectorAll("*")) {
-      if (el.shadowRoot) {
-        wireShadowRoot(el.shadowRoot);
-        wireOpenShadowRoots(el.shadowRoot);
-      }
-    }
-  }
-
   // Pointer/click events expose the open shadow roots on the event path. Wire
   // only those roots; don't walk every node on the page for each interaction.
   function wireShadowRootsOnPath(event) {
@@ -251,5 +243,5 @@ if (
 
 // Test hook for node:test.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { collectVideos, usableVideoSrc, hostExcluded: isExcludedHost, DETECT_EXCLUDED_HOSTS: excludedHostList, MIN_VIDEO_PX, pageVideoTitle, isStartedVideo };
+  module.exports = { collectVideos, usableVideoSrc, sharedHostExcluded: isExcludedHost, SHARED_EXCLUDED_HOSTS: excludedHostList, MIN_VIDEO_PX, pageVideoTitle, isStartedVideo };
 }

@@ -103,8 +103,24 @@ const MAX_HANDOFF_COOKIES = 100;
 const MAX_HANDOFF_BODY_BYTES = 32 * 1024;
 // Bound menu creation and per-tab DOM snapshots while retaining many videos.
 const MAX_VIDEO_ITEMS = 50;
+/// How long to wait for a server to report the size before treating an
+/// unknown size as big enough to intercept (streams rarely send one, and they
+/// belong in Grab).
+const SIZE_WAIT_MS = 10_000;
+/// Grab rejects longer URLs (HTTP 414), so they are never worth tracking.
+const fitsGrabUrl = (u) =>
+  typeof u === "string" && new TextEncoder().encode(u).length <= MAX_GRAB_URL_BYTES;
 
 let sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/// Tabs showing the "unverified Grab" warning badge. Warned tabs keep their
+/// "!" until Grab verifies successfully.
+const warnedTabs = new Set();
+let activeTabId = null;
+/// The URLs behind the submenu items as last built (after filtering): a
+/// click index resolves here, never against a fresh, differently-ordered list.
+let menuUrls = [];
+let detectVideosOn = SHARED_DEFAULTS.detectVideos;
 
 // Test hook: swap the sleep implementation to observe retry delays.
 function _setSleep(fn) {
@@ -268,6 +284,17 @@ function fitHandoffBody(url, cookies, userAgent, requestMetadata) {
   return byteLength(body) <= MAX_HANDOFF_BODY_BYTES ? body : null;
 }
 
+/// The cookies permission is optional and can be declined or revoked. When the
+/// Permissions API is unavailable, assume it is granted and let the read decide.
+async function hasCookiePermission() {
+  if (typeof chrome.permissions?.contains !== "function") return true;
+  try {
+    return await chrome.permissions.contains({ permissions: ["cookies"] });
+  } catch {
+    return false;
+  }
+}
+
 /// Read cookies in the shape Grab expects. Partitioned cookies are detected but
 /// deliberately excluded: Grab's Netscape cookie jar cannot preserve their
 /// partition key, so exporting them as ordinary cookies would widen their scope.
@@ -360,6 +387,9 @@ async function postToGrab(url, ctx) {
   } catch {
     return 0; // Storage unreachable; treat as Grab not running.
   }
+  // Explicit sends may remain URL-only, but automatic interception must never
+  // accept an unsigned POST if the user unpairs between the outer guard and here.
+  if (ctx && ctx.requirePairing === true && !secret) return STATUS_UNVERIFIED;
   let cookies = [];
   if (secret) {
     let verified;
@@ -373,7 +403,10 @@ async function postToGrab(url, ctx) {
     // They go only to a Grab that has proven it holds the pairing code.
     // Never export incognito cookies; retain Firefox container scoping for
     // ordinary downloads using DownloadItem.cookieStoreId.
-    try {
+    if (!(await hasCookiePermission())) {
+      // Declined or revoked: URL only, and not an error, so no warning.
+      cookies = [];
+    } else try {
       const storeId = await resolveStoreId(ctx);
       if (storeId === null) {
         cookies = [];
@@ -438,6 +471,9 @@ async function postToGrab(url, ctx) {
   } catch {
     // Fast failure (connection refused): Grab isn't running, the POST never
     // left. Slow failure (timeout): Grab may have accepted it.
+    // Heuristic: a fast failure is treated as "never sent". A connection reset
+    // after Grab accepted the POST looks the same and can duplicate a download;
+    // a grab:// fallback is not attempted for STATUS_MAYBE_SENT for that reason.
     return Date.now() - start < 10000 ? 0 : STATUS_MAYBE_SENT;
   }
 }
@@ -593,6 +629,10 @@ async function removeBrowserCopy(id) {
 }
 
 async function interceptDownload(item) {
+  // Cancelling a browser download is only safe when a verified Grab took it.
+  // Unpaired, any process listening on the port could answer 200 and make the
+  // file disappear, so automatic interception requires pairing.
+  if (!(await getPairingCode())) return;
   // Prefer the post-redirect URL only when Grab can accept its length.
   // Otherwise preserve the original URL so Grab can follow the redirect.
   const finalUrl = toGrabUrl(item.finalUrl) ? item.finalUrl : null;
@@ -611,12 +651,18 @@ async function interceptDownload(item) {
   const ctx = {
     incognito: item.incognito === true,
     cookieStoreId: item.cookieStoreId,
+    requirePairing: true,
   };
   const status = await postToGrabWithRetry(url, ctx);
   if (status !== 200) return;
   if (ctx.cookieWarning) await showCookieWarning(ctx);
 
-  await claimDownload(item.id);
+  try {
+    await claimDownload(item.id);
+  } catch {
+    // Continue: the cancel below still stops the browser copy. Only the
+    // onChanged cleanup for a tiny finished download may be missed.
+  }
   // A tiny download can finish while the handoff is in flight, before the
   // claim exists, so onChanged skipped it: clean up here instead.
   const [current] = await chrome.downloads.search({ id: item.id });
@@ -673,11 +719,6 @@ async function dropPending(id) {
   await chrome.storage.session.remove(pendingKey(id));
 }
 
-// How long to wait for a server to report the size before treating an
-// unknown size as big enough to intercept (streams rarely send one, and they
-// belong in Grab).
-const SIZE_WAIT_MS = 10_000;
-
 const minSizeBytes = (settings) =>
   Math.max(0, settings.minSizeMB | 0) * 1024 * 1024;
 
@@ -707,7 +748,12 @@ async function decidePending(id) {
       return;
     }
     // The user may have changed their mind while we waited.
-    if (!settings.interceptDownloads || isSkipped(item.url, settings.skipTypes) || !toGrabUrl(item.url)) {
+    if (
+      !settings.interceptDownloads ||
+      isSkipped(item.url, settings.skipTypes) ||
+      isSkipped(item.finalUrl, settings.skipTypes) ||
+      !toGrabUrl(item.url)
+    ) {
       await dropPending(id);
       return;
     }
@@ -763,7 +809,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
   }
   // Extension installs/updates must never be intercepted.
   if (item.mime === "application/x-chrome-extension") return;
-  if (isSkipped(item.url, settings.skipTypes)) return;
+  if (isSkipped(item.url, settings.skipTypes) || isSkipped(item.finalUrl, settings.skipTypes)) return;
   // Non-http(s) downloads (blob:, data:) have no server URL to hand over.
   if (!toGrabUrl(item.url)) return;
 
@@ -1260,7 +1306,7 @@ function snapshotVideoFinds(finds) {
     let hasBlob = false;
     for (const video of videos || []) {
       if (remaining <= 0) break;
-      if (video && typeof video.src === "string" && video.src && !seen.has(video.src)) {
+      if (video && typeof video.src === "string" && video.src && fitsGrabUrl(video.src) && !seen.has(video.src)) {
         seen.add(video.src);
         const saved = { src: video.src, blob: video.blob === true };
         if (Number.isFinite(video.height) && video.height > 0) saved.height = video.height;
@@ -1276,7 +1322,7 @@ function snapshotVideoFinds(finds) {
   }
   return {
     frames,
-    sniffed: (finds.sniffed || []).filter((url) => typeof url === "string" && url).slice(-50),
+    sniffed: (finds.sniffed || []).filter((url) => fitsGrabUrl(url)).slice(-50),
     kinds: [...(finds.kinds || new Map()).entries()].slice(-200),
     title: typeof finds.title === "string" ? finds.title : "",
   };
@@ -1302,7 +1348,7 @@ async function restoreVideoFinds(tabId) {
         const frames = new Map();
         for (const pair of Array.isArray(saved.frames) ? saved.frames : []) {
           if (!Array.isArray(pair) || pair.length !== 2 || !Number.isInteger(pair[0]) || !Array.isArray(pair[1])) continue;
-          const videos = pair[1].filter((video) => video && typeof video === "object").map((video) => {
+          const videos = pair[1].filter((video) => video && typeof video === "object" && (video.src == null || fitsGrabUrl(video.src))).map((video) => {
             const item = { src: typeof video.src === "string" ? video.src : null, blob: video.blob === true };
             if (Number.isFinite(video.height) && video.height > 0) item.height = video.height;
             return item;
@@ -1310,7 +1356,7 @@ async function restoreVideoFinds(tabId) {
           frames.set(pair[0], videos);
         }
         const sniffed = Array.isArray(saved.sniffed)
-          ? saved.sniffed.filter((url) => typeof url === "string" && url).slice(-50)
+          ? saved.sniffed.filter((url) => fitsGrabUrl(url)).slice(-50)
           : [];
         const kinds = new Map(
           (Array.isArray(saved.kinds) ? saved.kinds : []).filter((pair) =>
@@ -1358,16 +1404,6 @@ function forgetVideoFinds(tabId) {
     chrome.storage.session.remove(videoStateKey(tabId))
   ).catch(() => {});
 }
-/// Tabs showing the "unverified Grab" warning badge. The video-menu code
-/// blanks badges on tab switches; warned tabs keep their "!" until Grab
-/// verifies successfully.
-const warnedTabs = new Set();
-let activeTabId = null;
-/// The URLs behind the submenu items as last built (after filtering): a
-/// click index resolves here, never against a fresh, differently-ordered list.
-let menuUrls = [];
-let detectVideosOn = SHARED_DEFAULTS.detectVideos;
-
 getSettings().then((s) => {
   detectVideosOn = s.detectVideos !== false;
 });
@@ -1406,6 +1442,7 @@ function urlPathKey(u) {
 }
 
 function noteSniffed(tabId, url, kind) {
+  if (!fitsGrabUrl(url)) return;
   let f = videoFinds.get(tabId);
   if (!f) {
     f = { frames: new Map(), sniffed: [] };
@@ -1643,7 +1680,8 @@ chrome.webRequest.onResponseStarted.addListener(
   ["responseHeaders"],
 );
 
-chrome.runtime.onMessage.addListener(async (msg, sender) => {
+/// Content-script video reports. Dispatched from the single runtime listener below.
+async function onVideoReport(msg, sender) {
   if (!msg || msg.type !== "grab-videos-detected") return;
   if (!detectVideosOn) return;
   const tabId = sender && sender.tab && sender.tab.id;
@@ -1665,7 +1703,9 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
   // element before the replacement fires play; preserve that snapshot. Pause,
   // end, and media-reset reports are marked authoritative so stale entries
   // disappear immediately instead of lingering in the context menu.
-  const videos = Array.isArray(msg.videos) ? msg.videos : [];
+  const videos = (Array.isArray(msg.videos) ? msg.videos : []).filter(
+    (v) => !(v && typeof v.src === "string" && !fitsGrabUrl(v.src)),
+  );
   const hadFrame = f.frames.has(frameId);
   let changed = false;
   if (videos.length > 0 || !hadFrame || msg.replaceFrame === true) {
@@ -1685,7 +1725,28 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
     await persistVideoFinds(tabId);
     onVideoEvent(tabId);
   }
+}
+
+// One runtime listener: dispatch every runtime message from a single place.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === "grab-status") {
+    grabStatus().then(sendResponse);
+    return true; // Keep the channel open for the async answer.
+  }
+  return onVideoReport(msg, sender);
 });
+
+/// Status for the popup. With a stored code, Grab must prove it knows the code;
+/// a plain listener on the port is not enough.
+async function grabStatus() {
+  const secret = await getPairingCode();
+  if (!secret) return { state: "unpaired" };
+  try {
+    return { state: (await verifyGrab(secret)) ? "verified" : "unverified" };
+  } catch {
+    return { state: "down" };
+  }
+}
 
 chrome.tabs.onActivated.addListener((info) => {
   activeTabId = info.tabId;
@@ -1759,7 +1820,7 @@ if (typeof module !== "undefined" && module.exports) {
     removeAllContextMenus,
     removeContextMenu,
     pendingKey,
-    hostExcluded: sharedHostExcluded,
+    sharedHostExcluded,
     handOff,
     _setSleep,
     postToGrab,
@@ -1767,8 +1828,7 @@ if (typeof module !== "undefined" && module.exports) {
     requestRescan,
     postToGrabWithRetry,
     verifyGrab,
-    YTDLP_EXCLUSIVE_HOSTS: SHARED_EXCLUDED_HOSTS,
-    DEFAULTS: SHARED_DEFAULTS,
+    SHARED_EXCLUDED_HOSTS,
     SIZE_WAIT_MS,
     GRAB_SCHEME,
     // Test hook: inspect per-tab detections.

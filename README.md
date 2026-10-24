@@ -36,8 +36,8 @@ Grab must be installed with its desktop entry (it registers as the
 
 ## What it does
 
-- **Automatic interception** (off by default, enable in settings): downloads started in the browser
-  are cancelled and sent to Grab over its local HTTP endpoint. If Grab isn't
+- **Automatic interception** (off by default, enable in settings, requires [pairing](#pairing-with-grab)):
+  downloads started in the browser are cancelled and sent to Grab over its local HTTP endpoint. If Grab isn't
   running or doesn't accept the request, the download stays in the browser.
   Grab asks for confirmation unless auto-add is enabled in its preferences.
   If a tiny download finishes before the cancel lands, the duplicate is
@@ -64,7 +64,9 @@ Magnet links are passed to the OS untouched — Grab already handles `magnet:`.
 
 - Downloads that need the browser's session (logged-in direct links) forward
   the site's cookies to Grab — but only after you pair the extension (see
-  below). Unpaired, handoffs are URL-only.
+  below). Unpaired, explicit sends (`Alt+G`, context menu) are URL-only, and automatic
+  interception stays off: an unverified listener on the port must never be able
+  to cancel a browser download.
 - POST-form downloads hand Grab the action URL, which may not resolve to the file.
 - Automatic interception requires Grab to be running. URLs longer than 2048
   characters are refused by Grab and stay in the browser.
