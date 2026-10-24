@@ -29,8 +29,8 @@ async function hasCookiePermission() {
   try {
     return await chrome.permissions.contains({ permissions: ["cookies"] });
   } catch {
-    // Permission API unavailable, or the browser refused the query.
-    return false;
+    // The permission state is unknown, not necessarily denied.
+    return null;
   }
 }
 
@@ -65,11 +65,13 @@ async function verifySavedPairing(code, cookieAccessGranted, revision) {
   }
 
   if (reply && reply.state === "verified") {
-    showPairingStatus(
-      cookieAccessGranted
-        ? "Verified — Grab recognizes this code; cookie access is granted."
-        : "Verified — cookie access is not granted, so handoffs are URL-only.",
-    );
+    const cookieStatus =
+      cookieAccessGranted === true
+        ? "Cookie access is granted."
+        : cookieAccessGranted === false
+          ? "Cookie access is not granted, so handoffs are URL-only."
+          : "Cookie permission status is unavailable.";
+    showPairingStatus(`Verified — Grab recognizes this code. ${cookieStatus}`);
   } else if (reply && reply.state === "unverified") {
     showPairingStatus(
       "Saved, but not verified — Grab could not prove this pairing code.",
@@ -88,10 +90,21 @@ async function verifySavedPairing(code, cookieAccessGranted, revision) {
 }
 
 async function loadPairing() {
-  const code = normalizePairingCode(await loadPairingCode());
-  pairingEl.value = code;
+  // Capture the revision before storage access. If the user starts editing
+  // before the asynchronous read completes, don't overwrite their input.
   const revision = invalidatePairingStatus();
+  let code;
+  try {
+    code = normalizePairingCode(await loadPairingCode());
+  } catch {
+    if (revision === pairingStatusRevision) {
+      showPairingStatus("Could not load the saved pairing code.");
+    }
+    return;
+  }
+  if (revision !== pairingStatusRevision) return;
 
+  pairingEl.value = code;
   if (!code) {
     showPairingStatus("Not paired: links only");
     return;
@@ -103,6 +116,7 @@ async function loadPairing() {
 
   showPairingStatus("Saved; verifying with Grab…");
   const cookieAccessGranted = await hasCookiePermission();
+  if (!isCurrentPairingOperation(revision, code)) return;
   await verifySavedPairing(code, cookieAccessGranted, revision);
 }
 
