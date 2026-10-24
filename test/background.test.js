@@ -1530,6 +1530,39 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(new Set(bodyNonces).size, 2, "POST nonces must be unique");
   });
 
+  test("a 429 retry signs a new body nonce", async () => {
+    await pair();
+    fetchCalls = [];
+    let addCount = 0;
+    globalThis.fetch = async (url, opts = {}) => {
+      fetchCalls.push({ url, opts });
+      if (url.includes("/hello")) {
+        const helloNonce = new URL(url).searchParams.get("n");
+        return {
+          status: 200,
+          ok: true,
+          json: async () => ({ proof: hmac("grab-server\\u0000", helloNonce) }),
+        };
+      }
+      addCount += 1;
+      const status = addCount === 1 ? 429 : 200;
+      return { status, ok: status >= 200 && status < 300 };
+    };
+    assert.equal(await bg.handOff("https://example.com/retry.zip"), true);
+    const sent = posts().map((post) => JSON.parse(post.opts.body));
+    assert.equal(sent.length, 2);
+    assert.notEqual(sent[0].nonce, sent[1].nonce, "retry must use a fresh nonce");
+    assert.notEqual(sent[0].timestamp_ms, undefined);
+    assert.notEqual(sent[1].timestamp_ms, undefined);
+    for (const post of posts()) {
+      assert.equal(
+        post.opts.headers["X-Grab-Token"],
+        hmac("grab-client\\u0000", post.opts.body),
+        "each retry signs its own exact body"
+      );
+    }
+  });
+
   test("an impostor that cannot prove the code gets nothing: no cookies, no POST", async () => {
     let cookieReads = 0;
     chrome.cookies.getAll = async () => {
