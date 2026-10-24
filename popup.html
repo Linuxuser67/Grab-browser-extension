@@ -7,7 +7,6 @@
         color-scheme: light dark;
         --bg: #ffffff;
         --fg: #1e1e1e;
-        --hint: #666666;
         --border: #d0d0d0;
         --input-bg: #ffffff;
         --saved: #1a7f37;
@@ -17,7 +16,6 @@
         :root {
           --bg: #1e1e1e;
           --fg: #e8e8e8;
-          --hint: #a0a0a0;
           --border: #404040;
           --input-bg: #2d2d2d;
           --saved: #4caf50;
@@ -33,9 +31,16 @@
         background: var(--bg);
         color: var(--fg);
       }
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
       h2 {
         font-size: 15px;
-        margin: 0 0 12px;
+        margin: 0;
         display: flex;
         align-items: center;
         gap: 8px;
@@ -43,6 +48,30 @@
       h2 img {
         width: 20px;
         height: 20px;
+      }
+      .options-button {
+        display: inline-grid;
+        place-items: center;
+        flex: 0 0 auto;
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+      }
+      .options-button:hover {
+        background: rgba(127, 127, 127, 0.12);
+      }
+      .options-button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .options-button svg {
+        width: 18px;
+        height: 18px;
       }
       label {
         display: block;
@@ -57,12 +86,6 @@
       label.checkbox input {
         margin-top: 2px;
         accent-color: var(--accent);
-      }
-      .hint {
-        color: var(--hint);
-        font-size: 11px;
-        margin: 2px 0 0;
-        line-height: 1.4;
       }
       input[type="text"],
       input[type="number"] {
@@ -106,20 +129,6 @@
         max-height: 20px;
         margin: 12px 0 0;
       }
-      .footer {
-        margin-top: 16px;
-        padding-top: 12px;
-        border-top: 1px solid var(--border);
-        font-size: 11px;
-        color: var(--hint);
-      }
-      .footer a {
-        color: var(--accent);
-        text-decoration: none;
-      }
-      .footer a:hover {
-        text-decoration: underline;
-      }
       .status {
         font-size: 12px;
         padding: 6px 10px;
@@ -144,30 +153,53 @@
           color: #f28b82;
         }
       }
+      @media (prefers-reduced-motion: reduce) {
+        #saved {
+          transition: none;
+        }
+      }
     </style>
   </head>
   <body>
-    <h2><img src="icons/icon32.png" alt="" />Grab</h2>
-    <div id="grabStatus" class="status">Checking Grab…</div>
+    <header class="header">
+      <h2><img src="icons/icon32.png" alt="" />Grab</h2>
+      <button
+        type="button"
+        id="openOptions"
+        class="options-button"
+        aria-label="Open full options"
+        title="Options"
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="3" />
+          <path d="m19.4 15 .1.1a1.7 1.7 0 0 1-2.4 2.4l-.1-.1a1.7 1.7 0 0 0-2.9 1.2v.2a1.7 1.7 0 0 1-3.4 0v-.2a1.7 1.7 0 0 0-2.9-1.2l-.1.1a1.7 1.7 0 0 1-2.4-2.4l.1-.1a1.7 1.7 0 0 0-1.2-2.9H4a1.7 1.7 0 0 1 0-3.4h.2a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a1.7 1.7 0 0 1 2.4-2.4l.1.1a1.7 1.7 0 0 0 2.9-1.2V2a1.7 1.7 0 0 1 3.4 0v.2a1.7 1.7 0 0 0 2.9 1.2l.1-.1a1.7 1.7 0 0 1 2.4 2.4l-.1.1a1.7 1.7 0 0 0 1.2 2.9h.2a1.7 1.7 0 0 1 0 3.4h-.2a1.7 1.7 0 0 0-1.2 2.9Z" />
+        </svg>
+      </button>
+    </header>
+    <div id="grabStatus" class="status" role="status" aria-live="polite" aria-atomic="true">Checking Grab…</div>
 
     <label class="checkbox">
       <input type="checkbox" id="interceptDownloads" />
       <span>Automatically send browser downloads to Grab</span>
     </label>
-    <p class="hint">
-      Downloads are cancelled in the browser and opened in Grab instead.
-    </p>
 
     <label for="minSizeMB">Only intercept downloads of at least</label>
     <div class="row">
       <input type="number" id="minSizeMB" min="0" step="1" />
       <span>MB</span>
     </div>
-    <p class="hint">Smaller downloads stay in the browser. 0 intercepts everything.</p>
 
     <label for="skipTypes">Don't intercept these file types</label>
     <input type="text" id="skipTypes" placeholder="pdf, jpg, png" />
-    <p class="hint">Comma-separated extensions.</p>
 
     <label class="checkbox">
       <input type="checkbox" id="showContextMenu" />
@@ -178,16 +210,8 @@
       <input type="checkbox" id="detectVideos" />
       <span>Detect videos playing in tabs</span>
     </label>
-    <p class="hint">
-      Offered qualities appear in the right-click menu under “Videos detected
-      by Grab”.
-    </p>
 
-    <p id="saved">Saved</p>
-
-    <div class="footer">
-      <a href="#" id="openOptions">Full options page</a>
-    </div>
+    <p id="saved" role="status" aria-live="polite"></p>
 
     <script src="shared.js"></script>
     <script src="settings.js"></script>

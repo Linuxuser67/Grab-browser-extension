@@ -5,10 +5,10 @@ bindSettingsForm(document);
 
 // The worker does the check: it knows the pairing code and the port.
 const STATUS_TEXT = {
-  verified: ["Grab is running and paired", "status ok"],
-  unverified: ["Something else answers on Grab's port. Pair again in Options.", "status down"],
-  unpaired: ["Not paired: automatic interception is off until you pair in Options", "status down"],
-  down: ["Grab isn't running — downloads will stay in the browser", "status down"],
+  verified: ["Connected", "status ok"],
+  unverified: ["Unverified", "status down"],
+  unpaired: ["Not paired", "status down"],
+  down: ["Not running", "status down"],
 };
 
 async function checkGrabStatus() {
@@ -25,8 +25,7 @@ async function checkGrabStatus() {
   el.className = className;
 }
 
-document.getElementById("openOptions").addEventListener("click", (e) => {
-  e.preventDefault();
+document.getElementById("openOptions").addEventListener("click", () => {
   chrome.runtime.openOptionsPage();
 });
 

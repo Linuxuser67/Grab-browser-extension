@@ -20,6 +20,7 @@ async function loadPairing() {
 /// browser requires to grant the optional cookies permission, which is asked
 /// for only when a code is being stored.
 async function savePairing() {
+  pairingEl.removeAttribute("aria-invalid");
   const code = normalizePairingCode(pairingEl.value);
   if (code === "") {
     await savePairingCode("");
@@ -33,6 +34,7 @@ async function savePairing() {
     return;
   }
   if (!(await savePairingCode(code))) {
+    pairingEl.setAttribute("aria-invalid", "true");
     showPairingStatus("That isn't a pairing code (64 letters and digits).");
     return;
   }
@@ -49,6 +51,10 @@ async function savePairing() {
       : "Paired, but cookie access was not granted: links only",
   );
 }
+
+pairingEl.addEventListener("input", () => {
+  pairingEl.removeAttribute("aria-invalid");
+});
 
 pairingBtn.addEventListener("click", savePairing);
 
