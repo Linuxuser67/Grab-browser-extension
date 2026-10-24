@@ -1541,7 +1541,7 @@ describe("HTTP handoff to Grab", () => {
         return {
           status: 200,
           ok: true,
-          json: async () => ({ proof: hmac("grab-server\\u0000", helloNonce) }),
+          json: async () => ({ proof: hmac("grab-server\u0000", helloNonce) }),
         };
       }
       addCount += 1;
@@ -1557,7 +1557,7 @@ describe("HTTP handoff to Grab", () => {
     for (const post of posts()) {
       assert.equal(
         post.opts.headers["X-Grab-Token"],
-        hmac("grab-client\\u0000", post.opts.body),
+        hmac("grab-client\u0000", post.opts.body),
         "each retry signs its own exact body"
       );
     }
