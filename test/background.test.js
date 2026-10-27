@@ -1650,6 +1650,68 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(fetchCalls[0].opts.headers["X-Grab-Token"], undefined);
   });
 
+  // --- cold start --------------------------------------------------------
+
+  test("explicit send wakes a closed Grab, then retries so cookies travel", async () => {
+    await pair();
+    let grabUp = false;
+    fetchCalls = [];
+    globalThis.fetch = async (url, opts = {}) => {
+      fetchCalls.push({ url, opts });
+      if (url.includes("/hello")) {
+        if (!grabUp) throw new Error("connection refused");
+        const nonce = new URL(url).searchParams.get("n");
+        return {
+          status: 200,
+          ok: true,
+          json: async () => ({ proof: hmac("grab-server\u0000", nonce) }),
+        };
+      }
+      return { status: 200, ok: true };
+    };
+    chrome.cookies.getAll = async () => [{
+      name: "session", value: "abc", domain: "example.com",
+      hostOnly: true, path: "/", secure: true,
+    }];
+    // Launching Grab is what makes its local server answer: flip the mock
+    // when the extension navigates to the wake URL.
+    const origUpdate = chrome.tabs.update;
+    chrome.tabs.update = (a, b) => {
+      const target = b !== undefined ? b : a;
+      const url = typeof target === "string" ? target : target && target.url;
+      if (url === "grab://https/") grabUp = true;
+      return origUpdate(a, b);
+    };
+
+    await bg.explicitSend("https://example.com/f.zip", 7, false);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.equal(updates.length, 1, "the tab only visits the wake URL");
+    assert.equal(updates[0][1].url, "grab://https/");
+    assert.equal(updates[0][2], 7, "wake used the tab the user acted on");
+    const post = posts().find((c) => c.opts.method === "POST");
+    assert.ok(post, "the URL was retried over HTTP after the wake");
+    assert.deepEqual(
+      JSON.parse(post.opts.body).cookies.map((cookie) => cookie.name),
+      ["session"],
+      "the cold-start retry carries the browser cookies"
+    );
+  });
+
+  test("cold start that never comes up falls back to the grab:// URL", async () => {
+    await pair();
+    bg._setWakeTimeout(0);
+    mockFetch("down");
+
+    await bg.explicitSend("https://example.com/f.zip", 7, false);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.equal(updates.length, 2, "wake attempt, then the cookieless fallback");
+    assert.equal(updates[0][1].url, "grab://https/");
+    assert.equal(updates[1][1].url, "grab://https/example.com/f.zip");
+    assert.equal(posts().length, 0, "no POST ever reached Grab");
+  });
+
   // --- confirm=1 outcomes ------------------------------------------------
 
   for (const status of [408, 409]) {

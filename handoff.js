@@ -16,6 +16,21 @@ const CONFIRM_TIMEOUT_MS = 130_000;
 /// A pairing handshake is a loopback round trip.
 const HELLO_TIMEOUT_MS = 3_000;
 
+/// Launches Grab without handing it a download: the app restores this to the
+/// invalid "https://", so it only presents its window. A cold start cannot
+/// use the grab:// URL fallback when cookies must travel — that channel has
+/// no way to carry them.
+const GRAB_WAKE_URL = "grab://https/";
+/// How long to wait for a cold-started Grab to answer its local server.
+const WAKE_TIMEOUT_MS = 12_000;
+const WAKE_POLL_MS = 250;
+
+// Test hook: shorten the cold-start wait.
+let wakeTimeoutMs = WAKE_TIMEOUT_MS;
+function _setWakeTimeout(ms) {
+  wakeTimeoutMs = ms;
+}
+
 const MAX_HANDOFF_COOKIES = 100;
 const MAX_HANDOFF_BODY_BYTES = 32 * 1024;
 
@@ -410,6 +425,35 @@ async function postToGrabWithRetry(url, ctx, retryDelays = HANDOFF_RETRY_DELAYS_
   return status;
 }
 
+/// Launch Grab without a URL, then wait until its local server answers.
+/// Returns true when a retry can carry the cookies over HTTP; false when the
+/// app never came up and the caller must use the cookieless URL fallback.
+async function wakeGrabAndWait(tabId) {
+  updateTab(tabId, GRAB_WAKE_URL);
+  const secret = await getPairingCode();
+  const deadline = Date.now() + wakeTimeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(WAKE_POLL_MS);
+    try {
+      if (secret) {
+        if (await verifyGrab(secret)) return true;
+      } else {
+        // Unpaired: any answer means the endpoint is up. The POST that
+        // follows still refuses to trust an unverified listener with cookies.
+        const nonce = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+        const { ok } = await fetchJsonWithTimeout(
+          `${GRAB_BASE_URL}/hello?n=${nonce}`,
+          HELLO_TIMEOUT_MS,
+        );
+        if (ok) return true;
+      }
+    } catch {
+      // Not up yet.
+    }
+  }
+  return false;
+}
+
 /// Explicit user action (context menu, video menu, Alt+G): try the HTTP
 /// handoff first, but only fall back to the grab:// navigation when Grab
 /// isn't reachable at all (connection failure). If Grab responded — even
@@ -418,11 +462,16 @@ async function postToGrabWithRetry(url, ctx, retryDelays = HANDOFF_RETRY_DELAYS_
 async function explicitSend(url, tabId, incognito) {
   if (!toGrabUrl(url)) return;
   const ctx = { tabId, incognito };
-  const status = await postToGrabWithRetry(url, ctx);
+  let status = await postToGrabWithRetry(url, ctx);
+  if (status === 0 && (await wakeGrabAndWait(tabId))) {
+    // Grab was closed and has just started: retry over HTTP so the browser
+    // cookies still ride along. The grab:// fallback cannot carry them.
+    status = await postToGrabWithRetry(url, ctx);
+  }
   const tabArg =
     Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
   if (status === 0) {
-    // Grab not running: the OS launches it with the grab:// URL.
+    // Grab never came up: the OS launches it with the grab:// URL.
     sendToGrab(url, tabId);
   } else if (status === STATUS_UNVERIFIED) {
     // Something else answers on Grab's port. Don't hand the URL to a
