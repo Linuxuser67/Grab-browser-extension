@@ -1689,6 +1689,23 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(updates.length, 1, "the tab only visits the wake URL");
     assert.equal(updates[0][1].url, "grab://https/");
     assert.equal(updates[0][2], 7, "wake used the tab the user acted on");
+    assert.ok(
+      chrome._calls.some(
+        ([name, args]) =>
+          name === "action.setBadgeText" && args.text === "…" && args.tabId === 7
+      ),
+      "the wait is visible on the toolbar"
+    );
+    assert.ok(
+      chrome._calls.some(
+        ([name, args]) => name === "action.setTitle" && args.title === "Starting Grab…"
+      ),
+      "the badge tooltip explains the wait"
+    );
+    assert.ok(
+      chrome._calls.some(([name, args]) => name === "action.setBadgeText" && args.text === ""),
+      "the starting badge is cleared"
+    );
     const post = posts().find((c) => c.opts.method === "POST");
     assert.ok(post, "the URL was retried over HTTP after the wake");
     assert.deepEqual(
@@ -1710,6 +1727,84 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(updates[0][1].url, "grab://https/");
     assert.equal(updates[1][1].url, "grab://https/example.com/f.zip");
     assert.equal(posts().length, 0, "no POST ever reached Grab");
+  });
+
+  test("cold start without pairing skips the wake and falls back immediately", async () => {
+    bg._setWakeTimeout(1000); // would stall if the gate regressed
+    mockFetch("down");
+
+    await bg.explicitSend("https://example.com/f.zip", 7, false);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.deepEqual(
+      updates.map(([, args]) => args.url),
+      ["grab://https/example.com/f.zip"],
+      "main's single fallback navigation, with no wake first"
+    );
+  });
+
+  test("cold start with Cookies permission revoked skips the wake", async () => {
+    await pair();
+    chrome.permissions = { contains: async () => false };
+    bg._setWakeTimeout(1000);
+    mockFetch("down");
+
+    await bg.explicitSend("https://example.com/f.zip", 7, false);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.deepEqual(
+      updates.map(([, args]) => args.url),
+      ["grab://https/example.com/f.zip"],
+      "nothing to carry, so no cold-start wait"
+    );
+  });
+
+  test("concurrent cold sends share one wake launch", async () => {
+    await pair();
+    let grabUp = false;
+    fetchCalls = [];
+    globalThis.fetch = async (url, opts = {}) => {
+      fetchCalls.push({ url, opts });
+      if (url.includes("/hello")) {
+        if (!grabUp) throw new Error("connection refused");
+        const nonce = new URL(url).searchParams.get("n");
+        return {
+          status: 200,
+          ok: true,
+          json: async () => ({ proof: hmac("grab-server\u0000", nonce) }),
+        };
+      }
+      return { status: 200, ok: true };
+    };
+    chrome.cookies.getAll = async () => [{
+      name: "session", value: "abc", domain: "example.com",
+      hostOnly: true, path: "/", secure: true,
+    }];
+    const origUpdate = chrome.tabs.update;
+    chrome.tabs.update = (a, b) => {
+      const target = b !== undefined ? b : a;
+      const url = typeof target === "string" ? target : target && target.url;
+      if (url === "grab://https/") grabUp = true;
+      return origUpdate(a, b);
+    };
+
+    await Promise.all([
+      bg.explicitSend("https://example.com/a.zip", 7, false),
+      bg.explicitSend("https://example.com/b.zip", 7, false),
+    ]);
+
+    const wakeUpdates = chrome._calls.filter(
+      ([name, args]) => name === "tabs.update" && args.url === "grab://https/"
+    );
+    assert.equal(wakeUpdates.length, 1, "one launch for the whole burst");
+    const posted = posts().map((c) => JSON.parse(c.opts.body).url).sort();
+    assert.deepEqual(posted, [
+      "https://example.com/a.zip",
+      "https://example.com/b.zip",
+    ]);
+    for (const call of posts()) {
+      assert.equal(JSON.parse(call.opts.body).cookies.length, 1);
+    }
   });
 
   // --- confirm=1 outcomes ------------------------------------------------

@@ -425,33 +425,54 @@ async function postToGrabWithRetry(url, ctx, retryDelays = HANDOFF_RETRY_DELAYS_
   return status;
 }
 
+/// Set while a cold start is in progress: concurrent sends share one launch
+/// instead of each navigating the tab to the wake URL.
+let wakeInFlight = null;
+
 /// Launch Grab without a URL, then wait until its local server answers.
 /// Returns true when a retry can carry the cookies over HTTP; false when the
-/// app never came up and the caller must use the cookieless URL fallback.
+/// app never came up, the user never granted the Cookies permission, or Grab
+/// is unpaired — all cases where the wake buys nothing and the caller must
+/// use the cookieless URL fallback immediately.
 async function wakeGrabAndWait(tabId) {
-  updateTab(tabId, GRAB_WAKE_URL);
-  const secret = await getPairingCode();
-  const deadline = Date.now() + wakeTimeoutMs;
-  while (Date.now() < deadline) {
-    await sleep(WAKE_POLL_MS);
+  // The wake exists only to carry cookies over the retried POST. Unpaired
+  // Grab never accepts cookies, and a revoked Cookies permission means there
+  // are none to send, so both take main's immediate fallback.
+  if (!(await getPairingCode()) || !(await hasCookiePermission())) return false;
+  if (wakeInFlight) return wakeInFlight;
+  const tabArg = Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
+  const run = (async () => {
     try {
-      if (secret) {
-        if (await verifyGrab(secret)) return true;
-      } else {
-        // Unpaired: any answer means the endpoint is up. The POST that
-        // follows still refuses to trust an unverified listener with cookies.
-        const nonce = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
-        const { ok } = await fetchJsonWithTimeout(
-          `${GRAB_BASE_URL}/hello?n=${nonce}`,
-          HELLO_TIMEOUT_MS,
-        );
-        if (ok) return true;
+      try {
+        await chrome.action.setBadgeText({ ...tabArg, text: "…" });
+        await chrome.action.setTitle({ ...tabArg, title: "Starting Grab…" });
+      } catch {}
+      updateTab(tabId, GRAB_WAKE_URL);
+      const secret = await getPairingCode();
+      if (!secret) return false;
+      const deadline = Date.now() + wakeTimeoutMs;
+      while (Date.now() < deadline) {
+        await sleep(WAKE_POLL_MS);
+        try {
+          if (await verifyGrab(secret)) return true;
+        } catch {
+          // Not up yet.
+        }
       }
-    } catch {
-      // Not up yet.
+      return false;
+    } finally {
+      try {
+        await chrome.action.setBadgeText({ ...tabArg, text: "" });
+        await chrome.action.setTitle({ ...tabArg, title: "" });
+      } catch {}
     }
+  })();
+  wakeInFlight = run;
+  try {
+    return await run;
+  } finally {
+    if (wakeInFlight === run) wakeInFlight = null;
   }
-  return false;
 }
 
 /// Explicit user action (context menu, video menu, Alt+G): try the HTTP
