@@ -2,11 +2,22 @@
 // Run with: node --test test/   (Node's built-in runner, no dependencies)
 const { test, describe, beforeEach } = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 
 const BG_PATH = path.join(__dirname, "..", "background.js");
 const SHARED_PATH = path.join(__dirname, "..", "shared.js");
+const HANDOFF_PATH = path.join(__dirname, "..", "handoff.js");
+const INTERCEPT_PATH = path.join(__dirname, "..", "intercept.js");
+const VIDEO_PATH = path.join(__dirname, "..", "video-menu.js");
 const CONTENT_PATH = path.join(__dirname, "..", "content.js");
+
+// Scripts share one global scope in the browser. Concatenating them into one
+// function reproduces that, including the final `module.exports` hook, without
+// leaking top-level consts across reloads.
+const BG_SOURCE = [SHARED_PATH, HANDOFF_PATH, INTERCEPT_PATH, VIDEO_PATH, BG_PATH]
+  .map((file) => fs.readFileSync(file, "utf8"))
+  .join("\n");
 
 // Default fetch mock: manifests read as plain media playlists (not masters),
 // so the pre-existing menu tests see unchanged behavior. Tests for master
@@ -124,17 +135,7 @@ function makeChrome(shared) {
 }
 
 function loadBackground(chrome) {
-  delete require.cache[require.resolve(BG_PATH)];
-  delete require.cache[require.resolve(SHARED_PATH)];
   globalThis.chrome = chrome;
-  globalThis.importScripts = () => {
-    const shared = require(SHARED_PATH);
-    globalThis.SHARED_DEFAULTS = shared.SHARED_DEFAULTS;
-    globalThis.SHARED_PAIRING_CODE_RE = shared.SHARED_PAIRING_CODE_RE;
-    globalThis.SHARED_EXCLUDED_HOSTS = shared.SHARED_EXCLUDED_HOSTS;
-    globalThis.sharedHostExcluded = shared.sharedHostExcluded;
-    globalThis.normalizePairingCode = shared.normalizePairingCode;
-  };
   // Mock Grab's HTTP handoff: accept every handoff, record the URL.
   // If the test already set a fetch mock (for playlist content), wrap it
   // so POSTs are handled as handoffs and other requests go to the test's mock.
@@ -147,7 +148,9 @@ function loadBackground(chrome) {
     if (testFetch) return testFetch(url, opts);
     return { status: 404, ok: false, text: async () => "" };
   };
-  return require(BG_PATH);
+  const worker = { exports: {} };
+  new Function("module", BG_SOURCE)(worker);
+  return worker.exports;
 }
 
 /// Wrap a GET-only fetch mock to also handle handoff POSTs.
@@ -343,6 +346,42 @@ describe("mergeVideoFinds", () => {
     assert.deepEqual(merged, [
       "https://cdn.example.com/video-42/master.m3u8",
       "https://cdn.example.com/video-43/master.m3u8",
+    ]);
+  });
+
+  test("distinct same-protocol manifests in one directory stay separate entries", () => {
+    const merged = bg.mergeVideoFinds([], [
+      "https://cdn.example.com/v/a/master.m3u8",
+      "https://cdn.example.com/v/a/index.m3u8",
+    ]);
+    assert.deepEqual(merged, [
+      "https://cdn.example.com/v/a/master.m3u8",
+      "https://cdn.example.com/v/a/index.m3u8",
+    ]);
+  });
+
+  test("query-string variants of one manifest stay one entry", () => {
+    const merged = bg.mergeVideoFinds([], [
+      "https://site.example/hls/playlist.m3u8?v=alpha",
+      "https://site.example/hls/playlist.m3u8?v=beta",
+    ]);
+    assert.deepEqual(merged, [
+      "https://site.example/hls/playlist.m3u8?v=alpha",
+    ]);
+  });
+
+  test("a directory with two families does not absorb a direct rendition", () => {
+    const merged = bg.mergeVideoFinds(
+      [{ src: "https://cdn.example.com/v/a/720p.mp4", blob: false }],
+      [
+        "https://cdn.example.com/v/a/master.m3u8",
+        "https://cdn.example.com/v/a/index.m3u8",
+      ]
+    );
+    assert.deepEqual(merged, [
+      "https://cdn.example.com/v/a/720p.mp4",
+      "https://cdn.example.com/v/a/master.m3u8",
+      "https://cdn.example.com/v/a/index.m3u8",
     ]);
   });
 

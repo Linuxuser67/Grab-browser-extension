@@ -80,10 +80,6 @@ async function verifySavedPairing(code, cookieAccessGranted, revision) {
     showPairingStatus(
       "Saved, but Grab is not reachable; verification is pending.",
     );
-  } else if (reply && reply.state === "unpaired") {
-    showPairingStatus(
-      "Saved, but the background worker found no valid pairing code.",
-    );
   } else {
     showPairingStatus("Saved, but verification status is unavailable.");
   }
@@ -143,7 +139,8 @@ async function savePairing() {
     return;
   }
 
-  if (!SHARED_PAIRING_CODE_RE.test(code) || !(await savePairingCode(code))) {
+  // savePairingCode enforces the 64-hex-digit format.
+  if (!(await savePairingCode(code))) {
     if (revision === pairingStatusRevision) {
       pairingEl.setAttribute("aria-invalid", "true");
       showPairingStatus("That isn't a pairing code (64 hexadecimal characters).");
