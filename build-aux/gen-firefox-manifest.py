@@ -17,7 +17,15 @@ FIREFOX = ROOT / "manifest.firefox.json"
 def generate():
     m = json.loads(CHROMIUM.read_text())
     # Firefox uses background scripts, not a service worker.
-    m["background"] = {"scripts": ["shared.js", "background.js"]}
+    m["background"] = {
+        "scripts": [
+            "shared.js",
+            "handoff.js",
+            "intercept.js",
+            "video-menu.js",
+            "background.js",
+        ]
+    }
     # Firefox-only metadata.
     m["browser_specific_settings"] = {
         "gecko": {

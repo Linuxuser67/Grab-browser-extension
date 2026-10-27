@@ -22,6 +22,9 @@
   "background": {
     "scripts": [
       "shared.js",
+      "handoff.js",
+      "intercept.js",
+      "video-menu.js",
       "background.js"
     ]
   },

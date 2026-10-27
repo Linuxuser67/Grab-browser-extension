@@ -3,10 +3,21 @@
 const { test, describe, beforeEach } = require("node:test");
 const nodeCrypto = require("node:crypto");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 
 const BG_PATH = path.join(__dirname, "..", "background.js");
 const SHARED_PATH = path.join(__dirname, "..", "shared.js");
+const HANDOFF_PATH = path.join(__dirname, "..", "handoff.js");
+const INTERCEPT_PATH = path.join(__dirname, "..", "intercept.js");
+const VIDEO_PATH = path.join(__dirname, "..", "video-menu.js");
+
+// Scripts share one global scope in the browser. Concatenating them into one
+// function reproduces that, including the final `module.exports` hook, without
+// leaking top-level consts across reloads.
+const BG_SOURCE = [SHARED_PATH, HANDOFF_PATH, INTERCEPT_PATH, VIDEO_PATH, BG_PATH]
+  .map((file) => fs.readFileSync(file, "utf8"))
+  .join("\n");
 
 /// Minimal chrome mock: captures listeners, records calls, backs
 /// chrome.storage.session with a Map. Pass a shared `shared` object to
@@ -127,21 +138,9 @@ function makeChrome(shared) {
   return chrome;
 }
 
-/// Load a fresh copy of background.js against the given chrome mock.
+/// Load a fresh copy of the worker scripts against the given chrome mock.
 function loadBackground(chrome) {
-  delete require.cache[require.resolve(BG_PATH)];
-  delete require.cache[require.resolve(SHARED_PATH)];
   globalThis.chrome = chrome;
-  // background.js calls importScripts("shared.js") (worker); in Node we
-  // load it via require instead.
-  globalThis.importScripts = () => {
-    const shared = require(SHARED_PATH);
-    globalThis.SHARED_DEFAULTS = shared.SHARED_DEFAULTS;
-    globalThis.SHARED_PAIRING_CODE_RE = shared.SHARED_PAIRING_CODE_RE;
-    globalThis.SHARED_EXCLUDED_HOSTS = shared.SHARED_EXCLUDED_HOSTS;
-    globalThis.sharedHostExcluded = shared.sharedHostExcluded;
-    globalThis.normalizePairingCode = shared.normalizePairingCode;
-  };
   // Default: a Grab that accepts every handoff and records the URL it got.
   // Tests must not depend on a real Grab listening on 127.0.0.1:9412; the HTTP
   // handoff suite installs its own fetch for failure cases.
@@ -159,7 +158,14 @@ function loadBackground(chrome) {
     chrome._calls.push(["handoff", JSON.parse(opts.body).url]);
     return { status: 200, ok: true };
   };
-  return require(BG_PATH);
+  const worker = { exports: {} };
+  new Function("module", BG_SOURCE)(worker);
+  // Test helper: the production handOff wrapper had no callers.
+  worker.exports.handOff = async (url, ctx, retryDelays) => {
+    const status = await worker.exports.postToGrabWithRetry(url, ctx, retryDelays);
+    return status >= 200 && status < 300;
+  };
+  return worker.exports;
 }
 
 const MiB = 1024 * 1024;
@@ -1073,7 +1079,33 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(bg.fitHandoffBody("x".repeat(33 * 1024), [], navigator.userAgent), null);
     const accepted = bg.fitHandoffBody("x".repeat(31 * 1024), [], navigator.userAgent);
     assert.ok(accepted !== null, "body below the server cap should be preserved");
-    assert.ok(Buffer.byteLength(accepted) <= 32 * 1024);
+    assert.ok(Buffer.byteLength(accepted.body) <= 32 * 1024);
+    assert.equal(accepted.count, 0);
+  });
+
+  test("a stalled response body cannot hold verification open", async () => {
+    const realSetTimeout = globalThis.setTimeout;
+    // Fire the 3 s deadline at once: the test proves the deadline covers the
+    // body read, not that the real timeout is three seconds.
+    globalThis.setTimeout = (fn) => realSetTimeout(fn, 5);
+    globalThis.fetch = async (url, opts = {}) => ({
+      status: 200,
+      ok: true,
+      json: () =>
+        new Promise((_, reject) => {
+          opts.signal.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        }),
+    });
+    try {
+      const started = Date.now();
+      assert.equal(await bg.verifyGrab(SECRET), false);
+      assert.deepEqual(await bg.grabStatus(), { state: "unverified" });
+      assert.ok(Date.now() - started < 2000, "the body read must share the deadline");
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
   });
 
   test("cookie read failures are visible while preserving the URL handoff", async () => {
