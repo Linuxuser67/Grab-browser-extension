@@ -429,27 +429,46 @@ async function postToGrabWithRetry(url, ctx, retryDelays = HANDOFF_RETRY_DELAYS_
 /// instead of each navigating the tab to the wake URL.
 let wakeInFlight = null;
 
+/// True when the retried POST would carry at least one cookie. Incognito
+/// stores and unreadable jars yield none, so the wake would buy nothing.
+async function hasHandoffCookies(url, tabId) {
+  try {
+    const storeId = await resolveStoreId({ tabId });
+    if (storeId === null) return false;
+    return (await readCookies(url, storeId)).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /// Launch Grab without a URL, then wait until its local server answers.
 /// Returns true when a retry can carry the cookies over HTTP; false when the
-/// app never came up, the user never granted the Cookies permission, or Grab
-/// is unpaired — all cases where the wake buys nothing and the caller must
-/// use the cookieless URL fallback immediately.
-async function wakeGrabAndWait(tabId) {
-  // The wake exists only to carry cookies over the retried POST. Unpaired
-  // Grab never accepts cookies, and a revoked Cookies permission means there
-  // are none to send, so both take main's immediate fallback.
-  if (!(await getPairingCode()) || !(await hasCookiePermission())) return false;
+/// app never came up, the user never granted the Cookies permission, Grab is
+/// unpaired, the send is incognito, or the site has no cookies — all cases
+/// where the wake buys nothing and the caller must use the URL fallback now.
+async function wakeGrabAndWait(url, tabId, incognito) {
+  // The wake exists only to carry cookies over the retried POST.
+  if (incognito === true) return false;
+  const secret = await getPairingCode();
+  if (!secret || !(await hasCookiePermission())) return false;
+  if (!(await hasHandoffCookies(url, tabId))) return false;
+  // Check after the jar read: two sends that entered together both await it,
+  // and only the first may start a launch.
   if (wakeInFlight) return wakeInFlight;
   const tabArg = Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
+  // A warned tab keeps its "!" until a handoff verifies: overwriting it here
+  // would clear the visible warning without clearing warnedTabs.
+  const keepWarning =
+    Number.isInteger(tabId) && tabId >= 0 && warnedTabs.has(tabId);
   const run = (async () => {
     try {
-      try {
-        await chrome.action.setBadgeText({ ...tabArg, text: "…" });
-        await chrome.action.setTitle({ ...tabArg, title: "Starting Grab…" });
-      } catch {}
+      if (!keepWarning) {
+        try {
+          await chrome.action.setBadgeText({ ...tabArg, text: "…" });
+          await chrome.action.setTitle({ ...tabArg, title: "Starting Grab…" });
+        } catch {}
+      }
       updateTab(tabId, GRAB_WAKE_URL);
-      const secret = await getPairingCode();
-      if (!secret) return false;
       const deadline = Date.now() + wakeTimeoutMs;
       while (Date.now() < deadline) {
         await sleep(WAKE_POLL_MS);
@@ -461,10 +480,12 @@ async function wakeGrabAndWait(tabId) {
       }
       return false;
     } finally {
-      try {
-        await chrome.action.setBadgeText({ ...tabArg, text: "" });
-        await chrome.action.setTitle({ ...tabArg, title: "" });
-      } catch {}
+      if (!keepWarning) {
+        try {
+          await chrome.action.setBadgeText({ ...tabArg, text: "" });
+          await chrome.action.setTitle({ ...tabArg, title: "" });
+        } catch {}
+      }
     }
   })();
   wakeInFlight = run;
@@ -484,7 +505,7 @@ async function explicitSend(url, tabId, incognito) {
   if (!toGrabUrl(url)) return;
   const ctx = { tabId, incognito };
   let status = await postToGrabWithRetry(url, ctx);
-  if (status === 0 && (await wakeGrabAndWait(tabId))) {
+  if (status === 0 && (await wakeGrabAndWait(url, tabId, incognito))) {
     // Grab was closed and has just started: retry over HTTP so the browser
     // cookies still ride along. The grab:// fallback cannot carry them.
     status = await postToGrabWithRetry(url, ctx);

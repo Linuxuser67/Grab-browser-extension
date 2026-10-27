@@ -1717,6 +1717,10 @@ describe("HTTP handoff to Grab", () => {
 
   test("cold start that never comes up falls back to the grab:// URL", async () => {
     await pair();
+    chrome.cookies.getAll = async () => [{
+      name: "session", value: "abc", domain: "example.com",
+      hostOnly: true, path: "/", secure: true,
+    }];
     bg._setWakeTimeout(0);
     mockFetch("down");
 
@@ -1756,6 +1760,58 @@ describe("HTTP handoff to Grab", () => {
       updates.map(([, args]) => args.url),
       ["grab://https/example.com/f.zip"],
       "nothing to carry, so no cold-start wait"
+    );
+  });
+
+  test("incognito sends skip the wake: no cookies are forwarded", async () => {
+    await pair();
+    chrome.cookies.getAll = async () => [{
+      name: "session", value: "abc", domain: "example.com",
+      hostOnly: true, path: "/", secure: true,
+    }];
+    bg._setWakeTimeout(1000);
+    mockFetch("down");
+
+    await bg.explicitSend("https://example.com/f.zip", 7, true);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.deepEqual(
+      updates.map(([, args]) => args.url),
+      ["grab://https/example.com/f.zip"]
+    );
+  });
+
+  test("a site without cookies skips the wake", async () => {
+    await pair();
+    bg._setWakeTimeout(1000);
+    mockFetch("down");
+
+    await bg.explicitSend("https://example.com/f.zip", 7, false);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.deepEqual(
+      updates.map(([, args]) => args.url),
+      ["grab://https/example.com/f.zip"],
+      "nothing to carry, so no launch round trip"
+    );
+  });
+
+  test("a warned tab keeps its badge through the wake", async () => {
+    await pair();
+    chrome.cookies.getAll = async () => [{
+      name: "session", value: "abc", domain: "example.com",
+      hostOnly: true, path: "/", secure: true,
+    }];
+    bg._warnedTabs.add(7);
+    bg._setWakeTimeout(0);
+    mockFetch("down");
+
+    await bg.explicitSend("https://example.com/f.zip", 7, false);
+
+    assert.equal(
+      chrome._calls.some(([name]) => name === "action.setBadgeText"),
+      false,
+      "the wake must neither replace nor clear the warning badge"
     );
   });
 
