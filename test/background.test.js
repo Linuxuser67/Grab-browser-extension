@@ -1650,6 +1650,219 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(fetchCalls[0].opts.headers["X-Grab-Token"], undefined);
   });
 
+  // --- cold start --------------------------------------------------------
+
+  test("explicit send wakes a closed Grab, then retries so cookies travel", async () => {
+    await pair();
+    let grabUp = false;
+    fetchCalls = [];
+    globalThis.fetch = async (url, opts = {}) => {
+      fetchCalls.push({ url, opts });
+      if (url.includes("/hello")) {
+        if (!grabUp) throw new Error("connection refused");
+        const nonce = new URL(url).searchParams.get("n");
+        return {
+          status: 200,
+          ok: true,
+          json: async () => ({ proof: hmac("grab-server\u0000", nonce) }),
+        };
+      }
+      return { status: 200, ok: true };
+    };
+    chrome.cookies.getAll = async () => [{
+      name: "session", value: "abc", domain: "example.com",
+      hostOnly: true, path: "/", secure: true,
+    }];
+    // Launching Grab is what makes its local server answer: flip the mock
+    // when the extension navigates to the wake URL.
+    const origUpdate = chrome.tabs.update;
+    chrome.tabs.update = (a, b) => {
+      const target = b !== undefined ? b : a;
+      const url = typeof target === "string" ? target : target && target.url;
+      if (url === "grab://https/") grabUp = true;
+      return origUpdate(a, b);
+    };
+
+    await bg.explicitSend("https://example.com/f.zip", 7, false);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.equal(updates.length, 1, "the tab only visits the wake URL");
+    assert.equal(updates[0][1].url, "grab://https/");
+    assert.equal(updates[0][2], 7, "wake used the tab the user acted on");
+    assert.ok(
+      chrome._calls.some(
+        ([name, args]) =>
+          name === "action.setBadgeText" && args.text === "…" && args.tabId === 7
+      ),
+      "the wait is visible on the toolbar"
+    );
+    assert.ok(
+      chrome._calls.some(
+        ([name, args]) => name === "action.setTitle" && args.title === "Starting Grab…"
+      ),
+      "the badge tooltip explains the wait"
+    );
+    assert.ok(
+      chrome._calls.some(([name, args]) => name === "action.setBadgeText" && args.text === ""),
+      "the starting badge is cleared"
+    );
+    const post = posts().find((c) => c.opts.method === "POST");
+    assert.ok(post, "the URL was retried over HTTP after the wake");
+    assert.deepEqual(
+      JSON.parse(post.opts.body).cookies.map((cookie) => cookie.name),
+      ["session"],
+      "the cold-start retry carries the browser cookies"
+    );
+  });
+
+  test("cold start that never comes up falls back to the grab:// URL", async () => {
+    await pair();
+    chrome.cookies.getAll = async () => [{
+      name: "session", value: "abc", domain: "example.com",
+      hostOnly: true, path: "/", secure: true,
+    }];
+    bg._setWakeTimeout(0);
+    mockFetch("down");
+
+    await bg.explicitSend("https://example.com/f.zip", 7, false);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.equal(updates.length, 2, "wake attempt, then the cookieless fallback");
+    assert.equal(updates[0][1].url, "grab://https/");
+    assert.equal(updates[1][1].url, "grab://https/example.com/f.zip");
+    assert.equal(posts().length, 0, "no POST ever reached Grab");
+  });
+
+  test("cold start without pairing skips the wake and falls back immediately", async () => {
+    bg._setWakeTimeout(1000); // would stall if the gate regressed
+    mockFetch("down");
+
+    await bg.explicitSend("https://example.com/f.zip", 7, false);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.deepEqual(
+      updates.map(([, args]) => args.url),
+      ["grab://https/example.com/f.zip"],
+      "main's single fallback navigation, with no wake first"
+    );
+  });
+
+  test("cold start with Cookies permission revoked skips the wake", async () => {
+    await pair();
+    chrome.permissions = { contains: async () => false };
+    bg._setWakeTimeout(1000);
+    mockFetch("down");
+
+    await bg.explicitSend("https://example.com/f.zip", 7, false);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.deepEqual(
+      updates.map(([, args]) => args.url),
+      ["grab://https/example.com/f.zip"],
+      "nothing to carry, so no cold-start wait"
+    );
+  });
+
+  test("incognito sends skip the wake: no cookies are forwarded", async () => {
+    await pair();
+    chrome.cookies.getAll = async () => [{
+      name: "session", value: "abc", domain: "example.com",
+      hostOnly: true, path: "/", secure: true,
+    }];
+    bg._setWakeTimeout(1000);
+    mockFetch("down");
+
+    await bg.explicitSend("https://example.com/f.zip", 7, true);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.deepEqual(
+      updates.map(([, args]) => args.url),
+      ["grab://https/example.com/f.zip"]
+    );
+  });
+
+  test("a site without cookies skips the wake", async () => {
+    await pair();
+    bg._setWakeTimeout(1000);
+    mockFetch("down");
+
+    await bg.explicitSend("https://example.com/f.zip", 7, false);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.deepEqual(
+      updates.map(([, args]) => args.url),
+      ["grab://https/example.com/f.zip"],
+      "nothing to carry, so no launch round trip"
+    );
+  });
+
+  test("a warned tab keeps its badge through the wake", async () => {
+    await pair();
+    chrome.cookies.getAll = async () => [{
+      name: "session", value: "abc", domain: "example.com",
+      hostOnly: true, path: "/", secure: true,
+    }];
+    bg._warnedTabs.add(7);
+    bg._setWakeTimeout(0);
+    mockFetch("down");
+
+    await bg.explicitSend("https://example.com/f.zip", 7, false);
+
+    assert.equal(
+      chrome._calls.some(([name]) => name === "action.setBadgeText"),
+      false,
+      "the wake must neither replace nor clear the warning badge"
+    );
+  });
+
+  test("concurrent cold sends share one wake launch", async () => {
+    await pair();
+    let grabUp = false;
+    fetchCalls = [];
+    globalThis.fetch = async (url, opts = {}) => {
+      fetchCalls.push({ url, opts });
+      if (url.includes("/hello")) {
+        if (!grabUp) throw new Error("connection refused");
+        const nonce = new URL(url).searchParams.get("n");
+        return {
+          status: 200,
+          ok: true,
+          json: async () => ({ proof: hmac("grab-server\u0000", nonce) }),
+        };
+      }
+      return { status: 200, ok: true };
+    };
+    chrome.cookies.getAll = async () => [{
+      name: "session", value: "abc", domain: "example.com",
+      hostOnly: true, path: "/", secure: true,
+    }];
+    const origUpdate = chrome.tabs.update;
+    chrome.tabs.update = (a, b) => {
+      const target = b !== undefined ? b : a;
+      const url = typeof target === "string" ? target : target && target.url;
+      if (url === "grab://https/") grabUp = true;
+      return origUpdate(a, b);
+    };
+
+    await Promise.all([
+      bg.explicitSend("https://example.com/a.zip", 7, false),
+      bg.explicitSend("https://example.com/b.zip", 7, false),
+    ]);
+
+    const wakeUpdates = chrome._calls.filter(
+      ([name, args]) => name === "tabs.update" && args.url === "grab://https/"
+    );
+    assert.equal(wakeUpdates.length, 1, "one launch for the whole burst");
+    const posted = posts().map((c) => JSON.parse(c.opts.body).url).sort();
+    assert.deepEqual(posted, [
+      "https://example.com/a.zip",
+      "https://example.com/b.zip",
+    ]);
+    for (const call of posts()) {
+      assert.equal(JSON.parse(call.opts.body).cookies.length, 1);
+    }
+  });
+
   // --- confirm=1 outcomes ------------------------------------------------
 
   for (const status of [408, 409]) {

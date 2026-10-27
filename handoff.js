@@ -16,6 +16,21 @@ const CONFIRM_TIMEOUT_MS = 130_000;
 /// A pairing handshake is a loopback round trip.
 const HELLO_TIMEOUT_MS = 3_000;
 
+/// Launches Grab without handing it a download: the app restores this to the
+/// invalid "https://", so it only presents its window. A cold start cannot
+/// use the grab:// URL fallback when cookies must travel — that channel has
+/// no way to carry them.
+const GRAB_WAKE_URL = "grab://https/";
+/// How long to wait for a cold-started Grab to answer its local server.
+const WAKE_TIMEOUT_MS = 12_000;
+const WAKE_POLL_MS = 250;
+
+// Test hook: shorten the cold-start wait.
+let wakeTimeoutMs = WAKE_TIMEOUT_MS;
+function _setWakeTimeout(ms) {
+  wakeTimeoutMs = ms;
+}
+
 const MAX_HANDOFF_COOKIES = 100;
 const MAX_HANDOFF_BODY_BYTES = 32 * 1024;
 
@@ -410,6 +425,77 @@ async function postToGrabWithRetry(url, ctx, retryDelays = HANDOFF_RETRY_DELAYS_
   return status;
 }
 
+/// Set while a cold start is in progress: concurrent sends share one launch
+/// instead of each navigating the tab to the wake URL.
+let wakeInFlight = null;
+
+/// True when the retried POST would carry at least one cookie. Incognito
+/// stores and unreadable jars yield none, so the wake would buy nothing.
+async function hasHandoffCookies(url, tabId) {
+  try {
+    const storeId = await resolveStoreId({ tabId });
+    if (storeId === null) return false;
+    return (await readCookies(url, storeId)).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/// Launch Grab without a URL, then wait until its local server answers.
+/// Returns true when a retry can carry the cookies over HTTP; false when the
+/// app never came up, the user never granted the Cookies permission, Grab is
+/// unpaired, the send is incognito, or the site has no cookies — all cases
+/// where the wake buys nothing and the caller must use the URL fallback now.
+async function wakeGrabAndWait(url, tabId, incognito) {
+  // The wake exists only to carry cookies over the retried POST.
+  if (incognito === true) return false;
+  const secret = await getPairingCode();
+  if (!secret || !(await hasCookiePermission())) return false;
+  if (!(await hasHandoffCookies(url, tabId))) return false;
+  // Check after the jar read: two sends that entered together both await it,
+  // and only the first may start a launch.
+  if (wakeInFlight) return wakeInFlight;
+  const tabArg = Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
+  // A warned tab keeps its "!" until a handoff verifies: overwriting it here
+  // would clear the visible warning without clearing warnedTabs.
+  const keepWarning =
+    Number.isInteger(tabId) && tabId >= 0 && warnedTabs.has(tabId);
+  const run = (async () => {
+    try {
+      if (!keepWarning) {
+        try {
+          await chrome.action.setBadgeText({ ...tabArg, text: "…" });
+          await chrome.action.setTitle({ ...tabArg, title: "Starting Grab…" });
+        } catch {}
+      }
+      updateTab(tabId, GRAB_WAKE_URL);
+      const deadline = Date.now() + wakeTimeoutMs;
+      while (Date.now() < deadline) {
+        await sleep(WAKE_POLL_MS);
+        try {
+          if (await verifyGrab(secret)) return true;
+        } catch {
+          // Not up yet.
+        }
+      }
+      return false;
+    } finally {
+      if (!keepWarning) {
+        try {
+          await chrome.action.setBadgeText({ ...tabArg, text: "" });
+          await chrome.action.setTitle({ ...tabArg, title: "" });
+        } catch {}
+      }
+    }
+  })();
+  wakeInFlight = run;
+  try {
+    return await run;
+  } finally {
+    if (wakeInFlight === run) wakeInFlight = null;
+  }
+}
+
 /// Explicit user action (context menu, video menu, Alt+G): try the HTTP
 /// handoff first, but only fall back to the grab:// navigation when Grab
 /// isn't reachable at all (connection failure). If Grab responded — even
@@ -418,11 +504,16 @@ async function postToGrabWithRetry(url, ctx, retryDelays = HANDOFF_RETRY_DELAYS_
 async function explicitSend(url, tabId, incognito) {
   if (!toGrabUrl(url)) return;
   const ctx = { tabId, incognito };
-  const status = await postToGrabWithRetry(url, ctx);
+  let status = await postToGrabWithRetry(url, ctx);
+  if (status === 0 && (await wakeGrabAndWait(url, tabId, incognito))) {
+    // Grab was closed and has just started: retry over HTTP so the browser
+    // cookies still ride along. The grab:// fallback cannot carry them.
+    status = await postToGrabWithRetry(url, ctx);
+  }
   const tabArg =
     Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
   if (status === 0) {
-    // Grab not running: the OS launches it with the grab:// URL.
+    // Grab never came up: the OS launches it with the grab:// URL.
     sendToGrab(url, tabId);
   } else if (status === STATUS_UNVERIFIED) {
     // Something else answers on Grab's port. Don't hand the URL to a
