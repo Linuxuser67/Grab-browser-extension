@@ -429,7 +429,7 @@ async function restoreVideoFinds(tabId) {
             pair[0] >= 0 &&
             Array.isArray(pair[1])
           )
-          .sort((left, right) => (left[0] === 0 ? -1 : right[0] === 0 ? 1 : 0));
+          .sort((left, right) => Number(left[0] !== 0) - Number(right[0] !== 0));
         for (const [frameId, savedVideos] of savedFrames) {
           if (remaining <= 0) break;
           if (!frames.has(frameId) && frames.size >= MAX_VIDEO_FRAMES) continue;
