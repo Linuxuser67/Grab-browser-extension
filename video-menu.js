@@ -318,6 +318,8 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
 // sniffed: [url] }. Reports are tracked per frame because the content script
 // runs in all frames; last-writer-wins per tab would drop other frames'
 // videos whenever two frames report at different times.
+const MAX_VIDEO_FRAMES = 32;
+const MAX_VIDEO_TITLE_LENGTH = 512;
 const videoFinds = new Map();
 
 /// Storage.session outlives an MV3 service-worker instance and is cleared when
@@ -338,6 +340,30 @@ function enqueueVideoStateWrite(tabId, write) {
     if (videoStateWrites.get(tabId) === next) videoStateWrites.delete(tabId);
   }).catch(() => {});
   return next;
+}
+
+/// Normalize page-derived data before retaining it. Bound scanning as well as
+/// retained results; a blob video counts as one item.
+function normalizeVideoReport(rawVideos, maximum) {
+  const input = Array.isArray(rawVideos) ? rawVideos.slice(0, MAX_VIDEO_ITEMS) : [];
+  const out = [];
+  const seen = new Set();
+  for (const video of input) {
+    if (out.length >= maximum) break;
+    if (!video || typeof video !== "object") continue;
+    const src =
+      typeof video.src === "string" && video.src && fitsGrabUrl(video.src)
+        ? video.src
+        : null;
+    if (!src && video.blob !== true) continue;
+    const key = src || "__grab_blob__";
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const item = { src, blob: video.blob === true };
+    if (Number.isFinite(video.height) && video.height > 0) item.height = video.height;
+    out.push(item);
+  }
+  return out;
 }
 
 function snapshotVideoFinds(finds) {
@@ -371,7 +397,8 @@ function snapshotVideoFinds(finds) {
     frames,
     sniffed: (finds.sniffed || []).filter((url) => fitsGrabUrl(url)).slice(-50),
     kinds: [...(finds.kinds || new Map()).entries()].slice(-200),
-    title: typeof finds.title === "string" ? finds.title : "",
+    title:
+      typeof finds.title === "string" ? finds.title.slice(0, MAX_VIDEO_TITLE_LENGTH) : "",
   };
 }
 
@@ -393,14 +420,63 @@ async function restoreVideoFinds(tabId) {
       const saved = result && result[key];
       if (saved && typeof saved === "object") {
         const frames = new Map();
+        let remaining = MAX_VIDEO_ITEMS;
+        // Avoid copying/sorting an arbitrarily large snapshot left by an older
+        // worker that did not cap frame IDs. Keep at most the configured limit
+        // while ensuring the top frame wins if it appears late in the array.
+        const savedFrames = [];
+        const seenFrameIds = new Set();
         for (const pair of Array.isArray(saved.frames) ? saved.frames : []) {
-          if (!Array.isArray(pair) || pair.length !== 2 || !Number.isInteger(pair[0]) || !Array.isArray(pair[1])) continue;
-          const videos = pair[1].filter((video) => video && typeof video === "object" && (video.src == null || fitsGrabUrl(video.src))).map((video) => {
-            const item = { src: typeof video.src === "string" ? video.src : null, blob: video.blob === true };
+          if (
+            !Array.isArray(pair) ||
+            pair.length !== 2 ||
+            !Number.isInteger(pair[0]) ||
+            pair[0] < 0 ||
+            !Array.isArray(pair[1]) ||
+            seenFrameIds.has(pair[0])
+          ) {
+            continue;
+          }
+          if (pair[0] === 0) {
+            if (savedFrames.length >= MAX_VIDEO_FRAMES) {
+              const lastNonTop = savedFrames.findIndex(([id]) => id !== 0);
+              if (lastNonTop >= 0) {
+                const [removed] = savedFrames.splice(lastNonTop, 1);
+                seenFrameIds.delete(removed[0]);
+              }
+            }
+            if (savedFrames.length < MAX_VIDEO_FRAMES) {
+              savedFrames.unshift(pair);
+              seenFrameIds.add(0);
+            }
+          } else if (savedFrames.length < MAX_VIDEO_FRAMES) {
+            savedFrames.push(pair);
+            seenFrameIds.add(pair[0]);
+          }
+          if (savedFrames.length >= MAX_VIDEO_FRAMES && seenFrameIds.has(0)) break;
+        }
+        for (const [frameId, savedVideos] of savedFrames) {
+          if (remaining <= 0) break;
+          if (!frames.has(frameId) && frames.size >= MAX_VIDEO_FRAMES) continue;
+          const videos = [];
+          const seen = new Set();
+          for (const video of savedVideos.slice(0, MAX_VIDEO_ITEMS)) {
+            if (remaining <= 0) break;
+            if (!video || typeof video !== "object") continue;
+            const src =
+              typeof video.src === "string" && video.src && fitsGrabUrl(video.src)
+                ? video.src
+                : null;
+            if (!src && video.blob !== true) continue;
+            const key = src || "__grab_blob__";
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const item = { src, blob: video.blob === true };
             if (Number.isFinite(video.height) && video.height > 0) item.height = video.height;
-            return item;
-          });
-          frames.set(pair[0], videos);
+            videos.push(item);
+            remaining -= 1;
+          }
+          frames.set(frameId, videos);
         }
         const sniffed = Array.isArray(saved.sniffed)
           ? saved.sniffed.filter((url) => fitsGrabUrl(url)).slice(-50)
@@ -416,7 +492,8 @@ async function restoreVideoFinds(tabId) {
           frames,
           sniffed,
           kinds,
-          title: typeof saved.title === "string" ? saved.title : "",
+          title:
+            typeof saved.title === "string" ? saved.title.slice(0, MAX_VIDEO_TITLE_LENGTH) : "",
         });
       }
     } catch {
@@ -737,30 +814,55 @@ async function onVideoReport(msg, sender) {
     // Unparseable URL: fall through and let the menu-build check decide.
   }
   await restoreVideoFinds(tabId);
-  const frameId = sender && sender.frameId != null ? sender.frameId : 0;
+  const reportedFrameId = sender && sender.frameId != null ? sender.frameId : 0;
+  const frameId =
+    Number.isInteger(reportedFrameId) && reportedFrameId >= 0 ? reportedFrameId : 0;
   let f = videoFinds.get(tabId);
   if (!f) {
     f = { frames: new Map(), sniffed: [] };
     videoFinds.set(tabId, f);
   }
-  // Ordinary empty re-reports may be a live stream swapping its <video>
-  // element before the replacement fires play; preserve that snapshot. Pause,
-  // end, and media-reset reports are marked authoritative so stale entries
-  // disappear immediately instead of lingering in the context menu.
-  const videos = (Array.isArray(msg.videos) ? msg.videos : []).filter(
-    (v) => !(v && typeof v.src === "string" && !fitsGrabUrl(v.src)),
-  );
+  // Bound frame state before accepting reports. Preserve the top frame when
+  // replacing an older entry because its title tracks SPA navigation.
   const hadFrame = f.frames.has(frameId);
   let changed = false;
-  if (videos.length > 0 || !hadFrame || msg.replaceFrame === true) {
-    f.frames.set(frameId, videos);
-    changed = true;
+  let acceptFrame = true;
+  if (!hadFrame && f.frames.size >= MAX_VIDEO_FRAMES) {
+    if (frameId === 0) {
+      const evictFrame = [...f.frames.keys()].find((id) => id !== 0);
+      if (evictFrame !== undefined) {
+        f.frames.delete(evictFrame);
+        changed = true;
+      } else {
+        acceptFrame = false;
+      }
+    } else {
+      acceptFrame = false;
+    }
+  }
+  if (acceptFrame) {
+    let otherVideoCount = 0;
+    for (const [id, existing] of f.frames) {
+      if (id !== frameId) otherVideoCount += Array.isArray(existing) ? existing.length : 0;
+    }
+    const allowance = Math.max(0, MAX_VIDEO_ITEMS - otherVideoCount);
+    const videos = normalizeVideoReport(msg.videos, allowance);
+    // Preserve ordinary empty re-reports for live streams; pause/end/reset
+    // reports intentionally replace their frame's prior snapshot.
+    if (videos.length > 0 || !hadFrame || msg.replaceFrame === true) {
+      f.frames.set(frameId, videos);
+      changed = true;
+    }
   }
   // The video's own title for menu labels.
   // The top frame's title follows the page (SPAs change it without a
   // navigation); a subframe only fills a gap.
-  if (typeof msg.title === "string" && msg.title && (frameId === 0 || !f.title)) {
-    f.title = msg.title;
+  if (
+    typeof msg.title === "string" &&
+    msg.title &&
+    (frameId === 0 || !f.title)
+  ) {
+    f.title = msg.title.slice(0, MAX_VIDEO_TITLE_LENGTH);
     changed = true;
   }
   // Skip the menu rebuild when nothing changed: a page with many iframes

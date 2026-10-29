@@ -721,6 +721,83 @@ describe("detection wiring", () => {
     assert.equal(saved.frames[0][1].length, 10, "all active videos survive worker persistence");
   });
 
+  test("restoring oversized legacy video state caps frames and entries", async () => {
+    const chrome = makeChrome();
+    const tabId = 122;
+    chrome._session.set("videoFinds:" + tabId, {
+      frames: Array.from({ length: 128 }, (_, frameId) => [
+        frameId,
+        Array.from({ length: 8 }, (_, index) => ({
+          src: `https://legacy.example.com/${frameId}-${index}.mp4`,
+          blob: false,
+        })),
+      ]),
+      sniffed: [],
+      kinds: [],
+      title: "legacy".repeat(500),
+    });
+    const bg = loadBackground(chrome);
+    await chrome._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{ src: "https://fresh.example.com/top.mp4", blob: false }],
+        title: "fresh title",
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 }
+    );
+
+    const findings = bg._videoFinds.get(tabId);
+    const total = [...findings.frames.values()].reduce((sum, videos) => sum + videos.length, 0);
+    assert.ok(findings.frames.size <= bg.MAX_VIDEO_FRAMES, "restored frames stay bounded");
+    assert.ok(total <= bg.MAX_VIDEO_ITEMS, "restored entries stay bounded");
+    assert.ok(findings.frames.has(0), "the top frame is retained");
+    assert.ok(findings.frames.get(0).some((video) => video.src === "https://fresh.example.com/top.mp4"));
+    assert.ok(findings.title.length <= bg.MAX_VIDEO_TITLE_LENGTH, "restored title stays bounded");
+  });
+
+  test("video report intake caps retained frames, entries, and titles", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 121;
+    await L["tabs.onActivated"]({ tabId });
+
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: Array.from({ length: bg.MAX_VIDEO_ITEMS * 4 }, (_, i) => ({
+          src: `https://cdn.example.com/v/${i}.mp4`,
+          blob: false,
+        })),
+        title: "x".repeat(bg.MAX_VIDEO_TITLE_LENGTH * 4),
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 }
+    );
+
+    for (let frameId = 1; frameId < bg.MAX_VIDEO_FRAMES + 10; frameId++) {
+      await L["runtime.onMessage"](
+        {
+          type: "grab-videos-detected",
+          videos: [{ src: `https://cdn.example.com/frame-${frameId}.mp4`, blob: false }],
+        },
+        { tab: { id: tabId, url: "https://example.com/" }, frameId }
+      );
+    }
+
+    const findings = bg._videoFinds.get(tabId);
+    const total = [...findings.frames.values()].reduce((sum, videos) => sum + videos.length, 0);
+    assert.ok(findings.frames.size <= bg.MAX_VIDEO_FRAMES, "frame IDs stay bounded");
+    assert.ok(total <= bg.MAX_VIDEO_ITEMS, "DOM video entries stay bounded per tab");
+    assert.ok(findings.title.length <= bg.MAX_VIDEO_TITLE_LENGTH, "page titles stay bounded");
+
+    const saved = chrome._session.get("videoFinds:" + tabId);
+    assert.ok(saved.frames.length <= bg.MAX_VIDEO_FRAMES, "persisted frame IDs stay bounded");
+    assert.ok(
+      saved.frames.reduce((sum, pair) => sum + pair[1].length, 0) <= bg.MAX_VIDEO_ITEMS,
+      "persisted DOM entries stay bounded"
+    );
+  });
+
   test("a blob: video is paired with the tab's sniffed manifest", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
