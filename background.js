@@ -155,6 +155,8 @@ if (typeof module !== "undefined" && module.exports) {
     MAX_GRAB_URL_BYTES,
     MAX_HANDOFF_BODY_BYTES,
     MAX_VIDEO_ITEMS,
+    MAX_VIDEO_FRAMES,
+    MAX_VIDEO_TITLE_LENGTH,
     manifestMenuRows,
     directMenuRow,
     manifestKind,

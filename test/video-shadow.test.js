@@ -1,20 +1,14 @@
 // Shadow-root video detection tests (jsdom).
-// Run with: node --test test/video-shadow.test.js
-// Requires the jsdom package (npm install jsdom); skipped if unavailable.
+// CI installs a pinned jsdom version before running this suite.
 const { test, describe } = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 
 const CONTENT_PATH = path.join(__dirname, "..", "content.js");
 
-let JSDOM;
-try {
-  ({ JSDOM } = require("jsdom"));
-} catch {
-  JSDOM = null;
-}
+const { JSDOM } = require("jsdom");
 
-describe("shadow-root video detection (jsdom)", { skip: !JSDOM }, () => {
+describe("shadow-root video detection (jsdom)", () => {
 
   function loadContent(dom) {
     const messages = [];
