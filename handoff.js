@@ -16,10 +16,10 @@ const CONFIRM_TIMEOUT_MS = 130_000;
 /// A pairing handshake is a loopback round trip.
 const HELLO_TIMEOUT_MS = 3_000;
 
-/// Launches Grab without handing it a download: the app restores this to the
-/// invalid "https://", so it only presents its window. A cold start cannot
-/// use the grab:// URL fallback when cookies must travel — that channel has
-/// no way to carry them.
+/// Launches Grab in a temporary background tab without handing it a download.
+/// A cold start cannot use the grab:// URL fallback when cookies must travel —
+/// that channel has no way to carry them. The user's current tab must remain
+/// untouched when the cookie-bearing HTTP retry succeeds.
 const GRAB_WAKE_URL = "grab://https/";
 /// How long to wait for a cold-started Grab to answer its local server.
 const WAKE_TIMEOUT_MS = 12_000;
@@ -461,6 +461,7 @@ async function wakeGrabAndWait(url, tabId, incognito) {
   const keepWarning =
     Number.isInteger(tabId) && tabId >= 0 && warnedTabs.has(tabId);
   const run = (async () => {
+    let wakeTabId = null;
     try {
       if (!keepWarning) {
         try {
@@ -468,7 +469,19 @@ async function wakeGrabAndWait(url, tabId, incognito) {
           await chrome.action.setTitle({ ...tabArg, title: "Starting Grab…" });
         } catch {}
       }
-      updateTab(tabId, GRAB_WAKE_URL);
+      try {
+        const wakeTab = await chrome.tabs.create({
+          url: GRAB_WAKE_URL,
+          active: false,
+        });
+        if (Number.isInteger(wakeTab && wakeTab.id) && wakeTab.id >= 0) {
+          wakeTabId = wakeTab.id;
+        }
+      } catch {
+        // If the browser cannot open the external protocol in a background
+        // tab, let explicitSend use its existing user-initiated URL fallback.
+        return false;
+      }
       const deadline = Date.now() + wakeTimeoutMs;
       while (Date.now() < deadline) {
         await sleep(WAKE_POLL_MS);
@@ -480,6 +493,15 @@ async function wakeGrabAndWait(url, tabId, incognito) {
       }
       return false;
     } finally {
+      if (Number.isInteger(wakeTabId)) {
+        // The protocol launch is complete (or timed out); don't leave the
+        // transient wake tab in the user's tab strip.
+        try {
+          await chrome.tabs.remove(wakeTabId);
+        } catch {
+          // It may already be gone after the external-protocol navigation.
+        }
+      }
       if (!keepWarning) {
         try {
           await chrome.action.setBadgeText({ ...tabArg, text: "" });
