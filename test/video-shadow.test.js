@@ -21,23 +21,32 @@ describe("shadow-root video detection (jsdom)", () => {
     };
     // content.js runs its init at load time against globals.
     const g = dom.window;
-    // Fake user activation: the play handler latches muted videos only
-    // when the user recently interacted.
-    g.navigator = { userActivation: { isActive: true } };
+    // jsdom does not implement user activation; expose the property consumed
+    // by content.js on the window's Navigator instance.
+    Object.defineProperty(g.navigator, "userActivation", {
+      configurable: true,
+      value: { isActive: true },
+    });
     // Fresh module per test: the init block wires listeners on load.
     delete require.cache[require.resolve(CONTENT_PATH)];
     // Keep globals set for the test duration (reports are async).
-    // Caller must restore via the returned cleanup().
+    // Node 22 also exposes a read-only global navigator, so save its property
+    // descriptor and replace it explicitly instead of assigning to the getter.
+    const prevNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
     const prev = {
       chrome: globalThis.chrome,
       document: globalThis.document,
       location: globalThis.location,
-      navigator: globalThis.navigator,
     };
     globalThis.chrome = chrome;
     globalThis.document = g.document;
     globalThis.location = g.location;
-    globalThis.navigator = g.navigator;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      enumerable: prevNavigator ? prevNavigator.enumerable : true,
+      writable: true,
+      value: g.navigator,
+    });
     require(CONTENT_PATH);
     const cleanup = () => {
       // Install a dummy: pending debounce timers from this instance may
@@ -47,7 +56,11 @@ describe("shadow-root video detection (jsdom)", () => {
       };
       globalThis.document = prev.document;
       globalThis.location = prev.location;
-      globalThis.navigator = prev.navigator;
+      if (prevNavigator) {
+        Object.defineProperty(globalThis, "navigator", prevNavigator);
+      } else {
+        delete globalThis.navigator;
+      }
     };
     return { messages, document: g.document, window: g, messageListener, cleanup };
   }

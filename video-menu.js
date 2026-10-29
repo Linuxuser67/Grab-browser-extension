@@ -421,15 +421,40 @@ async function restoreVideoFinds(tabId) {
       if (saved && typeof saved === "object") {
         const frames = new Map();
         let remaining = MAX_VIDEO_ITEMS;
-        const savedFrames = (Array.isArray(saved.frames) ? saved.frames : [])
-          .filter((pair) =>
-            Array.isArray(pair) &&
-            pair.length === 2 &&
-            Number.isInteger(pair[0]) &&
-            pair[0] >= 0 &&
-            Array.isArray(pair[1])
-          )
-          .sort((left, right) => Number(left[0] !== 0) - Number(right[0] !== 0));
+        // Avoid copying/sorting an arbitrarily large snapshot left by an older
+        // worker that did not cap frame IDs. Keep at most the configured limit
+        // while ensuring the top frame wins if it appears late in the array.
+        const savedFrames = [];
+        const seenFrameIds = new Set();
+        for (const pair of Array.isArray(saved.frames) ? saved.frames : []) {
+          if (
+            !Array.isArray(pair) ||
+            pair.length !== 2 ||
+            !Number.isInteger(pair[0]) ||
+            pair[0] < 0 ||
+            !Array.isArray(pair[1]) ||
+            seenFrameIds.has(pair[0])
+          ) {
+            continue;
+          }
+          if (pair[0] === 0) {
+            if (savedFrames.length >= MAX_VIDEO_FRAMES) {
+              const lastNonTop = savedFrames.findIndex(([id]) => id !== 0);
+              if (lastNonTop >= 0) {
+                const [removed] = savedFrames.splice(lastNonTop, 1);
+                seenFrameIds.delete(removed[0]);
+              }
+            }
+            if (savedFrames.length < MAX_VIDEO_FRAMES) {
+              savedFrames.unshift(pair);
+              seenFrameIds.add(0);
+            }
+          } else if (savedFrames.length < MAX_VIDEO_FRAMES) {
+            savedFrames.push(pair);
+            seenFrameIds.add(pair[0]);
+          }
+          if (savedFrames.length >= MAX_VIDEO_FRAMES && seenFrameIds.has(0)) break;
+        }
         for (const [frameId, savedVideos] of savedFrames) {
           if (remaining <= 0) break;
           if (!frames.has(frameId) && frames.size >= MAX_VIDEO_FRAMES) continue;
