@@ -1673,29 +1673,26 @@ describe("HTTP handoff to Grab", () => {
       name: "session", value: "abc", domain: "example.com",
       hostOnly: true, path: "/", secure: true,
     }];
-    // A background wake tab launches Grab without navigating the tab the
-    // user acted on; the local server starts answering when it is created.
-    const origCreate = chrome.tabs.create;
-    chrome.tabs.create = async (props) => {
-      if (props.url === "grab://https/") grabUp = true;
-      return origCreate(props);
+    // Simulate Grab becoming available when the user's tab launches the
+    // external protocol through the OS handler.
+    const origUpdate = chrome.tabs.update;
+    chrome.tabs.update = (a, b) => {
+      const target = b !== undefined ? b : a;
+      const url = typeof target === "string" ? target : target && target.url;
+      if (url === "grab://https/") grabUp = true;
+      return origUpdate(a, b);
     };
 
     await bg.explicitSend("https://example.com/f.zip", 7, false);
 
-    const wakeCreates = chrome._calls.filter(
-      ([name, props]) => name === "tabs.create" && props.url === "grab://https/"
-    );
-    assert.equal(wakeCreates.length, 1);
-    assert.equal(wakeCreates[0][1].active, false, "the wake tab stays in the background");
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.equal(updates.length, 1, "the user's tab performs the wake navigation");
+    assert.equal(updates[0][1].url, "grab://https/");
+    assert.equal(updates[0][2], 7, "wake uses the tab the user acted on");
     assert.equal(
-      chrome._calls.filter(([name]) => name === "tabs.update").length,
-      0,
-      "successful wake does not navigate the user's tab"
-    );
-    assert.ok(
-      chrome._calls.some(([name, tabId]) => name === "tabs.remove" && tabId === 987),
-      "the temporary wake tab is removed"
+      chrome._calls.some(([name]) => name === "tabs.create"),
+      false,
+      "cold-start handoff never creates a background tab"
     );
     assert.ok(
       chrome._calls.some(
@@ -1734,19 +1731,14 @@ describe("HTTP handoff to Grab", () => {
 
     await bg.explicitSend("https://example.com/f.zip", 7, false);
 
-    const wakeCreates = chrome._calls.filter(
-      ([name, props]) => name === "tabs.create" && props.url === "grab://https/"
-    );
-    assert.equal(wakeCreates.length, 1, "the wake uses a disposable background tab");
-    assert.ok(
-      chrome._calls.some(([name, tabId]) => name === "tabs.remove" && tabId === 987),
-      "the temporary wake tab is removed after timeout"
-    );
     const updates = chrome._calls.filter(([name]) => name === "tabs.update");
-    assert.deepEqual(
-      updates.map(([, args]) => args.url),
-      ["grab://https/example.com/f.zip"],
-      "timeout falls back on the original tab only after the wake attempt"
+    assert.equal(updates.length, 2, "wake attempt, then the URL fallback");
+    assert.equal(updates[0][1].url, "grab://https/");
+    assert.equal(updates[1][1].url, "grab://https/example.com/f.zip");
+    assert.equal(
+      chrome._calls.some(([name]) => name === "tabs.create"),
+      false,
+      "timeout never creates a background tab"
     );
     assert.equal(posts().length, 0, "no POST ever reached Grab");
   });
@@ -1854,10 +1846,14 @@ describe("HTTP handoff to Grab", () => {
       name: "session", value: "abc", domain: "example.com",
       hostOnly: true, path: "/", secure: true,
     }];
-    const origCreate = chrome.tabs.create;
-    chrome.tabs.create = async (props) => {
-      if (props.url === "grab://https/") grabUp = true;
-      return origCreate(props);
+    // Simulate Grab becoming available when the user's tab launches the
+    // external protocol through the OS handler.
+    const origUpdate = chrome.tabs.update;
+    chrome.tabs.update = (a, b) => {
+      const target = b !== undefined ? b : a;
+      const url = typeof target === "string" ? target : target && target.url;
+      if (url === "grab://https/") grabUp = true;
+      return origUpdate(a, b);
     };
 
     await Promise.all([
@@ -1865,18 +1861,15 @@ describe("HTTP handoff to Grab", () => {
       bg.explicitSend("https://example.com/b.zip", 7, false),
     ]);
 
-    const wakeCreates = chrome._calls.filter(
-      ([name, props]) => name === "tabs.create" && props.url === "grab://https/"
+    const wakeUpdates = chrome._calls.filter(
+      ([name, args]) => name === "tabs.update" && args.url === "grab://https/"
     );
-    assert.equal(wakeCreates.length, 1, "one launch for the whole burst");
-    assert.ok(
-      chrome._calls.some(([name, tabId]) => name === "tabs.remove" && tabId === 987),
-      "the shared wake tab is removed"
-    );
+    assert.equal(wakeUpdates.length, 1, "one foreground wake for the whole burst");
+    assert.equal(wakeUpdates[0][2], 7, "the wake uses the originating tab");
     assert.equal(
-      chrome._calls.filter(([name]) => name === "tabs.update").length,
-      0,
-      "a successful concurrent wake leaves the original tab untouched"
+      chrome._calls.some(([name]) => name === "tabs.create"),
+      false,
+      "concurrent cold sends never create background tabs"
     );
     const posted = posts().map((c) => JSON.parse(c.opts.body).url).sort();
     assert.deepEqual(posted, [
