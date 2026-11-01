@@ -457,7 +457,14 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
   // The wake exists only to carry cookies over the retried POST.
   if (incognito === true) return false;
   const secret = await getPairingCode();
-  if (!secret || !(await hasCookiePermission())) return false;
+  if (!secret) return false;
+  if (!(await hasCookiePermission())) {
+    if (ctx && typeof ctx === "object") {
+      ctx.cookieWarning =
+        "Cookie access is not granted. Grant the extension's optional Cookies permission in Options to forward site authentication.";
+    }
+    return false;
+  }
   if (!(await hasHandoffCookies(url, tabId))) return false;
   // Check after the jar read: two sends that entered together both await it,
   // and only the first may start a launch.
@@ -537,7 +544,9 @@ async function explicitSend(url, tabId, incognito) {
     // Grab never came up: the OS launches it with the grab:// URL. That
     // fallback cannot carry cookies, so surface any reason they were omitted.
     sendToGrab(url, tabId);
-    if (ctx.cookieWarning) await showCookieWarning(ctx);
+    const alreadyWarned =
+      Number.isInteger(tabId) && tabId >= 0 && warnedTabs.has(tabId);
+    if (ctx.cookieWarning && !alreadyWarned) await showCookieWarning(ctx);
   } else if (status === STATUS_UNVERIFIED) {
     // Something else answers on Grab's port. Don't hand the URL to a
     // stranger; flag it on the toolbar instead.
@@ -549,7 +558,11 @@ async function explicitSend(url, tabId, incognito) {
     } catch {}
   } else if (status >= 200 && status < 300) {
     if (ctx.cookieWarning) {
-      await showCookieWarning(ctx);
+      // A pre-existing warning already carries useful information. Do not
+      // replace or clear its badge while this handoff starts or completes.
+      const alreadyWarned =
+        Number.isInteger(tabId) && tabId >= 0 && warnedTabs.has(tabId);
+      if (!alreadyWarned) await showCookieWarning(ctx);
     } else {
       // Success: clear any earlier warning.
       try {

@@ -2180,7 +2180,7 @@ describe("review hardening (1.5.8)", () => {
     assert.equal(chrome._calls.some(([name]) => name === "cancel" || name === "handoff"), false);
   });
 
-  test("a declined cookies permission sends the URL without cookies and without a warning", async () => {
+  test("a declined Cookies permission sends the URL and exposes the missing permission", async () => {
     const chrome = makeChrome({ localSettings: pairedLocal() });
     chrome.permissions = { contains: async () => false };
     chrome.cookies.getAll = async () => {
@@ -2196,7 +2196,7 @@ describe("review hardening (1.5.8)", () => {
     const ctx = {};
     assert.equal(await bg.postToGrab("https://example.com/f.zip", ctx), 200);
     assert.deepEqual(body.cookies, []);
-    assert.equal(ctx.cookieWarning, undefined);
+    assert.match(ctx.cookieWarning, /optional Cookies permission/);
   });
 
   test("popup status separates app reachability from pairing verification", async () => {
