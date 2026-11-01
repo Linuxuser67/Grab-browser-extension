@@ -1667,7 +1667,7 @@ describe("HTTP handoff to Grab", () => {
         return {
           status: 200,
           ok: true,
-          json: async () => ({ proof: hmac("grab-server\\u0000", nonce) }),
+          json: async () => ({ proof: hmac("grab-server\u0000", nonce) }),
         };
       }
       return { status: 200, ok: true };
@@ -1721,7 +1721,7 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(
       chrome._calls.some(
         ([name, args]) =>
-          name === "action.setTitle" && /Cookie access|Starting Grab/.test(args.title),
+          name === "action.setTitle" && args.title === "Starting Grab…",
       ),
       true,
       "the context-menu action reports its wake state",
