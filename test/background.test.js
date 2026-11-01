@@ -1652,9 +1652,12 @@ describe("HTTP handoff to Grab", () => {
 
   // --- cold start --------------------------------------------------------
 
-  test("explicit send wakes a closed Grab, then retries so cookies travel", async () => {
+  test("context-menu cold start waits for a slow Grab and forwards cookies", async () => {
     await pair();
+    chrome.permissions = { contains: async () => true };
     let grabUp = false;
+    let fakeNow = 1_000;
+    const realNow = Date.now;
     fetchCalls = [];
     globalThis.fetch = async (url, opts = {}) => {
       fetchCalls.push({ url, opts });
@@ -1664,7 +1667,7 @@ describe("HTTP handoff to Grab", () => {
         return {
           status: 200,
           ok: true,
-          json: async () => ({ proof: hmac("grab-server\u0000", nonce) }),
+          json: async () => ({ proof: hmac("grab-server\\u0000", nonce) }),
         };
       }
       return { status: 200, ok: true };
@@ -1673,50 +1676,55 @@ describe("HTTP handoff to Grab", () => {
       name: "session", value: "abc", domain: "example.com",
       hostOnly: true, path: "/", secure: true,
     }];
-    // Simulate Grab becoming available when the user's tab launches the
-    // external protocol through the OS handler.
     const origUpdate = chrome.tabs.update;
     chrome.tabs.update = (a, b) => {
       const target = b !== undefined ? b : a;
       const url = typeof target === "string" ? target : target && target.url;
-      if (url === "grab://https/") grabUp = true;
+      if (url === "grab://https/") {
+        assert.equal(a, 7, "wake uses the tab that received the context-menu click");
+      }
       return origUpdate(a, b);
     };
 
-    await bg.explicitSend("https://example.com/f.zip", 7, false);
+    // Advance the browser clock without sleeping. A 15-second startup delay
+    // exceeds the old wake deadline but must fit within the extended one.
+    Date.now = () => fakeNow;
+    bg._setSleep(async (ms) => {
+      fakeNow += ms;
+      if (fakeNow - 1_000 >= 15_000) grabUp = true;
+    });
+    try {
+      await chrome._listeners["menus.onClicked"](
+        {
+          menuItemId: "sendToGrab",
+          pageUrl: "https://example.com/f.zip",
+        },
+        { id: 7, url: "https://example.com/f.zip", incognito: false },
+      );
+    } finally {
+      Date.now = realNow;
+      bg._setSleep((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    }
 
     const updates = chrome._calls.filter(([name]) => name === "tabs.update");
-    assert.equal(updates.length, 1, "the user's tab performs the wake navigation");
+    assert.equal(updates.length, 1, "the user's tab performs only the wake navigation");
     assert.equal(updates[0][1].url, "grab://https/");
-    assert.equal(updates[0][2], 7, "wake uses the tab the user acted on");
-    assert.equal(
-      chrome._calls.some(([name]) => name === "tabs.create"),
-      false,
-      "cold-start handoff never creates a background tab"
-    );
-    assert.ok(
-      chrome._calls.some(
-        ([name, args]) =>
-          name === "action.setBadgeText" && args.text === "…" && args.tabId === 7
-      ),
-      "the wait is visible on the toolbar"
-    );
-    assert.ok(
-      chrome._calls.some(
-        ([name, args]) => name === "action.setTitle" && args.title === "Starting Grab…"
-      ),
-      "the badge tooltip explains the wait"
-    );
-    assert.ok(
-      chrome._calls.some(([name, args]) => name === "action.setBadgeText" && args.text === ""),
-      "the starting badge is cleared"
-    );
-    const post = posts().find((c) => c.opts.method === "POST");
-    assert.ok(post, "the URL was retried over HTTP after the wake");
+    assert.equal(updates[0][2], 7);
+    assert.equal(chrome._calls.some(([name]) => name === "tabs.create"), false);
+    const post = posts().find((call) => call.opts.method === "POST");
+    assert.ok(post, "context-menu action retries over HTTP after Grab is ready");
     assert.deepEqual(
       JSON.parse(post.opts.body).cookies.map((cookie) => cookie.name),
       ["session"],
-      "the cold-start retry carries the browser cookies"
+      "the cookie-bearing POST survives a 15-second cold start",
+    );
+    assert.equal(
+      chrome._calls.some(
+        ([name, args]) =>
+          name === "action.setTitle" && /Cookie access|Starting Grab/.test(args.title),
+      ),
+      true,
+      "the context-menu action reports its wake state",
     );
   });
 
@@ -1770,6 +1778,13 @@ describe("HTTP handoff to Grab", () => {
       updates.map(([, args]) => args.url),
       ["grab://https/example.com/f.zip"],
       "nothing to carry, so no cold-start wait"
+    );
+    assert.ok(
+      chrome._calls.some(
+        ([name, args]) =>
+          name === "action.setTitle" && /Cookies permission/.test(args.title),
+      ),
+      "URL-only fallback explains that cookie access is not granted",
     );
   });
 
