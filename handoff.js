@@ -311,7 +311,11 @@ async function resolveStoreId(ctx) {
 /// was lost (timeout). The caller must not fall back to grab:// on
 /// STATUS_MAYBE_SENT — that would risk a duplicate download.
 async function postToGrab(url, ctx) {
-  if (ctx && typeof ctx === "object") delete ctx.cookieWarning;
+  // Preserve warnings produced by the cold-start cookie preflight when its
+  // prepared snapshot is reused for the authenticated retry.
+  if (ctx && typeof ctx === "object" && !Array.isArray(ctx.preparedCookies)) {
+    delete ctx.cookieWarning;
+  }
   // Match Grab's Rust String::len() check (UTF-8 bytes), avoiding a network
   // round trip for URLs that Grab will reject with HTTP 414.
   if (typeof url !== "string" || new TextEncoder().encode(url).length > MAX_GRAB_URL_BYTES) {
@@ -347,6 +351,11 @@ async function postToGrab(url, ctx) {
         ctx.cookieWarning =
           "Cookie access is not granted. Grant the extension's optional Cookies permission in Options to forward site authentication.";
       }
+    } else if (ctx && Array.isArray(ctx.preparedCookies)) {
+      // The cold-start preflight already resolved the source cookie store and
+      // read these cookies. Reuse that snapshot instead of reading again after
+      // the grab:// wake navigation.
+      cookies = ctx.preparedCookies;
     } else try {
       const storeId = await resolveStoreId(ctx);
       if (storeId === null) {
@@ -360,7 +369,7 @@ async function postToGrab(url, ctx) {
     } catch {
       cookies = [];
       if (ctx && typeof ctx === "object") {
-        ctx.cookieWarning = "Grab could not read this site's cookies. Check the extension's optional Cookies permission or Firefox first-party isolation; the URL was sent without cookies.";
+        ctx.cookieWarning = "Grab could not read this site's cookies. Check the extension's Cookies permission or browser cookie isolation settings; the URL was sent without cookies.";
       }
     }
   }
@@ -436,14 +445,32 @@ async function postToGrabWithRetry(url, ctx, retryDelays = HANDOFF_RETRY_DELAYS_
 /// instead of each navigating the tab to the wake URL.
 let wakeInFlight = null;
 
-/// True when the retried POST would carry at least one cookie. Incognito
-/// stores and unreadable jars yield none, so the wake would buy nothing.
-async function hasHandoffCookies(url, tabId) {
+/// Read the cookie jar before waking Grab and retain that exact snapshot for
+/// the authenticated retry. The preflight and POST must use the same resolved
+/// store and cookie result; a second read after launch could otherwise return
+/// a different jar. The snapshot stays in this short-lived context and is
+/// never persisted or sent before Grab proves its pairing.
+async function prepareHandoffCookies(url, ctx) {
   try {
-    const storeId = await resolveStoreId({ tabId });
-    if (storeId === null) return false;
-    return (await readCookies(url, storeId)).length > 0;
+    const storeId = await resolveStoreId(ctx);
+    if (storeId === null) {
+      if (ctx && typeof ctx === "object") {
+        ctx.cookieWarning =
+          "Incognito cookie forwarding is disabled; Grab received the URL without cookies.";
+      }
+      return false;
+    }
+
+    const cookies = await readCookies(url, storeId, ctx);
+    if (cookies.length === 0) return false;
+
+    if (ctx && typeof ctx === "object") ctx.preparedCookies = cookies;
+    return true;
   } catch {
+    if (ctx && typeof ctx === "object") {
+      ctx.cookieWarning =
+        "Grab could not read this site's cookies. Check the extension's Cookies permission and browser cookie settings; the URL was sent without cookies.";
+    }
     return false;
   }
 }
@@ -465,7 +492,7 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
     }
     return false;
   }
-  if (!(await hasHandoffCookies(url, tabId))) return false;
+  if (!(await prepareHandoffCookies(url, ctx))) return false;
   // Check after the jar read: two sends that entered together both await it,
   // and only the first may start a launch.
   if (wakeInFlight) {
