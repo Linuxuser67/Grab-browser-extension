@@ -369,7 +369,7 @@ async function postToGrab(url, ctx) {
     } catch {
       cookies = [];
       if (ctx && typeof ctx === "object") {
-        ctx.cookieWarning = "Grab could not read this site's cookies. Check the extension's Cookies permission or browser cookie isolation settings; the URL was sent without cookies.";
+        ctx.cookieWarning = "Grab could not read this site's cookies. Check the extension's optional Cookies permission or browser first-party isolation settings; the URL was sent without cookies.";
       }
     }
   }
@@ -469,7 +469,7 @@ async function prepareHandoffCookies(url, ctx) {
   } catch {
     if (ctx && typeof ctx === "object") {
       ctx.cookieWarning =
-        "Grab could not read this site's cookies. Check the extension's Cookies permission and browser cookie settings; the URL was sent without cookies.";
+        "Grab could not read this site's cookies. Check the extension's optional Cookies permission or browser first-party isolation settings; the URL was sent without cookies.";
     }
     return false;
   }
