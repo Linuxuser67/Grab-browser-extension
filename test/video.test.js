@@ -1389,7 +1389,7 @@ describe("context menu: one flat submenu, one click to Grab", () => {
 describe("HLS master playlist filtering", () => {
   const MASTER = [
     "#EXTM3U",
-    '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",URI="audio/en.m3u8"',
+    '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",URI="https://audio.example.com/v/42/audio/en.m3u8"',
     '#EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720,AUDIO="audio"',
     "renditions/720/chunklist.m3u8",
   ].join("\n");
