@@ -251,7 +251,7 @@ function isHlsPlaylistFetchAllowed(value) {
     url.password
   ) return false;
 
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
   if (host === "localhost" || host.endsWith(".localhost")) return false;
   if (host.includes(":")) {
     return !(
@@ -367,7 +367,7 @@ function hlsChildPlaylistKeys(text, masterUrl) {
       }
     }
     if (line.startsWith("#EXT-X-MEDIA:")) {
-      const uri = /(?:^|,)URI="([^"]+)"/i.exec(line);
+      const uri = /\bURI\s*=\s*"([^"]+)"/i.exec(line);
       if (uri) add(uri[1]);
     }
   }

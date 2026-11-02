@@ -1489,8 +1489,8 @@ describe("HLS master playlist filtering", () => {
 
   test("rejects loopback and credential-bearing playlist fetches", async () => {
     const bg = loadBackground(makeChrome());
-    assert.equal(bg.isMasterPlaylist("http://127.0.0.1/master.m3u8"), null);
-    assert.equal(bg.isMasterPlaylist("http://localhost/master.m3u8"), null);
-    assert.equal(bg.isMasterPlaylist("https://user:pass@example.com/master.m3u8"), null);
+    assert.equal(await bg.isMasterPlaylist("http://127.0.0.1/master.m3u8"), null);
+    assert.equal(await bg.isMasterPlaylist("http://localhost/master.m3u8"), null);
+    assert.equal(await bg.isMasterPlaylist("https://user:pass@example.com/master.m3u8"), null);
   });
 });
