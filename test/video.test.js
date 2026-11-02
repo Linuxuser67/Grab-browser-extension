@@ -1384,3 +1384,113 @@ describe("context menu: one flat submenu, one click to Grab", () => {
   });
 });
 
+
+
+describe("HLS master playlist filtering", () => {
+  const MASTER = [
+    "#EXTM3U",
+    '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",URI="audio/en.m3u8"',
+    '#EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720,AUDIO="audio"',
+    "renditions/720/chunklist.m3u8",
+  ].join("\n");
+  const MEDIA = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nsegment.ts\n";
+
+  async function filterWithPlaylists(urls, playlists) {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, options) => {
+      assert.equal(options.credentials, "omit");
+      assert.equal(options.redirect, "error");
+      const body = playlists.get(String(url));
+      return body === undefined
+        ? { ok: false, status: 404, text: async () => "" }
+        : { ok: true, status: 200, text: async () => body };
+    };
+    try {
+      const bg = loadBackground(makeChrome());
+      return await bg.preferMasterPlaylists(urls);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  test("drops only explicit variant and audio playlist references", async () => {
+    const master = "https://cdn.example.com/v/42/master.m3u8";
+    const variant = "https://cdn.example.com/v/42/renditions/720/chunklist.m3u8";
+    const audio = "https://audio.example.com/v/42/audio/en.m3u8";
+    const unrelated = "https://cdn.example.com/v/42/episode-b/chunklist.m3u8";
+    const playlists = new Map([
+      [master, MASTER],
+      [variant, MEDIA],
+      [audio, MEDIA],
+      [unrelated, MEDIA],
+    ]);
+    assert.deepEqual(
+      await filterWithPlaylists([master, variant, audio, unrelated], playlists),
+      [master, unrelated],
+    );
+  });
+
+  test("does not classify an ordinary non-standard media playlist as a master", async () => {
+    const ordinary = "https://cdn.example.com/v/42/720p.m3u8";
+    const chunk = "https://cdn.example.com/v/42/chunklist.m3u8";
+    assert.deepEqual(
+      await filterWithPlaylists([ordinary, chunk], new Map([
+        [ordinary, MEDIA],
+        [chunk, MEDIA],
+      ])),
+      [ordinary, chunk],
+    );
+  });
+
+  test("does not suppress a media playlist merely because it shares a directory", async () => {
+    const master = "https://cdn.example.com/v/42/master.m3u8";
+    const unrelated = "https://cdn.example.com/v/42/other.m3u8";
+    assert.deepEqual(
+      await filterWithPlaylists([master, unrelated], new Map([
+        [master, MASTER],
+        [unrelated, MEDIA],
+      ])),
+      [master, unrelated],
+    );
+  });
+
+  test("preserves candidates when playlist fetching fails", async () => {
+    const master = "https://cdn.example.com/v/42/master.m3u8";
+    const chunk = "https://cdn.example.com/v/42/chunklist.m3u8";
+    assert.deepEqual(
+      await filterWithPlaylists([master, chunk], new Map()),
+      [master, chunk],
+    );
+  });
+
+  test("does not let DASH manifests suppress HLS playlists", async () => {
+    const dash = "https://cdn.example.com/v/42/manifest.mpd";
+    const hls = "https://cdn.example.com/v/42/chunklist.m3u8";
+    assert.deepEqual(
+      await filterWithPlaylists([dash, hls], new Map([[hls, MEDIA]])),
+      [dash, hls],
+    );
+  });
+
+  test("preserves direct files and duplicate-independent streams", async () => {
+    const master = "https://cdn.example.com/v/42/master.m3u8";
+    const child = "https://cdn.example.com/v/42/720p.m3u8";
+    const direct = "https://cdn.example.com/v/42/video.mp4";
+    const other = "https://cdn.example.com/v/43/chunklist.m3u8";
+    assert.deepEqual(
+      await filterWithPlaylists([direct, master, child, other], new Map([
+        [master, MASTER],
+        [child, MEDIA],
+        [other, MEDIA],
+      ])),
+      [direct, master, other],
+    );
+  });
+
+  test("rejects loopback and credential-bearing playlist fetches", async () => {
+    const bg = loadBackground(makeChrome());
+    assert.equal(bg.isMasterPlaylist("http://127.0.0.1/master.m3u8"), null);
+    assert.equal(bg.isMasterPlaylist("http://localhost/master.m3u8"), null);
+    assert.equal(bg.isMasterPlaylist("https://user:pass@example.com/master.m3u8"), null);
+  });
+});

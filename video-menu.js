@@ -217,6 +217,202 @@ function isManifestKind(kind) {
   return kind === "hls" || kind === "dash" || kind === "manifest";
 }
 
+
+/// Read HLS playlists only to distinguish multivariant masters from media
+/// playlists. A failed or unsafe fetch is "unknown": never hide a candidate.
+const hlsPlaylistTextCache = new Map();
+const HLS_PLAYLIST_TEXT_LIMIT = 256 * 1024;
+const HLS_PLAYLIST_FETCH_TIMEOUT_MS = 5000;
+const HLS_PLAYLIST_FETCH_CONCURRENCY = 4;
+
+function isHlsPlaylistUrl(value) {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") &&
+      /\.(?:m3u8|m3u)$/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/// Reject obvious local-only targets before using the extension's host
+/// permissions. Redirects are disabled below, so a public URL cannot redirect
+/// this privileged fetch to a loopback or metadata endpoint.
+function isHlsPlaylistFetchAllowed(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username ||
+    url.password
+  ) return false;
+
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return false;
+  if (host.includes(":")) {
+    return !(
+      host === "::" ||
+      host === "::1" ||
+      host.startsWith("::ffff:") ||
+      /^fe[89ab]/.test(host)
+    );
+  }
+  const ipv4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host);
+  if (ipv4) {
+    const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
+    if (a === 0 || a === 127 || (a === 169 && b === 254)) return false;
+  }
+  return true;
+}
+
+/// Fetch a playlist without cookies, redirects, or unbounded response bodies.
+/// Null means the content could not be safely inspected; callers keep it.
+async function fetchHlsPlaylistText(value) {
+  if (hlsPlaylistTextCache.has(value)) {
+    return hlsPlaylistTextCache.get(value);
+  }
+  if (!isHlsPlaylistFetchAllowed(value)) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(),
+    HLS_PLAYLIST_FETCH_TIMEOUT_MS,
+  );
+  let reader;
+  try {
+    const response = await fetch(value, {
+      method: "GET",
+      credentials: "omit",
+      redirect: "error",
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+
+    let text;
+    if (response.body && typeof response.body.getReader === "function") {
+      reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let bytesRead = 0;
+      text = "";
+      while (bytesRead < HLS_PLAYLIST_TEXT_LIMIT) {
+        const { done, value: chunk } = await reader.read();
+        if (done) break;
+        const remaining = HLS_PLAYLIST_TEXT_LIMIT - bytesRead;
+        const bounded = chunk.subarray(0, remaining);
+        bytesRead += bounded.byteLength;
+        text += decoder.decode(bounded, { stream: true });
+        if (bounded.byteLength < chunk.byteLength || bytesRead >= HLS_PLAYLIST_TEXT_LIMIT) {
+          await reader.cancel().catch(() => {});
+          break;
+        }
+      }
+      text += decoder.decode();
+    } else {
+      // Lightweight response mocks and older implementations may not expose
+      // a readable stream. The fallback is still truncated before parsing.
+      text = (await response.text()).slice(0, HLS_PLAYLIST_TEXT_LIMIT);
+    }
+
+    hlsPlaylistTextCache.set(value, text);
+    if (hlsPlaylistTextCache.size > 100) {
+      hlsPlaylistTextCache.delete(hlsPlaylistTextCache.keys().next().value);
+    }
+    return text;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    if (reader) reader.releaseLock();
+  }
+}
+
+/// True only for a playlist containing the HLS multivariant marker.
+/// Null represents an unreadable playlist and must not cause filtering.
+async function isMasterPlaylist(value) {
+  const text = await fetchHlsPlaylistText(value);
+  if (text === null) return null;
+  return text.slice(0, 4096).includes("#EXT-X-STREAM-INF:");
+}
+
+/// Resolve playlist references against the master URL. Only explicit
+/// variant and EXT-X-MEDIA playlist references are considered children;
+/// directory ancestry alone is not evidence that two URLs are one stream.
+function hlsChildPlaylistKeys(text, masterUrl) {
+  const children = new Set();
+  const add = (reference) => {
+    try {
+      const resolved = new URL(reference.trim(), masterUrl);
+      if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return;
+      children.add(urlPathKey(resolved.href));
+    } catch {
+      // Invalid references are ignored; the candidate remains visible.
+    }
+  };
+
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.startsWith("#EXT-X-STREAM-INF:")) {
+      // The URI is the next non-empty, non-comment line.
+      for (let j = i + 1; j < lines.length; j++) {
+        const candidate = lines[j].trim();
+        if (!candidate) continue;
+        if (candidate.startsWith("#")) break;
+        add(candidate);
+        break;
+      }
+    }
+    if (line.startsWith("#EXT-X-MEDIA:")) {
+      const uri = /(?:^|,)URI="([^"]+)"/i.exec(line);
+      if (uri) add(uri[1]);
+    }
+  }
+  return children;
+}
+
+/// Prefer confirmed HLS masters over only the child playlists they explicitly
+/// reference. Unknown playlists, unrelated streams, DASH manifests, and direct
+/// files are preserved. Candidate fetches run with bounded concurrency.
+async function preferMasterPlaylists(urls) {
+  const manifests = [...new Set((urls || []).filter(isHlsPlaylistUrl))];
+  if (manifests.length === 0) return urls || [];
+
+  const results = new Map();
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(HLS_PLAYLIST_FETCH_CONCURRENCY, manifests.length) },
+    async () => {
+      while (next < manifests.length) {
+        const index = next++;
+        const url = manifests[index];
+        results.set(url, await isMasterPlaylist(url));
+      }
+    },
+  );
+  await Promise.all(workers);
+
+  const masterKeys = new Set();
+  const childKeys = new Set();
+  for (const url of manifests) {
+    if (results.get(url) !== true) continue;
+    masterKeys.add(urlPathKey(url));
+    const text = await fetchHlsPlaylistText(url);
+    if (text === null) continue;
+    for (const key of hlsChildPlaylistKeys(text, url)) childKeys.add(key);
+  }
+
+  if (masterKeys.size === 0 || childKeys.size === 0) return urls || [];
+  return (urls || []).filter((url) => {
+    if (!isHlsPlaylistUrl(url)) return true;
+    const key = urlPathKey(url);
+    return masterKeys.has(key) || !childKeys.has(key);
+  });
+}
+
 /// Merge user-played DOM sources with sniffed requests. Ignore rotating auth
 /// query strings and group a direct rendition with its manifest directory only
 /// when that directory holds a single stream family. Distinct manifests keep
@@ -621,6 +817,8 @@ async function doRefreshVideoMenu(tabId) {
     // Backstop: collection already filters excluded hosts, but a tab may
     // have navigated there after its videos were recorded.
     if (urls.length > 0 && (await isExcludedTab(tabId))) urls = [];
+    // Hide only media playlists explicitly referenced by a confirmed HLS master.
+    urls = await preferMasterPlaylists(urls);
     // One entry per video/stream; its rows go straight into the one submenu
     // (see "Menu rows").
     const finds = videoFinds.get(tabId);
