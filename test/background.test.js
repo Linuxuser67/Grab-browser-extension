@@ -1672,10 +1672,17 @@ describe("HTTP handoff to Grab", () => {
       }
       return { status: 200, ok: true };
     };
-    chrome.cookies.getAll = async () => [{
-      name: "session", value: "abc", domain: "example.com",
-      hostOnly: true, path: "/", secure: true,
-    }];
+    let cookieReadCount = 0;
+    chrome.cookies.getAll = async () => {
+      cookieReadCount += 1;
+      if (cookieReadCount > 1) {
+        throw new Error("the source tab's cookie store is no longer readable after wake");
+      }
+      return [{
+        name: "session", value: "abc", domain: "example.com",
+        hostOnly: true, path: "/", secure: true,
+      }];
+    };
     const origUpdate = chrome.tabs.update;
     chrome.tabs.update = (a, b) => {
       const target = b !== undefined ? b : a;
@@ -1711,6 +1718,7 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(updates[0][1].url, "grab://https/");
     assert.equal(updates[0][2], 7);
     assert.equal(chrome._calls.some(([name]) => name === "tabs.create"), false);
+    assert.equal(cookieReadCount, 1, "the preflight cookie snapshot is reused after Grab starts");
     const post = posts().find((call) => call.opts.method === "POST");
     assert.ok(post, "context-menu action retries over HTTP after Grab is ready");
     assert.deepEqual(
@@ -1785,6 +1793,33 @@ describe("HTTP handoff to Grab", () => {
           name === "action.setTitle" && /Cookies permission/.test(args.title),
       ),
       "URL-only fallback explains that cookie access is not granted",
+    );
+  });
+
+  test("cold-start cookie read failures are surfaced instead of silently skipping the wake", async () => {
+    await pair();
+    chrome.permissions = { contains: async () => true };
+    chrome.cookies.getAll = async () => {
+      throw new Error("simulated Chromium cookie access failure");
+    };
+    bg._setWakeTimeout(1000);
+    mockFetch("down");
+
+    await bg.explicitSend("https://example.com/f.zip", 7, false);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.deepEqual(
+      updates.map(([, args]) => args.url),
+      ["grab://https/example.com/f.zip"],
+      "a failed cookie preflight must not wait for a cookie-bearing wake",
+    );
+    assert.ok(
+      chrome._calls.some(
+        ([name, args]) =>
+          name === "action.setTitle" &&
+          /could not read this site's cookies/.test(args.title),
+      ),
+      "the toolbar explains why the handoff was URL-only",
     );
   });
 
