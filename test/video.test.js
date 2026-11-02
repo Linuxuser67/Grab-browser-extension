@@ -1474,7 +1474,7 @@ describe("HLS master playlist filtering", () => {
 
   test("preserves direct files and duplicate-independent streams", async () => {
     const master = "https://cdn.example.com/v/42/master.m3u8";
-    const child = "https://cdn.example.com/v/42/720p.m3u8";
+    const child = "https://cdn.example.com/v/42/renditions/720/chunklist.m3u8";
     const direct = "https://cdn.example.com/v/42/video.mp4";
     const other = "https://cdn.example.com/v/43/chunklist.m3u8";
     assert.deepEqual(
