@@ -1050,6 +1050,27 @@ describe("detection wiring", () => {
     assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 9), manifest);
   });
 
+
+  test("disabling detection clears legacy and v2 snapshots from inactive tabs", async () => {
+    const shared = {
+      session: new Map([
+        ["videoFinds:99", { frames: [], sniffed: [] }],
+        ["videoFinds:v2:100", {
+          version: 2, frames: [], sniffedFrames: [], kindsFrames: [], title: ""
+        }],
+      ]),
+    };
+    const chrome = makeChrome(shared);
+    loadBackground(chrome);
+    await chrome._listeners["storage.onChanged"](
+      { detectVideos: { newValue: false } },
+      "sync",
+    );
+    await tick();
+    assert.equal(shared.session.has("videoFinds:99"), false);
+    assert.equal(shared.session.has("videoFinds:v2:100"), false);
+  });
+
   test("detection off stays silent", async () => {
     const chrome = makeChrome({ syncSettings: { detectVideos: false } });
     loadBackground(chrome);

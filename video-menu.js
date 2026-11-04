@@ -523,6 +523,10 @@ function createVideoFinds() {
 /// The v2 key drops old tab-wide sniffed URLs: after an upgrade there is no
 /// reliable way to determine which frame created them.
 const videoStateKey = (tabId) => "videoFinds:v2:" + tabId;
+function videoStateTabId(key) {
+  const match = /^videoFinds:(?:v2:)?([0-9]+)$/.exec(key);
+  return match ? Number(match[1]) : null;
+}
 const restoredVideoFinds = new Set();
 const restoringVideoFinds = new Map();
 const videoStateWrites = new Map();
@@ -841,7 +845,8 @@ function findVideoForSource(tabId, srcUrl, frameId) {
   // identity. A unique video in the source frame remains an unambiguous
   // fallback; multiple players always require an exact element match.
   if ((srcUrl.startsWith("blob:") || srcUrl.startsWith("data:")) &&
-      scopedVideos.length === 1) {
+      scopedVideos.length === 1 &&
+      !scopedVideos[0].video.blobUrl) {
     return scopedVideos[0];
   }
   return null;
@@ -1100,9 +1105,8 @@ function clearAllVideoUi() {
   // Clear records for inactive tabs restored by a previous worker instance.
   chrome.storage.session.get(null).then((stored) => {
     for (const key of Object.keys(stored || {})) {
-      if (!key.startsWith("videoFinds:")) continue;
-      const id = Number(key.slice("videoFinds:".length));
-      if (Number.isInteger(id) && id >= 0) {
+      const id = videoStateTabId(key);
+      if (id !== null && Number.isInteger(id) && id >= 0) {
         videoFinds.delete(id);
         forgetVideoFinds(id);
       }
