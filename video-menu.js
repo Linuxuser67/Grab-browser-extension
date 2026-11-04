@@ -921,7 +921,12 @@ function noteSniffed(tabId, frameId, url, kind) {
     videoFinds.set(tabId, f);
   }
   const sourceFrame = Number.isInteger(frameId) && frameId >= 0 ? frameId : 0;
-  if (!f.sniffedByFrame.has(sourceFrame) && f.sniffedByFrame.size >= MAX_VIDEO_FRAMES) return;
+  if (!f.sniffedByFrame.has(sourceFrame) && f.sniffedByFrame.size >= MAX_VIDEO_FRAMES) {
+    const staleFrame = [...f.sniffedByFrame.keys()].find((id) => !f.frames.has(id));
+    if (staleFrame === undefined) return;
+    f.sniffedByFrame.delete(staleFrame);
+    f.kindsByFrame.delete(staleFrame);
+  }
   let kinds = f.kindsByFrame.get(sourceFrame);
   if (!kinds) {
     kinds = new Map();
@@ -1184,6 +1189,8 @@ async function onVideoReport(msg, sender) {
       const evictFrame = [...f.frames.keys()].find((id) => id !== 0);
       if (evictFrame !== undefined) {
         f.frames.delete(evictFrame);
+        f.sniffedByFrame.delete(evictFrame);
+        f.kindsByFrame.delete(evictFrame);
         changed = true;
       } else {
         acceptFrame = false;
@@ -1203,6 +1210,10 @@ async function onVideoReport(msg, sender) {
     // reports intentionally replace their frame's prior snapshot.
     if (videos.length > 0 || !hadFrame || msg.replaceFrame === true) {
       f.frames.set(frameId, videos);
+      if (msg.replaceFrame === true) {
+        f.sniffedByFrame.delete(frameId);
+        f.kindsByFrame.delete(frameId);
+      }
       changed = true;
     }
   }

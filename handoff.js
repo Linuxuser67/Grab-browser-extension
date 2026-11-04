@@ -726,11 +726,18 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   ) {
     await restoreVideoFinds(tab.id);
     const matched = findVideoForSource(tab.id, info.srcUrl, info.frameId);
-    if (matched && toGrabUrl(matched.video.src) && matched.video.src !== pageUrl) {
+    if (matched && matched.video.blobUrl === info.srcUrl) {
+      if (matched.video.blob === true) {
+        const detected = await resolvedBlobVideoUrlForFrame(tab.id, matched.frameId);
+        if (detected && toGrabUrl(detected)) target = detected;
+      } else if (toGrabUrl(matched.video.src) && matched.video.src !== pageUrl) {
+        const detected = await resolvedVideoUrlsForFrame(tab.id, matched.frameId);
+        target = detected.length === 1 && toGrabUrl(detected[0])
+          ? detected[0]
+          : matched.video.src;
+      }
+    } else if (matched && toGrabUrl(matched.video.src) && matched.video.src !== pageUrl) {
       target = matched.video.src;
-    } else if (matched && matched.video.blob === true) {
-      const detected = await resolvedBlobVideoUrlForFrame(tab.id, matched.frameId);
-      if (detected && toGrabUrl(detected)) target = detected;
     }
   }
   // Prefer the media/link target, but a blob:/data: media URL can't leave

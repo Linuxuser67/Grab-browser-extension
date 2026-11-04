@@ -905,6 +905,33 @@ describe("detection wiring", () => {
     assert.deepEqual(await bg.resolvedVideoUrls(tabId), [manifest]);
   });
 
+
+  test("pause replacement clears sniffed manifests from that frame", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 145;
+    const manifest = "https://cdn.example.com/session/master.m3u8";
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/first"
+      }] },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    assert.deepEqual(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), manifest);
+
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [], replaceFrame: true },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    assert.deepEqual(bg._videoFinds.get(tabId).sniffedByFrame.get(0), undefined);
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), null);
+  });
+
   test("multiple players in one frame do not inherit ambiguous sniffed streams", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);
