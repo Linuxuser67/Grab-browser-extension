@@ -2129,6 +2129,27 @@ describe("explicit context-menu page URL", () => {
   });
 
 
+
+  test("a single blob player exposes explicit menu candidates without auto-selecting", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const first = "https://cdn.example.com/a/master.m3u8";
+    const second = "https://cdn.example.com/b/master.m3u8";
+    bg._videoFinds.set(148, {
+      frames: new Map([[0, [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/player"
+      }]]]),
+      sniffedByFrame: new Map([[0, [first, second]]]),
+      kindsByFrame: new Map([[0, new Map([
+        [urlPathKeyForTest(first), "manifest"],
+        [urlPathKeyForTest(second), "manifest"],
+      ])]]),
+      title: "Episode",
+    });
+    assert.deepEqual(await bg.resolvedVideoUrlsForFrame(148, 0), [first, second]);
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(148, 0), null);
+  });
+
   test("blob right-click uses only the stream observed in its frame", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);

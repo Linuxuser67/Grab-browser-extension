@@ -871,8 +871,9 @@ async function resolvedVideoUrlsForFrame(tabId, frameId) {
   }
   const video = videos[0];
   if (video && video.blob === true) {
-    const url = await resolvedBlobVideoUrlForFrame(tabId, frameId);
-    return url ? [url] : [];
+    let urls = mergedVideoUrlsForFrame(tabId, frameId);
+    if (urls.length > 1) urls = await preferMasterPlaylists(urls);
+    return urls;
   }
   const urls = mergedVideoUrlsForFrame(tabId, frameId);
   return video && video.src ? (urls.length === 1 ? urls : [video.src]) : [];
