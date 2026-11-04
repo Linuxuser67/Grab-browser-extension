@@ -149,7 +149,9 @@ function loadBackground(chrome) {
     return { status: 404, ok: false, text: async () => "" };
   };
   const worker = { exports: {} };
-  new Function("module", BG_SOURCE)(worker);
+  // Bind the mock to this worker. Pending async callbacks from earlier tests
+  // must not start writing into whichever mock happens to be global later.
+  new Function("module", "chrome", BG_SOURCE)(worker, chrome);
   return worker.exports;
 }
 
@@ -1052,10 +1054,7 @@ describe("detection wiring", () => {
     );
     assert.equal(
       chrome._calls.some(([n, arg]) => n === "action.setBadgeText" && arg.text !== ""),
-      false,
-      "unexpected non-empty badge calls: " + JSON.stringify(
-        chrome._calls.filter(([n, arg]) => n === "action.setBadgeText" && arg.text !== "")
-      )
+      false
     );
   });
 

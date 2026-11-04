@@ -159,7 +159,9 @@ function loadBackground(chrome) {
     return { status: 200, ok: true };
   };
   const worker = { exports: {} };
-  new Function("module", BG_SOURCE)(worker);
+  // Bind the mock to this worker. Pending async callbacks from earlier tests
+  // must not start writing into whichever mock happens to be global later.
+  new Function("module", "chrome", BG_SOURCE)(worker, chrome);
   // Test helper: the production handOff wrapper had no callers.
   worker.exports.handOff = async (url, ctx, retryDelays) => {
     const status = await worker.exports.postToGrabWithRetry(url, ctx, retryDelays);
