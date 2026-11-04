@@ -724,6 +724,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     target === pageUrl &&
     typeof info.srcUrl === "string"
   ) {
+    await restoreVideoFinds(tab.id);
     const matched = findVideoForSource(tab.id, info.srcUrl, info.frameId);
     if (matched && toGrabUrl(matched.video.src) && matched.video.src !== pageUrl) {
       target = matched.video.src;

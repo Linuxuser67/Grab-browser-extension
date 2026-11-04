@@ -2248,11 +2248,11 @@ describe("review hardening (1.5.8)", () => {
     const ok = "https://a.example.com/ok.m3u8";
     const snap = bg.snapshotVideoFinds({
       frames: new Map([[0, [{ src: huge, blob: false }, { src: ok, blob: false }]]]),
-      sniffed: [huge, ok],
-      kinds: new Map(),
+      sniffedByFrame: new Map([[0, [huge, ok]]]),
+      kindsByFrame: new Map([[0, new Map()]]),
       title: "",
     });
-    assert.deepEqual(snap.sniffed, [ok]);
+    assert.deepEqual(snap.sniffedFrames, [[0, [ok]]]);
     assert.deepEqual(snap.frames, [[0, [{ src: ok, blob: false }]]]);
   });
 
