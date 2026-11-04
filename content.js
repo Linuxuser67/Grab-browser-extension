@@ -80,7 +80,11 @@ function collectVideos(doc, isPlayed, onShadowRoot) {
     if (!isBigEnough(v)) continue;
     if (isPlayed && !isPlayed(v)) continue;
     const src = usableVideoSrc(v);
-    const entry = { src, blob: !src && isBlobVideo(v) };
+    const blob = !src && isBlobVideo(v);
+    const entry = { src, blob };
+    // Preserve the clicked element identity for the background context-menu
+    // handler. This opaque URL is never used as the URL handed to Grab.
+    if (isBlobVideo(v)) entry.blobUrl = v.currentSrc || v.src;
     // Decoded height (known after metadata loads): labels direct files.
     if (v.videoHeight > 0) entry.height = v.videoHeight;
     out.push(entry);

@@ -149,7 +149,9 @@ function loadBackground(chrome) {
     return { status: 404, ok: false, text: async () => "" };
   };
   const worker = { exports: {} };
-  new Function("module", BG_SOURCE)(worker);
+  // Bind the mock to this worker. Pending async callbacks from earlier tests
+  // must not start writing into whichever mock happens to be global later.
+  new Function("module", "chrome", BG_SOURCE)(worker, chrome);
   return worker.exports;
 }
 
@@ -450,7 +452,11 @@ describe("collectVideos (content script)", () => {
       fakeDoc([fakeVideo({ src: "blob:https://example.com/uuid", w: 640, h: 360 })]),
       () => true
     );
-    assert.deepEqual(videos, [{ src: null, blob: true, height: 360 }]);
+    assert.deepEqual(videos, [{
+      src: null, blob: true,
+      blobUrl: "blob:https://example.com/uuid",
+      height: 360,
+    }]);
   });
 
   test("tiny players are ignored (ads, trackers)", () => {
@@ -717,14 +723,15 @@ describe("detection wiring", () => {
       "every distinct actively playing video gets a menu entry"
     );
 
-    const saved = chrome._session.get("videoFinds:" + tabId);
+    const saved = chrome._session.get("videoFinds:v2:" + tabId);
     assert.equal(saved.frames[0][1].length, 10, "all active videos survive worker persistence");
   });
 
   test("restoring oversized legacy video state caps frames and entries", async () => {
     const chrome = makeChrome();
     const tabId = 122;
-    chrome._session.set("videoFinds:" + tabId, {
+    chrome._session.set("videoFinds:v2:" + tabId, {
+      version: 2,
       frames: Array.from({ length: 128 }, (_, frameId) => [
         frameId,
         Array.from({ length: 8 }, (_, index) => ({
@@ -732,9 +739,9 @@ describe("detection wiring", () => {
           blob: false,
         })),
       ]),
-      sniffed: [],
-      kinds: [],
-      title: "legacy".repeat(500),
+      sniffedFrames: [],
+      kindsFrames: [],
+      title: "persisted".repeat(500),
     });
     const bg = loadBackground(chrome);
     await chrome._listeners["runtime.onMessage"](
@@ -790,7 +797,7 @@ describe("detection wiring", () => {
     assert.ok(total <= bg.MAX_VIDEO_ITEMS, "DOM video entries stay bounded per tab");
     assert.ok(findings.title.length <= bg.MAX_VIDEO_TITLE_LENGTH, "page titles stay bounded");
 
-    const saved = chrome._session.get("videoFinds:" + tabId);
+    const saved = chrome._session.get("videoFinds:v2:" + tabId);
     assert.ok(saved.frames.length <= bg.MAX_VIDEO_FRAMES, "persisted frame IDs stay bounded");
     assert.ok(
       saved.frames.reduce((sum, pair) => sum + pair[1].length, 0) <= bg.MAX_VIDEO_ITEMS,
@@ -810,7 +817,9 @@ describe("detection wiring", () => {
       responseHeaders: [],
     });
     L["runtime.onMessage"](
-      { type: "grab-videos-detected", videos: [{ src: null, blob: true }] },
+      { type: "grab-videos-detected", videos: [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/uuid"
+      }] },
       { tab: { id: 9 } }
     );
     await tick();
@@ -834,20 +843,26 @@ describe("detection wiring", () => {
       responseHeaders: [],
     });
     await first._listeners["runtime.onMessage"](
-      { type: "grab-videos-detected", videos: [{ src: null, blob: true }], title: "Live stream" },
+      { type: "grab-videos-detected", videos: [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/uuid"
+      }], title: "Live stream" },
       { tab: { id: 9 }, frameId: 0 }
     );
     await tick();
-    const saved = shared.session.get("videoFinds:9");
+    const saved = shared.session.get("videoFinds:v2:9");
     assert.ok(saved, "per-tab findings are persisted in session storage");
-    assert.deepEqual(saved.sniffed, ["https://cdn.example.com/s/stream.m3u8"]);
-    assert.ok(saved.kinds.some(([key, kind]) => key.endsWith("/s/stream.m3u8") && kind === "manifest"));
+    assert.equal(saved.version, 2);
+    assert.deepEqual(saved.sniffedFrames, [[0, ["https://cdn.example.com/s/stream.m3u8"]]]);
+    assert.ok(saved.kindsFrames[0][1].some(([key, kind]) => key.endsWith("/s/stream.m3u8") && kind === "manifest"));
+    assert.equal(saved.frames[0][1][0].blobUrl, "blob:https://example.com/uuid");
 
     const restarted = makeChrome(shared);
     restarted.tabs.query = (q, cb) => cb([{ id: 9 }]);
     loadBackground(restarted);
     await restarted._listeners["runtime.onMessage"](
-      { type: "grab-videos-detected", videos: [{ src: null, blob: true }], title: "Live stream" },
+      { type: "grab-videos-detected", videos: [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/uuid"
+      }], title: "Live stream" },
       { tab: { id: 9 }, frameId: 0 }
     );
     await tick();
@@ -860,6 +875,200 @@ describe("detection wiring", () => {
       restarted._calls.some(([name, url]) => name === "handoff" && url === "https://cdn.example.com/s/stream.m3u8"),
       "the restored menu entry hands the manifest to Grab"
     );
+  });
+
+
+
+  test("legacy blob click fallback requires one video in the source frame", () => {
+    const bg = loadBackground(makeChrome());
+    bg._videoFinds.set(146, {
+      frames: new Map([[4, [
+        { src: "https://cdn.example.com/only.mp4", blob: false },
+      ]]]),
+      sniffedByFrame: new Map(),
+      kindsByFrame: new Map(),
+      title: "",
+    });
+    assert.equal(
+      bg.findVideoForSource(146, "blob:https://example.com/legacy", 4).video.src,
+      "https://cdn.example.com/only.mp4",
+    );
+
+    bg._videoFinds.set(147, {
+      frames: new Map([[4, [
+        { src: "https://cdn.example.com/one.mp4", blob: false },
+        { src: "https://cdn.example.com/two.mp4", blob: false },
+      ]]]),
+      sniffedByFrame: new Map(),
+      kindsByFrame: new Map(),
+      title: "",
+    });
+    assert.equal(bg.findVideoForSource(147, "blob:https://example.com/ambiguous", 4), null);
+  });
+
+
+  test("anonymous blob reports remain separate and cannot be treated as one player", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 149;
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [
+          { src: null, blob: true },
+          { src: null, blob: true },
+        ],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+
+    const videos = bg._videoFinds.get(tabId).frames.get(0);
+    assert.equal(videos.length, 2);
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), null);
+    assert.equal(bg.findVideoForSource(tabId, "blob:https://example.com/unknown", 0), null);
+  });
+
+  test("network manifests stay associated with their originating frame", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 141;
+    const manifest = "https://cdn.example.com/frame-7/master.m3u8";
+    await L["tabs.onActivated"]({ tabId });
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 7, url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/top"
+      }] },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    assert.deepEqual(bg.mergedVideoUrlsForFrame(tabId, 0), []);
+    assert.deepEqual(await bg.resolvedVideoUrlsForFrame(tabId, 0), []);
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{
+        src: null, blob: true, blobUrl: "blob:https://embed.example.com/player"
+      }] },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 7 },
+    );
+    assert.deepEqual(await bg.resolvedVideoUrlsForFrame(tabId, 7), [manifest]);
+    assert.deepEqual(await bg.resolvedVideoUrls(tabId), [manifest]);
+  });
+
+
+  test("pause replacement clears sniffed manifests from that frame", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 145;
+    const manifest = "https://cdn.example.com/session/master.m3u8";
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/first"
+      }] },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    assert.deepEqual(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), manifest);
+
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [], replaceFrame: true },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    assert.deepEqual(bg._videoFinds.get(tabId).sniffedByFrame.get(0), undefined);
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), null);
+  });
+
+  test("multiple players in one frame do not inherit ambiguous sniffed streams", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 142;
+    await L["tabs.onActivated"]({ tabId });
+    for (const url of ["https://cdn.example.com/a/master.m3u8", "https://cdn.example.com/b/master.m3u8"]) {
+      await L["webRequest.onResponseStarted"]({ tabId, frameId: 0, url, responseHeaders: [] });
+    }
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [
+        { src: null, blob: true, blobUrl: "blob:https://example.com/one" },
+        { src: null, blob: true, blobUrl: "blob:https://example.com/two" },
+      ] },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    assert.deepEqual(await bg.resolvedVideoUrlsForFrame(tabId, 0), []);
+    assert.deepEqual(await bg.resolvedVideoUrls(tabId), []);
+  });
+
+  test("one blob player with unrelated manifests is not guessed", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 143;
+    await L["tabs.onActivated"]({ tabId });
+    for (const url of ["https://cdn.example.com/a/master.m3u8", "https://cdn.example.com/b/master.m3u8"]) {
+      await L["webRequest.onResponseStarted"]({ tabId, frameId: 0, url, responseHeaders: [] });
+    }
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/player"
+      }] },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), null);
+  });
+
+  test("blob identity and frame-scoped manifests survive worker restart", async () => {
+    const shared = {};
+    const first = makeChrome(shared);
+    loadBackground(first);
+    const tabId = 144;
+    const blobUrl = "blob:https://embed.example.com/frame";
+    const manifest = "https://cdn.example.com/embed/master.m3u8";
+    await first._listeners["webRequest.onResponseStarted"]({ tabId, frameId: 9, url: manifest, responseHeaders: [] });
+    await first._listeners["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: null, blob: true, blobUrl }] },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 9 },
+    );
+    const saved = shared.session.get("videoFinds:v2:" + tabId);
+    assert.ok(saved);
+    assert.equal(saved.version, 2);
+    assert.equal(saved.frames.find(([id]) => id === 9)[1][0].blobUrl, blobUrl);
+
+    const restarted = makeChrome(shared);
+    const bg = loadBackground(restarted);
+    await restarted._listeners["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: null, blob: true, blobUrl }] },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 9 },
+    );
+    assert.equal(bg.findVideoForSource(tabId, blobUrl, 9).video.blobUrl, blobUrl);
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 9), manifest);
+  });
+
+
+  test("disabling detection clears legacy and v2 snapshots from inactive tabs", async () => {
+    const shared = {
+      session: new Map([
+        ["videoFinds:99", { frames: [], sniffed: [] }],
+        ["videoFinds:v2:100", {
+          version: 2, frames: [], sniffedFrames: [], kindsFrames: [], title: ""
+        }],
+      ]),
+    };
+    const chrome = makeChrome(shared);
+    loadBackground(chrome);
+    await chrome._listeners["storage.onChanged"](
+      { detectVideos: { newValue: false } },
+      "sync",
+    );
+    await tick();
+    assert.equal(shared.session.has("videoFinds:99"), false);
+    assert.equal(shared.session.has("videoFinds:v2:100"), false);
   });
 
   test("detection off stays silent", async () => {
@@ -1461,6 +1670,23 @@ describe("HLS master playlist filtering", () => {
       await filterWithPlaylists([master, chunk], new Map()),
       [master, chunk],
     );
+  });
+
+  test("does not forward cookies or follow redirects to inspect a master", async () => {
+    const originalFetch = globalThis.fetch;
+    const master = "https://cdn.example.com/v/42/master.m3u8";
+    const child = "https://cdn.example.com/v/42/chunklist.m3u8";
+    globalThis.fetch = async (_url, options) => {
+      assert.equal(options.credentials, "omit");
+      assert.equal(options.redirect, "error");
+      throw new TypeError("authenticated playlist cannot be inspected");
+    };
+    try {
+      const bg = loadBackground(makeChrome());
+      assert.deepEqual(await bg.preferMasterPlaylists([master, child]), [master, child]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("does not let DASH manifests suppress HLS playlists", async () => {

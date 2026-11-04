@@ -510,24 +510,27 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
     .map((item) => item.url);
 }
 
-// Per-tab detections: tabId -> { frames: Map(frameId -> [{src, blob}]),
-// sniffed: [url] }. Reports are tracked per frame because the content script
-// runs in all frames; last-writer-wins per tab would drop other frames'
-// videos whenever two frames report at different times.
+// Per-tab detections. DOM reports and network observations are retained per
+// frame: a manifest fetched by an iframe must not be paired with another frame.
 const MAX_VIDEO_FRAMES = 32;
 const MAX_VIDEO_TITLE_LENGTH = 512;
 const videoFinds = new Map();
 
-/// Storage.session outlives an MV3 service-worker instance and is cleared when
-/// the browser session ends. Persist the active discovery snapshot so a blob:
-/// player still has its sniffed manifest after the worker is restarted.
-const videoStateKey = (tabId) => `videoFinds:${tabId}`;
+function createVideoFinds() {
+  return { frames: new Map(), sniffedByFrame: new Map(), kindsByFrame: new Map(), title: "" };
+}
+
+/// The v2 key drops old tab-wide sniffed URLs: after an upgrade there is no
+/// reliable way to determine which frame created them.
+const videoStateKey = (tabId) => "videoFinds:v2:" + tabId;
+function videoStateTabId(key) {
+  const match = /^videoFinds:(?:v2:)?([0-9]+)$/.exec(key);
+  return match ? Number(match[1]) : null;
+}
 const restoredVideoFinds = new Set();
 const restoringVideoFinds = new Map();
 const videoStateWrites = new Map();
 
-/// Serialize session-storage mutations per tab, so navigation cleanup cannot
-/// be overtaken by a write queued for the previous document.
 function enqueueVideoStateWrite(tabId, write) {
   const previous = videoStateWrites.get(tabId) || Promise.resolve();
   const next = previous.catch(() => {}).then(write);
@@ -538,8 +541,13 @@ function enqueueVideoStateWrite(tabId, write) {
   return next;
 }
 
-/// Normalize page-derived data before retaining it. Bound scanning as well as
-/// retained results; a blob video counts as one item.
+function validBlobUrl(value) {
+  return typeof value === "string" && value.startsWith("blob:") && fitsGrabUrl(value)
+    ? value : null;
+}
+
+/// A blob URL is retained only as a short-lived element identity for matching
+/// context-menu clicks. It is never included in a handoff to Grab.
 function normalizeVideoReport(rawVideos, maximum) {
   const input = Array.isArray(rawVideos) ? rawVideos.slice(0, MAX_VIDEO_ITEMS) : [];
   const out = [];
@@ -547,15 +555,14 @@ function normalizeVideoReport(rawVideos, maximum) {
   for (const video of input) {
     if (out.length >= maximum) break;
     if (!video || typeof video !== "object") continue;
-    const src =
-      typeof video.src === "string" && video.src && fitsGrabUrl(video.src)
-        ? video.src
-        : null;
+    const src = typeof video.src === "string" && video.src && fitsGrabUrl(video.src) ? video.src : null;
+    const blobUrl = validBlobUrl(video.blobUrl);
     if (!src && video.blob !== true) continue;
-    const key = src || "__grab_blob__";
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const key = src || blobUrl;
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
     const item = { src, blob: video.blob === true };
+    if (blobUrl) item.blobUrl = blobUrl;
     if (Number.isFinite(video.height) && video.height > 0) item.height = video.height;
     out.push(item);
   }
@@ -564,37 +571,67 @@ function normalizeVideoReport(rawVideos, maximum) {
 
 function snapshotVideoFinds(finds) {
   const frames = [];
-  let remaining = MAX_VIDEO_ITEMS;
-  // Persist active DOM-video reports across worker restarts, with a per-tab
-  // cap so pathological pages cannot grow session storage without bound.
-  // Empty frame reports are omitted; sniffed URLs are bounded separately.
+  let remainingVideos = MAX_VIDEO_ITEMS;
   for (const [frameId, videos] of finds.frames) {
-    if (remaining <= 0) break;
+    if (remainingVideos <= 0 || frames.length >= MAX_VIDEO_FRAMES) break;
     const out = [];
     const seen = new Set();
-    let hasBlob = false;
     for (const video of videos || []) {
-      if (remaining <= 0) break;
-      if (video && typeof video.src === "string" && video.src && fitsGrabUrl(video.src) && !seen.has(video.src)) {
-        seen.add(video.src);
-        const saved = { src: video.src, blob: video.blob === true };
-        if (Number.isFinite(video.height) && video.height > 0) saved.height = video.height;
-        out.push(saved);
-        remaining -= 1;
-      } else if (video && video.blob === true && !hasBlob) {
-        hasBlob = true;
-        out.push({ src: null, blob: true });
-        remaining -= 1;
-      }
+      if (remainingVideos <= 0) break;
+      if (!video || typeof video !== "object") continue;
+      const src = typeof video.src === "string" && video.src && fitsGrabUrl(video.src) ? video.src : null;
+      const blobUrl = validBlobUrl(video.blobUrl);
+      if (!src && video.blob !== true) continue;
+      const identity = src || blobUrl;
+      if (identity && seen.has(identity)) continue;
+      if (identity) seen.add(identity);
+      const saved = { src, blob: video.blob === true };
+      if (blobUrl) saved.blobUrl = blobUrl;
+      if (Number.isFinite(video.height) && video.height > 0) saved.height = video.height;
+      out.push(saved);
+      remainingVideos -= 1;
     }
     if (out.length) frames.push([frameId, out]);
   }
+
+  const sniffedFrames = [];
+  let remainingSniffed = MAX_VIDEO_ITEMS;
+  for (const [frameId, urls] of finds.sniffedByFrame || []) {
+    if (remainingSniffed <= 0 || sniffedFrames.length >= MAX_VIDEO_FRAMES) break;
+    const out = [];
+    const seen = new Set();
+    for (const url of urls || []) {
+      if (remainingSniffed <= 0) break;
+      if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
+      const key = urlPathKey(url);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(url);
+      remainingSniffed -= 1;
+    }
+    if (out.length) sniffedFrames.push([frameId, out]);
+  }
+
+  const kindsFrames = [];
+  let remainingKinds = 200;
+  for (const [frameId, kinds] of finds.kindsByFrame || []) {
+    if (remainingKinds <= 0 || kindsFrames.length >= MAX_VIDEO_FRAMES) break;
+    const out = [];
+    for (const [key, kind] of kinds || []) {
+      if (remainingKinds <= 0 || typeof key !== "string" ||
+          (kind !== "manifest" && kind !== "media")) continue;
+      out.push([key, kind]);
+      remainingKinds -= 1;
+    }
+    if (out.length) kindsFrames.push([frameId, out]);
+  }
+
   return {
+    version: 2,
     frames,
-    sniffed: (finds.sniffed || []).filter((url) => fitsGrabUrl(url)).slice(-50),
-    kinds: [...(finds.kinds || new Map()).entries()].slice(-200),
-    title:
-      typeof finds.title === "string" ? finds.title.slice(0, MAX_VIDEO_TITLE_LENGTH) : "",
+    sniffedFrames,
+    kindsFrames,
+    title: typeof finds.title === "string" ? finds.title.slice(0, MAX_VIDEO_TITLE_LENGTH) : "",
   };
 }
 
@@ -611,28 +648,17 @@ async function restoreVideoFinds(tabId) {
       if (queued) await queued.catch(() => {});
       const key = videoStateKey(tabId);
       const result = await chrome.storage.session.get(key);
-      // Navigation/removal may invalidate the tab while the read is pending.
       if (restoredVideoFinds.has(tabId)) return;
       const saved = result && result[key];
-      if (saved && typeof saved === "object") {
+      if (saved && typeof saved === "object" && saved.version === 2) {
         const frames = new Map();
         let remaining = MAX_VIDEO_ITEMS;
-        // Avoid copying/sorting an arbitrarily large snapshot left by an older
-        // worker that did not cap frame IDs. Keep at most the configured limit
-        // while ensuring the top frame wins if it appears late in the array.
         const savedFrames = [];
         const seenFrameIds = new Set();
         for (const pair of Array.isArray(saved.frames) ? saved.frames : []) {
-          if (
-            !Array.isArray(pair) ||
-            pair.length !== 2 ||
-            !Number.isInteger(pair[0]) ||
-            pair[0] < 0 ||
-            !Array.isArray(pair[1]) ||
-            seenFrameIds.has(pair[0])
-          ) {
-            continue;
-          }
+          if (!Array.isArray(pair) || pair.length !== 2 ||
+              !Number.isInteger(pair[0]) || pair[0] < 0 ||
+              !Array.isArray(pair[1]) || seenFrameIds.has(pair[0])) continue;
           if (pair[0] === 0) {
             if (savedFrames.length >= MAX_VIDEO_FRAMES) {
               const lastNonTop = savedFrames.findIndex(([id]) => id !== 0);
@@ -657,39 +683,66 @@ async function restoreVideoFinds(tabId) {
           const videos = [];
           const seen = new Set();
           for (const video of savedVideos.slice(0, MAX_VIDEO_ITEMS)) {
-            if (remaining <= 0) break;
-            if (!video || typeof video !== "object") continue;
-            const src =
-              typeof video.src === "string" && video.src && fitsGrabUrl(video.src)
-                ? video.src
-                : null;
+            if (remaining <= 0 || !video || typeof video !== "object") continue;
+            const src = typeof video.src === "string" && video.src && fitsGrabUrl(video.src) ? video.src : null;
+            const blobUrl = validBlobUrl(video.blobUrl);
             if (!src && video.blob !== true) continue;
-            const key = src || "__grab_blob__";
-            if (seen.has(key)) continue;
-            seen.add(key);
+            const identity = src || blobUrl;
+            if (identity && seen.has(identity)) continue;
+            if (identity) seen.add(identity);
             const item = { src, blob: video.blob === true };
+            if (blobUrl) item.blobUrl = blobUrl;
             if (Number.isFinite(video.height) && video.height > 0) item.height = video.height;
             videos.push(item);
             remaining -= 1;
           }
-          frames.set(frameId, videos);
+          if (videos.length) frames.set(frameId, videos);
         }
-        const sniffed = Array.isArray(saved.sniffed)
-          ? saved.sniffed.filter((url) => fitsGrabUrl(url)).slice(-50)
-          : [];
-        const kinds = new Map(
-          (Array.isArray(saved.kinds) ? saved.kinds : []).filter((pair) =>
-            Array.isArray(pair) && pair.length === 2 &&
-            typeof pair[0] === "string" &&
-            (pair[1] === "manifest" || pair[1] === "media")
-          ).slice(-200)
-        );
+
+        const sniffedByFrame = new Map();
+        let remainingSniffed = MAX_VIDEO_ITEMS;
+        for (const pair of Array.isArray(saved.sniffedFrames) ? saved.sniffedFrames : []) {
+          if (!Array.isArray(pair) || pair.length !== 2 ||
+              !Number.isInteger(pair[0]) || pair[0] < 0 ||
+              !Array.isArray(pair[1]) || sniffedByFrame.has(pair[0]) ||
+              sniffedByFrame.size >= MAX_VIDEO_FRAMES || remainingSniffed <= 0) continue;
+          const urls = [];
+          const seen = new Set();
+          for (const url of pair[1].slice(0, MAX_VIDEO_ITEMS)) {
+            if (remainingSniffed <= 0) break;
+            if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
+            const identity = urlPathKey(url);
+            if (seen.has(identity)) continue;
+            seen.add(identity);
+            urls.push(url);
+            remainingSniffed -= 1;
+          }
+          if (urls.length) sniffedByFrame.set(pair[0], urls);
+        }
+
+        const kindsByFrame = new Map();
+        let remainingKinds = 200;
+        for (const pair of Array.isArray(saved.kindsFrames) ? saved.kindsFrames : []) {
+          if (!Array.isArray(pair) || pair.length !== 2 ||
+              !Number.isInteger(pair[0]) || pair[0] < 0 ||
+              !Array.isArray(pair[1]) || kindsByFrame.has(pair[0]) ||
+              kindsByFrame.size >= MAX_VIDEO_FRAMES || remainingKinds <= 0) continue;
+          const kinds = new Map();
+          for (const entry of pair[1].slice(0, 200)) {
+            if (remainingKinds <= 0 || !Array.isArray(entry) || entry.length !== 2 ||
+                typeof entry[0] !== "string" ||
+                (entry[1] !== "manifest" && entry[1] !== "media")) continue;
+            kinds.set(entry[0], entry[1]);
+            remainingKinds -= 1;
+          }
+          if (kinds.size) kindsByFrame.set(pair[0], kinds);
+        }
+
         videoFinds.set(tabId, {
           frames,
-          sniffed,
-          kinds,
-          title:
-            typeof saved.title === "string" ? saved.title.slice(0, MAX_VIDEO_TITLE_LENGTH) : "",
+          sniffedByFrame,
+          kindsByFrame,
+          title: typeof saved.title === "string" ? saved.title.slice(0, MAX_VIDEO_TITLE_LENGTH) : "",
         });
       }
     } catch {
@@ -720,9 +773,10 @@ async function persistVideoFinds(tabId) {
 function forgetVideoFinds(tabId) {
   if (!Number.isInteger(tabId) || tabId < 0) return;
   restoredVideoFinds.add(tabId);
-  return enqueueVideoStateWrite(tabId, () =>
-    chrome.storage.session.remove(videoStateKey(tabId))
-  ).catch(() => {});
+  return enqueueVideoStateWrite(tabId, async () => {
+    await chrome.storage.session.remove(videoStateKey(tabId));
+    await chrome.storage.session.remove("videoFinds:" + tabId);
+  }).catch(() => {});
 }
 
 function domVideosFor(tabId) {
@@ -733,9 +787,129 @@ function domVideosFor(tabId) {
   return out;
 }
 
+function sniffedUrlsForFrame(finds, frameId) {
+  if (finds.sniffedByFrame instanceof Map) return finds.sniffedByFrame.get(frameId) || [];
+  return frameId === 0 && Array.isArray(finds.sniffed) ? finds.sniffed : [];
+}
+
+function kindsForFrame(finds, frameId) {
+  if (finds.kindsByFrame instanceof Map) return finds.kindsByFrame.get(frameId) || new Map();
+  return frameId === 0 && finds.kinds instanceof Map ? finds.kinds : new Map();
+}
+
+/// Merge only observations from the same frame. With multiple active players,
+/// network requests cannot be attributed to one element, so only direct media
+/// URLs reported by the elements themselves are exposed.
+function mergedVideoUrlsForFrame(tabId, frameId) {
+  const finds = videoFinds.get(tabId);
+  if (!finds) return [];
+  const videos = finds.frames.get(frameId) || [];
+  if (videos.length === 0) return [];
+  if (videos.length > 1) {
+    return [...new Set(videos
+      .filter((video) => video && typeof video.src === "string" && video.src && fitsGrabUrl(video.src))
+      .map((video) => video.src))];
+  }
+  const video = videos[0];
+  const sniffed = sniffedUrlsForFrame(finds, frameId);
+  const kinds = kindsForFrame(finds, frameId);
+  if (video && typeof video.src === "string" && video.src) {
+    return mergeVideoFinds([video], sniffed, kinds);
+  }
+  if (video && video.blob === true) return mergeVideoFinds([], sniffed, kinds);
+  return [];
+}
+
+function findVideoForSource(tabId, srcUrl, frameId) {
+  if (typeof srcUrl !== "string" || !srcUrl) return null;
+  const finds = videoFinds.get(tabId);
+  if (!finds) return null;
+  const frameEntries = Number.isInteger(frameId) && frameId >= 0
+    ? [[frameId, finds.frames.get(frameId) || []]]
+    : [...finds.frames.entries()];
+  const matches = [];
+  const scopedVideos = [];
+  for (const [id, videos] of frameEntries) {
+    for (const video of videos || []) {
+      if (!video) continue;
+      scopedVideos.push({ frameId: id, video });
+      if (video.src === srcUrl || video.blobUrl === srcUrl) {
+        matches.push({ frameId: id, video });
+      }
+    }
+  }
+  if (matches.length === 1) return matches[0];
+  if (matches.length !== 0) return null;
+
+  // Older content reports and some browser menu events omit the blob URL
+  // identity. A unique video in the source frame remains an unambiguous
+  // fallback; multiple players always require an exact element match.
+  if ((srcUrl.startsWith("blob:") || srcUrl.startsWith("data:")) &&
+      scopedVideos.length === 1 &&
+      !scopedVideos[0].video.blobUrl) {
+    return scopedVideos[0];
+  }
+  return null;
+}
+
+/// A blob may resolve to a manifest only if it is the sole active video in
+/// that frame and its candidates collapse to one stream after HLS master checks.
+async function resolvedBlobVideoUrlForFrame(tabId, frameId) {
+  const finds = videoFinds.get(tabId);
+  if (!finds) return null;
+  const videos = finds.frames.get(frameId) || [];
+  if (videos.length !== 1 || videos[0].blob !== true) return null;
+  let urls = mergedVideoUrlsForFrame(tabId, frameId);
+  if (urls.length > 1) urls = await preferMasterPlaylists(urls);
+  return urls.length === 1 ? urls[0] : null;
+}
+
+async function resolvedVideoUrlsForFrame(tabId, frameId) {
+  const finds = videoFinds.get(tabId);
+  if (!finds) return [];
+  const videos = finds.frames.get(frameId) || [];
+  if (videos.length === 0) return [];
+  if (videos.length > 1) {
+    return [...new Set(videos
+      .filter((video) => video && typeof video.src === "string" && video.src && fitsGrabUrl(video.src))
+      .map((video) => video.src))];
+  }
+  const video = videos[0];
+  if (video && video.blob === true) {
+    let urls = mergedVideoUrlsForFrame(tabId, frameId);
+    if (urls.length > 1) urls = await preferMasterPlaylists(urls);
+    return urls;
+  }
+  let urls = mergedVideoUrlsForFrame(tabId, frameId);
+  if (urls.length > 1) urls = await preferMasterPlaylists(urls);
+  return video && video.src ? urls : [];
+}
+
+async function resolvedVideoUrls(tabId) {
+  const finds = videoFinds.get(tabId);
+  if (!finds) return [];
+  const urls = [];
+  for (const frameId of finds.frames.keys()) urls.push(...await resolvedVideoUrlsForFrame(tabId, frameId));
+  return [...new Set(urls)].slice(0, MAX_VIDEO_ITEMS);
+}
+
 function mergedVideoUrls(tabId) {
-  const f = videoFinds.get(tabId);
-  return f ? mergeVideoFinds(domVideosFor(tabId), f.sniffed, f.kinds).slice(0, MAX_VIDEO_ITEMS) : [];
+  const finds = videoFinds.get(tabId);
+  if (!finds) return [];
+  const urls = [];
+  for (const frameId of finds.frames.keys()) urls.push(...mergedVideoUrlsForFrame(tabId, frameId));
+  return [...new Set(urls)].slice(0, MAX_VIDEO_ITEMS);
+}
+
+function detectedKindForUrl(finds, url) {
+  const key = urlPathKey(url);
+  if (finds && finds.kindsByFrame instanceof Map) {
+    for (const kinds of finds.kindsByFrame.values()) {
+      const kind = kinds.get(key);
+      if (kind) return kind;
+    }
+  }
+  return finds && finds.kinds instanceof Map ? finds.kinds.get(key) || null : null;
 }
 
 function sniffedHeader(headers, name) {
@@ -758,29 +932,38 @@ function urlPathKey(u) {
   }
 }
 
-function noteSniffed(tabId, url, kind) {
+function noteSniffed(tabId, frameId, url, kind) {
   if (!fitsGrabUrl(url)) return;
   let f = videoFinds.get(tabId);
   if (!f) {
-    f = { frames: new Map(), sniffed: [] };
+    f = createVideoFinds();
     videoFinds.set(tabId, f);
   }
-  // What classifyStream said about each URL ("manifest" | "media"), by path
-  // key, so an extensionless manifest can still be recognised at menu time.
-  if (!f.kinds) f.kinds = new Map();
-  f.kinds.set(urlPathKey(url), kind);
-  if (f.kinds.size > 200) f.kinds.delete(f.kinds.keys().next().value);
-  // Dedupe by path key: re-fetches with rotated tokens update the entry
-  // instead of duplicating it. Trade-off: videos distinguished only by
-  // query string collapse to the latest URL (rare in HLS practice).
+  const sourceFrame = Number.isInteger(frameId) && frameId >= 0 ? frameId : 0;
+  if (!f.sniffedByFrame.has(sourceFrame) && f.sniffedByFrame.size >= MAX_VIDEO_FRAMES) {
+    const staleFrame = [...f.sniffedByFrame.keys()].find((id) => !f.frames.has(id));
+    if (staleFrame === undefined) return;
+    f.sniffedByFrame.delete(staleFrame);
+    f.kindsByFrame.delete(staleFrame);
+  }
+  let kinds = f.kindsByFrame.get(sourceFrame);
+  if (!kinds) {
+    kinds = new Map();
+    f.kindsByFrame.set(sourceFrame, kinds);
+  }
+  kinds.set(urlPathKey(url), kind);
+  if (kinds.size > 200) kinds.delete(kinds.keys().next().value);
+  let urls = f.sniffedByFrame.get(sourceFrame);
+  if (!urls) {
+    urls = [];
+    f.sniffedByFrame.set(sourceFrame, urls);
+  }
   const key = urlPathKey(url);
-  const idx = f.sniffed.findIndex((u) => urlPathKey(u) === key);
-  if (idx >= 0) {
-    f.sniffed[idx] = url;
-  } else {
-    f.sniffed.push(url);
-    // Bound the list: a long-lived tab could otherwise grow it forever.
-    if (f.sniffed.length > 50) f.sniffed.splice(0, f.sniffed.length - 50);
+  const idx = urls.findIndex((candidate) => urlPathKey(candidate) === key);
+  if (idx >= 0) urls[idx] = url;
+  else {
+    urls.push(url);
+    if (urls.length > MAX_VIDEO_ITEMS) urls.splice(0, urls.length - MAX_VIDEO_ITEMS);
   }
 }
 
@@ -807,18 +990,26 @@ async function doRefreshVideoMenu(tabId) {
   await restoreVideoFinds(tabId);
   const rebuild = async () => {
     // Re-read: the finds may have changed while the remove was in flight.
+    // A refresh queued before the user disabled detection must not publish
+    // stale menu rows or a non-empty badge after the setting changes.
+    if (!videoUi.detectVideosOn) {
+      videoUi.menuUrls = [];
+      chrome.storage.session.set({ menuUrls: [] }).catch(() => {});
+      if (Number.isInteger(tabId) && tabId >= 0 && !warnedTabs.has(tabId)) {
+        const cleared = chrome.action.setBadgeText({ tabId, text: "" });
+        if (cleared && typeof cleared.catch === "function") cleared.catch(() => {});
+      }
+      return;
+    }
     // Played-only menu: the content script reports just videos the user started,
     // and sniffed manifests ride along only then — without a played video
     // the tab shows no video menu at all.
-    let urls =
-      tabId === videoUi.activeTabId && domVideosFor(tabId).length > 0
-        ? mergedVideoUrls(tabId)
-        : [];
+    let urls = tabId === videoUi.activeTabId ? await resolvedVideoUrls(tabId) : [];
     // Backstop: collection already filters excluded hosts, but a tab may
     // have navigated there after its videos were recorded.
     if (urls.length > 0 && (await isExcludedTab(tabId))) urls = [];
-    // Hide only media playlists explicitly referenced by a confirmed HLS master.
-    urls = await preferMasterPlaylists(urls);
+    // The setting can change while the manifest checks above are awaiting.
+    if (!videoUi.detectVideosOn) urls = [];
     // One entry per video/stream; its rows go straight into the one submenu
     // (see "Menu rows").
     const finds = videoFinds.get(tabId);
@@ -832,7 +1023,7 @@ async function doRefreshVideoMenu(tabId) {
       entries.push(
         buildVideoEntry(u, {
           height: heights.get(u),
-          kind: finds && finds.kinds && finds.kinds.get(urlPathKey(u)),
+          kind: detectedKindForUrl(finds, u),
         }),
       );
     }
@@ -914,9 +1105,8 @@ function clearAllVideoUi() {
   // Clear records for inactive tabs restored by a previous worker instance.
   chrome.storage.session.get(null).then((stored) => {
     for (const key of Object.keys(stored || {})) {
-      if (!key.startsWith("videoFinds:")) continue;
-      const id = Number(key.slice("videoFinds:".length));
-      if (Number.isInteger(id) && id >= 0) {
+      const id = videoStateTabId(key);
+      if (id !== null && Number.isInteger(id) && id >= 0) {
         videoFinds.delete(id);
         forgetVideoFinds(id);
       }
@@ -981,7 +1171,7 @@ chrome.webRequest.onResponseStarted.addListener(
     // here (not just at menu-build) keeps videoFinds clean.
     if (await isExcludedTab(details.tabId)) return;
     await restoreVideoFinds(details.tabId);
-    noteSniffed(details.tabId, details.url, kind);
+    noteSniffed(details.tabId, details.frameId, details.url, kind);
     await persistVideoFinds(details.tabId);
     onVideoEvent(details.tabId);
     // A sniffed manifest may belong to a shadow-root player whose play
@@ -1017,7 +1207,7 @@ async function onVideoReport(msg, sender) {
     Number.isInteger(reportedFrameId) && reportedFrameId >= 0 ? reportedFrameId : 0;
   let f = videoFinds.get(tabId);
   if (!f) {
-    f = { frames: new Map(), sniffed: [] };
+    f = createVideoFinds();
     videoFinds.set(tabId, f);
   }
   // Bound frame state before accepting reports. Preserve the top frame when
@@ -1030,6 +1220,8 @@ async function onVideoReport(msg, sender) {
       const evictFrame = [...f.frames.keys()].find((id) => id !== 0);
       if (evictFrame !== undefined) {
         f.frames.delete(evictFrame);
+        f.sniffedByFrame.delete(evictFrame);
+        f.kindsByFrame.delete(evictFrame);
         changed = true;
       } else {
         acceptFrame = false;
@@ -1049,6 +1241,10 @@ async function onVideoReport(msg, sender) {
     // reports intentionally replace their frame's prior snapshot.
     if (videos.length > 0 || !hadFrame || msg.replaceFrame === true) {
       f.frames.set(frameId, videos);
+      if (msg.replaceFrame === true) {
+        f.sniffedByFrame.delete(frameId);
+        f.kindsByFrame.delete(frameId);
+      }
       changed = true;
     }
   }

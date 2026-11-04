@@ -159,7 +159,9 @@ function loadBackground(chrome) {
     return { status: 200, ok: true };
   };
   const worker = { exports: {} };
-  new Function("module", BG_SOURCE)(worker);
+  // Bind the mock to this worker. Pending async callbacks from earlier tests
+  // must not start writing into whichever mock happens to be global later.
+  new Function("module", "chrome", BG_SOURCE)(worker, chrome);
   // Test helper: the production handOff wrapper had no callers.
   worker.exports.handOff = async (url, ctx, retryDelays) => {
     const status = await worker.exports.postToGrabWithRetry(url, ctx, retryDelays);
@@ -2106,6 +2108,11 @@ describe("video detection bounds and cookie-priority names", () => {
 });
 
 
+function urlPathKeyForTest(value) {
+  const url = new URL(value);
+  return url.origin + url.pathname;
+}
+
 describe("explicit context-menu page URL", () => {
   test("uses the active tab's full URL when pageUrl contains only the domain root", async () => {
     const chrome = makeChrome();
@@ -2123,15 +2130,99 @@ describe("explicit context-menu page URL", () => {
     );
   });
 
+
+
+  test("a single blob player exposes explicit menu candidates without auto-selecting", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const first = "https://cdn.example.com/a/master.m3u8";
+    const second = "https://cdn.example.com/b/master.m3u8";
+    bg._videoFinds.set(148, {
+      frames: new Map([[0, [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/player"
+      }]]]),
+      sniffedByFrame: new Map([[0, [first, second]]]),
+      kindsByFrame: new Map([[0, new Map([
+        [urlPathKeyForTest(first), "manifest"],
+        [urlPathKeyForTest(second), "manifest"],
+      ])]]),
+      title: "Episode",
+    });
+    assert.deepEqual(await bg.resolvedVideoUrlsForFrame(148, 0), [first, second]);
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(148, 0), null);
+  });
+
+  test("blob right-click uses only the stream observed in its frame", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const targetUrl = "https://cdn.example.com/frame-7/master.m3u8";
+    const unrelatedUrl = "https://cdn.example.com/top/master.m3u8";
+    bg._videoFinds.set(88, {
+      frames: new Map([
+        [0, [{ src: null, blob: true, blobUrl: "blob:https://example.com/top" }]],
+        [7, [{ src: null, blob: true, blobUrl: "blob:https://embed.example.com/player" }]],
+      ]),
+      sniffedByFrame: new Map([[0, [unrelatedUrl]], [7, [targetUrl]]]),
+      kindsByFrame: new Map([
+        [0, new Map([[urlPathKeyForTest(unrelatedUrl), "manifest"]])],
+        [7, new Map([[urlPathKeyForTest(targetUrl), "manifest"]])],
+      ]),
+      title: "Episode",
+    });
+    await chrome._listeners["menus.onClicked"](
+      {
+        menuItemId: "sendToGrab",
+        mediaType: "video",
+        srcUrl: "blob:https://embed.example.com/player",
+        frameId: 7,
+        pageUrl: "https://example.com/",
+      },
+      { id: 88, url: "https://example.com/watch", incognito: false },
+    );
+    assert.ok(chrome._calls.some(([name, url]) => name === "handoff" && url === targetUrl));
+    assert.ok(!chrome._calls.some(([name, url]) => name === "handoff" && url === unrelatedUrl));
+  });
+
+  test("blob right-click does not borrow another player's direct stream", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const manifest = "https://cdn.example.com/master.m3u8";
+    const direct = "https://cdn.example.com/other.mp4";
+    bg._videoFinds.set(89, {
+      frames: new Map([[0, [
+        { src: null, blob: true, blobUrl: "blob:https://example.com/blob-player" },
+        { src: direct, blob: false },
+      ]]]),
+      sniffedByFrame: new Map([[0, [manifest]]]),
+      kindsByFrame: new Map([[0, new Map([[urlPathKeyForTest(manifest), "manifest"]])]]),
+      title: "Two players",
+    });
+    await chrome._listeners["menus.onClicked"](
+      {
+        menuItemId: "sendToGrab",
+        mediaType: "video",
+        srcUrl: "blob:https://example.com/blob-player",
+        frameId: 0,
+        pageUrl: "https://example.com/",
+      },
+      { id: 89, url: "https://example.com/watch", incognito: false },
+    );
+    assert.ok(chrome._calls.some(([name, url]) => name === "handoff" && url === "https://example.com/watch"));
+    assert.ok(!chrome._calls.some(([name, url]) => name === "handoff" && (url === manifest || url === direct)));
+  });
+
   test("a detected video still takes priority over the page URL", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);
     const videoUrl = "https://cdn.example.com/watch/720p.m3u8";
 
     bg._videoFinds.set(77, {
-      frames: new Map([[0, [{ src: videoUrl, blob: false }]]]),
-      sniffed: [],
-      kinds: new Map(),
+      frames: new Map([[0, [{
+        src: null, blob: true,
+        blobUrl: "blob:https://example.com/uuid",
+      }]]]),
+      sniffedByFrame: new Map([[0, [videoUrl]]]),
+      kindsByFrame: new Map([[0, new Map([[videoUrl, "manifest"]])]]),
       title: "Episode",
     });
 
@@ -2140,6 +2231,7 @@ describe("explicit context-menu page URL", () => {
         menuItemId: "sendToGrab",
         mediaType: "video",
         srcUrl: "blob:https://example.com/uuid",
+        frameId: 0,
         pageUrl: "https://example.com/",
       },
       {
@@ -2179,11 +2271,11 @@ describe("review hardening (1.5.8)", () => {
     const ok = "https://a.example.com/ok.m3u8";
     const snap = bg.snapshotVideoFinds({
       frames: new Map([[0, [{ src: huge, blob: false }, { src: ok, blob: false }]]]),
-      sniffed: [huge, ok],
-      kinds: new Map(),
+      sniffedByFrame: new Map([[0, [huge, ok]]]),
+      kindsByFrame: new Map([[0, new Map()]]),
       title: "",
     });
-    assert.deepEqual(snap.sniffed, [ok]);
+    assert.deepEqual(snap.sniffedFrames, [[0, [ok]]]);
     assert.deepEqual(snap.frames, [[0, [{ src: ok, blob: false }]]]);
   });
 
