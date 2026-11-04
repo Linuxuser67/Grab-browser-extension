@@ -713,40 +713,23 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     updateTab(tab && tab.id, magnet);
     return;
   }
-  // Right-clicked on a video element whose srcUrl is unusable (blob:/data:):
-  // try to find the detected video matching the clicked element's src.
-  // If the tab has exactly one detected video, that's the one the user
-  // meant — don't fall back to the generic page URL.
+  // A media context menu can provide blob:/data: instead of a downloadable
+  // URL. Match the exact element and originating frame; never choose the first
+  // stream found elsewhere in the tab.
   let target = candidates.find((u) => toGrabUrl(u));
   if (
     info.mediaType === "video" &&
     tab &&
     Number.isInteger(tab.id) &&
-    target === pageUrl
+    target === pageUrl &&
+    typeof info.srcUrl === "string"
   ) {
-    const detected = mergedVideoUrls(tab.id);
-    // Try to match the clicked video's srcUrl against detected videos.
-    // info.srcUrl is the video element's src (may be blob:).
-    let matched = null;
-    if (info.srcUrl) {
-      const videos = domVideosFor(tab.id);
-      for (const v of videos) {
-        if (v && v.src === info.srcUrl) {
-          matched = v;
-          break;
-        }
-      }
-    }
-    if (matched && toGrabUrl(matched.src) && matched.src !== pageUrl) {
-      // Direct URL: use it.
-      target = matched.src;
-    } else if (detected.length === 1 && toGrabUrl(detected[0])) {
-      // Single detected video: use it.
-      target = detected[0];
-    } else if (matched && matched.blob && detected.length > 0) {
-      // Blob video matched but no direct URL: use first detected (likely paired manifest).
-      const first = detected.find((u) => toGrabUrl(u));
-      if (first) target = first;
+    const matched = findVideoForSource(tab.id, info.srcUrl, info.frameId);
+    if (matched && toGrabUrl(matched.video.src) && matched.video.src !== pageUrl) {
+      target = matched.video.src;
+    } else if (matched && matched.video.blob === true) {
+      const detected = await resolvedBlobVideoUrlForFrame(tab.id, matched.frameId);
+      if (detected && toGrabUrl(detected)) target = detected;
     }
   }
   // Prefer the media/link target, but a blob:/data: media URL can't leave
