@@ -875,8 +875,9 @@ async function resolvedVideoUrlsForFrame(tabId, frameId) {
     if (urls.length > 1) urls = await preferMasterPlaylists(urls);
     return urls;
   }
-  const urls = mergedVideoUrlsForFrame(tabId, frameId);
-  return video && video.src ? (urls.length === 1 ? urls : [video.src]) : [];
+  let urls = mergedVideoUrlsForFrame(tabId, frameId);
+  if (urls.length > 1) urls = await preferMasterPlaylists(urls);
+  return video && video.src ? urls : [];
 }
 
 async function resolvedVideoUrls(tabId) {
@@ -984,6 +985,17 @@ async function doRefreshVideoMenu(tabId) {
   await restoreVideoFinds(tabId);
   const rebuild = async () => {
     // Re-read: the finds may have changed while the remove was in flight.
+    // A refresh queued before the user disabled detection must not publish
+    // stale menu rows or a non-empty badge after the setting changes.
+    if (!videoUi.detectVideosOn) {
+      videoUi.menuUrls = [];
+      chrome.storage.session.set({ menuUrls: [] }).catch(() => {});
+      if (Number.isInteger(tabId) && tabId >= 0 && !warnedTabs.has(tabId)) {
+        const cleared = chrome.action.setBadgeText({ tabId, text: "" });
+        if (cleared && typeof cleared.catch === "function") cleared.catch(() => {});
+      }
+      return;
+    }
     // Played-only menu: the content script reports just videos the user started,
     // and sniffed manifests ride along only then — without a played video
     // the tab shows no video menu at all.
@@ -991,6 +1003,8 @@ async function doRefreshVideoMenu(tabId) {
     // Backstop: collection already filters excluded hosts, but a tab may
     // have navigated there after its videos were recorded.
     if (urls.length > 0 && (await isExcludedTab(tabId))) urls = [];
+    // The setting can change while the manifest checks above are awaiting.
+    if (!videoUi.detectVideosOn) urls = [];
     // One entry per video/stream; its rows go straight into the one submenu
     // (see "Menu rows").
     const finds = videoFinds.get(tabId);
