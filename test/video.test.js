@@ -906,6 +906,29 @@ describe("detection wiring", () => {
     assert.equal(bg.findVideoForSource(147, "blob:https://example.com/ambiguous", 4), null);
   });
 
+
+  test("anonymous blob reports remain separate and cannot be treated as one player", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 149;
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [
+          { src: null, blob: true },
+          { src: null, blob: true },
+        ],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+
+    const videos = bg._videoFinds.get(tabId).frames.get(0);
+    assert.equal(videos.length, 2);
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), null);
+    assert.equal(bg.findVideoForSource(tabId, "blob:https://example.com/unknown", 0), null);
+  });
+
   test("network manifests stay associated with their originating frame", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);

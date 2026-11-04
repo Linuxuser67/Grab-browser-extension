@@ -554,9 +554,9 @@ function normalizeVideoReport(rawVideos, maximum) {
     const src = typeof video.src === "string" && video.src && fitsGrabUrl(video.src) ? video.src : null;
     const blobUrl = validBlobUrl(video.blobUrl);
     if (!src && video.blob !== true) continue;
-    const key = src || blobUrl || "__grab_blob__";
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const key = src || blobUrl;
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
     const item = { src, blob: video.blob === true };
     if (blobUrl) item.blobUrl = blobUrl;
     if (Number.isFinite(video.height) && video.height > 0) item.height = video.height;
@@ -578,9 +578,9 @@ function snapshotVideoFinds(finds) {
       const src = typeof video.src === "string" && video.src && fitsGrabUrl(video.src) ? video.src : null;
       const blobUrl = validBlobUrl(video.blobUrl);
       if (!src && video.blob !== true) continue;
-      const identity = src || blobUrl || "__grab_blob__";
-      if (seen.has(identity)) continue;
-      seen.add(identity);
+      const identity = src || blobUrl;
+      if (identity && seen.has(identity)) continue;
+      if (identity) seen.add(identity);
       const saved = { src, blob: video.blob === true };
       if (blobUrl) saved.blobUrl = blobUrl;
       if (Number.isFinite(video.height) && video.height > 0) saved.height = video.height;
@@ -683,9 +683,9 @@ async function restoreVideoFinds(tabId) {
             const src = typeof video.src === "string" && video.src && fitsGrabUrl(video.src) ? video.src : null;
             const blobUrl = validBlobUrl(video.blobUrl);
             if (!src && video.blob !== true) continue;
-            const identity = src || blobUrl || "__grab_blob__";
-            if (seen.has(identity)) continue;
-            seen.add(identity);
+            const identity = src || blobUrl;
+            if (identity && seen.has(identity)) continue;
+            if (identity) seen.add(identity);
             const item = { src, blob: video.blob === true };
             if (blobUrl) item.blobUrl = blobUrl;
             if (Number.isFinite(video.height) && video.height > 0) item.height = video.height;
