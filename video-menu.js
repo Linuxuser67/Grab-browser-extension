@@ -810,8 +810,7 @@ function mergedVideoUrlsForFrame(tabId, frameId) {
   const sniffed = sniffedUrlsForFrame(finds, frameId);
   const kinds = kindsForFrame(finds, frameId);
   if (video && typeof video.src === "string" && video.src) {
-    const merged = mergeVideoFinds([video], sniffed, kinds);
-    return merged.length === 1 ? merged : [video.src];
+    return mergeVideoFinds([video], sniffed, kinds);
   }
   if (video && video.blob === true) return mergeVideoFinds([], sniffed, kinds);
   return [];
@@ -825,14 +824,27 @@ function findVideoForSource(tabId, srcUrl, frameId) {
     ? [[frameId, finds.frames.get(frameId) || []]]
     : [...finds.frames.entries()];
   const matches = [];
+  const scopedVideos = [];
   for (const [id, videos] of frameEntries) {
     for (const video of videos || []) {
-      if (video && (video.src === srcUrl || video.blobUrl === srcUrl)) {
+      if (!video) continue;
+      scopedVideos.push({ frameId: id, video });
+      if (video.src === srcUrl || video.blobUrl === srcUrl) {
         matches.push({ frameId: id, video });
       }
     }
   }
-  return matches.length === 1 ? matches[0] : null;
+  if (matches.length === 1) return matches[0];
+  if (matches.length !== 0) return null;
+
+  // Older content reports and some browser menu events omit the blob URL
+  // identity. A unique video in the source frame remains an unambiguous
+  // fallback; multiple players always require an exact element match.
+  if ((srcUrl.startsWith("blob:") || srcUrl.startsWith("data:")) &&
+      scopedVideos.length === 1) {
+    return scopedVideos[0];
+  }
+  return null;
 }
 
 /// A blob may resolve to a manifest only if it is the sole active video in

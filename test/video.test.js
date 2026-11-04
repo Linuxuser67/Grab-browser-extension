@@ -876,6 +876,34 @@ describe("detection wiring", () => {
   });
 
 
+
+  test("legacy blob click fallback requires one video in the source frame", () => {
+    const bg = loadBackground(makeChrome());
+    bg._videoFinds.set(146, {
+      frames: new Map([[4, [
+        { src: "https://cdn.example.com/only.mp4", blob: false },
+      ]]]),
+      sniffedByFrame: new Map(),
+      kindsByFrame: new Map(),
+      title: "",
+    });
+    assert.equal(
+      bg.findVideoForSource(146, "blob:https://example.com/legacy", 4).video.src,
+      "https://cdn.example.com/only.mp4",
+    );
+
+    bg._videoFinds.set(147, {
+      frames: new Map([[4, [
+        { src: "https://cdn.example.com/one.mp4", blob: false },
+        { src: "https://cdn.example.com/two.mp4", blob: false },
+      ]]]),
+      sniffedByFrame: new Map(),
+      kindsByFrame: new Map(),
+      title: "",
+    });
+    assert.equal(bg.findVideoForSource(147, "blob:https://example.com/ambiguous", 4), null);
+  });
+
   test("network manifests stay associated with their originating frame", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);
