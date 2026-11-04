@@ -1052,7 +1052,10 @@ describe("detection wiring", () => {
     );
     assert.equal(
       chrome._calls.some(([n, arg]) => n === "action.setBadgeText" && arg.text !== ""),
-      false
+      false,
+      "unexpected non-empty badge calls: " + JSON.stringify(
+        chrome._calls.filter(([n, arg]) => n === "action.setBadgeText" && arg.text !== "")
+      )
     );
   });
 
