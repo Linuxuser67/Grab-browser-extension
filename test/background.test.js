@@ -1798,6 +1798,27 @@ describe("HTTP handoff to Grab", () => {
     );
   });
 
+  test("cookie forwarding requires page access as well as the cookies permission", async () => {
+    mockPairedGrab();
+    await pair();
+    const queries = [];
+    chrome.permissions = {
+      contains: async (query) => {
+        queries.push(query);
+        return false;
+      },
+    };
+    const ctx = {};
+    await bg.postToGrab("https://example.com/f.zip", ctx);
+    // Both are optional now: cookies.getAll only works for sites the extension
+    // can access, so the check covers the pair, not the cookies permission alone.
+    assert.deepEqual(queries[0], {
+      permissions: ["cookies"],
+      origins: ["http://*/*", "https://*/*"],
+    });
+    assert.match(ctx.cookieWarning, /Cookie access is not granted/);
+  });
+
   test("cold-start cookie read failures are surfaced instead of silently skipping the wake", async () => {
     await pair();
     chrome.permissions = { contains: async () => true };

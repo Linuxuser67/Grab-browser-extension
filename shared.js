@@ -14,6 +14,12 @@ const SHARED_DEFAULTS = {
   minSizeMB: 0,
 };
 
+/// Page access is an optional permission: it is requested when the user turns
+/// on video detection or pairs for cookie forwarding, never at install time.
+/// Together with the optional "webRequest" (video detection) and "cookies"
+/// (pairing) permissions it is the only broad access the extension asks for.
+const SHARED_PAGE_ORIGINS = ["http://*/*", "https://*/*"];
+
 /// 64 hex chars (a SHA-256, shown by Grab when pairing).
 const SHARED_PAIRING_CODE_RE = /^[0-9a-f]{64}$/;
 
@@ -50,5 +56,5 @@ function normalizePairingCode(raw) {
 
 // Export for the test hook (Node) without breaking browser globals.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { SHARED_DEFAULTS, SHARED_PAIRING_CODE_RE, SHARED_EXCLUDED_HOSTS, sharedHostExcluded, normalizePairingCode };
+  module.exports = { SHARED_DEFAULTS, SHARED_PAGE_ORIGINS, SHARED_PAIRING_CODE_RE, SHARED_EXCLUDED_HOSTS, sharedHostExcluded, normalizePairingCode };
 }

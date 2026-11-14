@@ -40,6 +40,7 @@ const GRAB_SCHEME = "grab://";
 // startTime of the very download that woke it.
 chrome.runtime.onStartup.addListener(() => {
   chrome.storage.session.set({ browserStartTime: Date.now() });
+  syncVideoScript();
 });
 
 // Shared defaults live in shared.js (importScripts'd above).
@@ -98,8 +99,52 @@ const fitsGrabUrl = (u) =>
   typeof u === "string" && new TextEncoder().encode(u).length <= MAX_GRAB_URL_BYTES;
 
 /// Tabs showing the "unverified Grab" warning badge. Warned tabs keep their
-/// "!" until Grab verifies successfully.
-const warnedTabs = new Set();
+/// "!" until Grab verifies successfully. The badge outlives the worker, so the
+/// set is written through to session storage and rebuilt on startup; without
+/// that, a restarted worker forgets which tabs are warned and the next
+/// handoff overwrites the warning. Session storage clears with the browser,
+/// matching tab-id lifetime.
+///
+/// Other in-memory coordination (wakeInFlight, deciding, rescanTimers) is
+/// intentionally not persisted: it only guards work inside one worker
+/// lifetime, and a restart abandons that work anyway.
+const WARNED_TABS_KEY = "warnedTabs";
+class PersistedTabSet extends Set {
+  add(tabId) {
+    const had = this.has(tabId);
+    super.add(tabId);
+    if (!had) this._save();
+    return this;
+  }
+  delete(tabId) {
+    const removed = super.delete(tabId);
+    if (removed) this._save();
+    return removed;
+  }
+  _save() {
+    try {
+      const saved = chrome.storage.session.set({ [WARNED_TABS_KEY]: [...this] });
+      if (saved && typeof saved.catch === "function") saved.catch(() => {});
+    } catch {
+      // Storage unavailable: the in-memory set still works for this lifetime.
+    }
+  }
+  async restore() {
+    try {
+      const stored = await chrome.storage.session.get(WARNED_TABS_KEY);
+      const ids = stored && stored[WARNED_TABS_KEY];
+      if (Array.isArray(ids)) {
+        // Union, not replace: a warning added while this read was in flight
+        // must survive it. Calls super.add: hydration needs no write-back.
+        for (const id of ids) if (Number.isInteger(id)) super.add(id);
+      }
+    } catch {
+      // Nothing to restore.
+    }
+  }
+}
+const warnedTabs = new PersistedTabSet();
+const warnedTabsReady = warnedTabs.restore();
 
 /// True when the URL's file extension is on the user's skip list.
 function isSkipped(url, skipTypes) {
@@ -146,6 +191,13 @@ if (typeof module !== "undefined" && module.exports) {
     classifyStream,
     videoName,
     menuRowTitle,
+    withWorkerKeepAlive,
+    KEEPALIVE_INTERVAL_MS,
+    registerSniffer,
+    syncVideoScript,
+    hasPageAccess,
+    VIDEO_SCRIPT_ID,
+    warnedTabsReady,
     mergeVideoFinds,
     mergedVideoUrlsForFrame,
     findVideoForSource,

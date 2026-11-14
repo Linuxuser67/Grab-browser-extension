@@ -123,6 +123,14 @@
         width: 70px;
         margin-top: 0;
       }
+      #detectVideosNote {
+        margin: 0;
+        font-size: 12px;
+        opacity: 0.8;
+      }
+      #detectVideosNote:empty {
+        display: none;
+      }
       #saved {
         color: var(--saved);
         opacity: 0;
@@ -227,6 +235,8 @@
       <input type="checkbox" id="detectVideos" />
       <span>Detect videos playing in tabs</span>
     </label>
+
+    <p id="detectVideosNote" role="status" aria-live="polite"></p>
 
     <p id="saved" role="status" aria-live="polite"></p>
 

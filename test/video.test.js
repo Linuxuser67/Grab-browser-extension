@@ -1133,6 +1133,10 @@ describe("detection wiring", () => {
 });
 
 describe("manifest permission mirror", () => {
+  const fs = require("node:fs");
+  const readManifest = () =>
+    JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest.json"), "utf8"));
+
   test("worker starts using only permitted chrome namespaces", () => {
     // Regression: 1.0.5 called chrome.webNavigation.onCommitted at the top
     // level without declaring the permission. In a real browser that namespace
@@ -1142,10 +1146,13 @@ describe("manifest permission mirror", () => {
     // any top-level chrome namespace the manifest doesn't grant (plus the
     // namespaces Chrome exposes without a permission), so the same class of
     // bug fails here instead of in the user's browser.
-    const fs = require("node:fs");
-    const manifest = JSON.parse(
-      fs.readFileSync(path.join(__dirname, "..", "manifest.json"), "utf8")
-    );
+    //
+    // Optional permissions (cookies, webRequest) are not granted at startup:
+    // the Proxy answers undefined for them, exactly like a fresh install, so
+    // this also proves the worker starts and registers its listeners without
+    // them and only touches them behind an existence check.
+    const manifest = readManifest();
+    const optional = new Set(manifest.optional_permissions);
     const allowed = new Set([
       ...manifest.permissions,
       // Exposed without a permission: runtime/action always; tabs as a
@@ -1155,6 +1162,8 @@ describe("manifest permission mirror", () => {
       "tabs",
       "action",
       "commands",
+      // permissions: the Permissions API needs no manifest entry.
+      "permissions",
       // windows: no manifest permission needed (only used for focus events,
       // behind an existence check).
       "windows",
@@ -1162,13 +1171,33 @@ describe("manifest permission mirror", () => {
     const chrome = makeChrome();
     const guarded = new Proxy(chrome, {
       get(target, prop, receiver) {
-        if (typeof prop === "string" && !prop.startsWith("_") && !allowed.has(prop)) {
-          throw new Error(`chrome.${prop} used but not in manifest permissions`);
+        if (typeof prop === "string" && !prop.startsWith("_")) {
+          if (optional.has(prop)) return undefined;
+          if (!allowed.has(prop)) {
+            throw new Error(`chrome.${prop} used but not in manifest permissions`);
+          }
         }
         return Reflect.get(target, prop, receiver);
       },
     });
     assert.doesNotThrow(() => loadBackground(guarded));
+  });
+
+  test("manifest asks for no page access at install time", () => {
+    const manifest = readManifest();
+    // Broad access is optional and requested when the user opts in.
+    assert.deepEqual(manifest.host_permissions, ["http://127.0.0.1/*"]);
+    assert.deepEqual(manifest.optional_host_permissions, ["http://*/*", "https://*/*"]);
+    assert.ok(manifest.optional_permissions.includes("webRequest"));
+    assert.ok(manifest.optional_permissions.includes("cookies"));
+    assert.equal(manifest.permissions.includes("webRequest"), false);
+    assert.equal(manifest.permissions.includes("cookies"), false);
+    // A static content script on every site would be an install-time grant.
+    assert.equal(manifest.content_scripts, undefined);
+    // The detector is registered dynamically, which needs this permission.
+    assert.ok(manifest.permissions.includes("scripting"));
+    // activeTab keeps Alt+G and the context menu working without page access.
+    assert.ok(manifest.permissions.includes("activeTab"));
   });
 });
 
@@ -1718,5 +1747,211 @@ describe("HLS master playlist filtering", () => {
     assert.equal(await bg.isMasterPlaylist("http://127.0.0.1/master.m3u8"), null);
     assert.equal(await bg.isMasterPlaylist("http://localhost/master.m3u8"), null);
     assert.equal(await bg.isMasterPlaylist("https://user:pass@example.com/master.m3u8"), null);
+  });
+});
+
+describe("opt-in video access", () => {
+  const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+
+  /// Permissions + scripting mocks. `state.granted` is the page-access answer.
+  function withPermissionApis(chrome, granted) {
+    const state = { granted, registered: [], registerCalls: 0, unregisterCalls: 0 };
+    chrome.permissions = {
+      contains: async () => state.granted,
+      onAdded: { addListener: (fn) => { state.onAdded = fn; } },
+      onRemoved: { addListener: (fn) => { state.onRemoved = fn; } },
+    };
+    chrome.scripting = {
+      getRegisteredContentScripts: async ({ ids }) =>
+        state.registered.filter((s) => ids.includes(s.id)),
+      registerContentScripts: async (scripts) => {
+        state.registerCalls += 1;
+        await tick(5); // A real call is async: lets concurrent syncs interleave.
+        for (const script of scripts) {
+          if (state.registered.some((r) => r.id === script.id)) {
+            throw new Error("Duplicate script ID: " + script.id);
+          }
+          state.registered.push(script);
+        }
+      },
+      unregisterContentScripts: async ({ ids }) => {
+        state.unregisterCalls += 1;
+        state.registered = state.registered.filter((s) => !ids.includes(s.id));
+      },
+    };
+    return state;
+  }
+
+  test("the detector is registered only with page access and detection on", async () => {
+    const shared = {};
+    const chrome = makeChrome(shared);
+    const state = withPermissionApis(chrome, false);
+    const bg = loadBackground(chrome);
+
+    await bg.syncVideoScript();
+    assert.equal(state.registered.length, 0, "no page access: nothing registered");
+
+    state.granted = true;
+    await bg.syncVideoScript();
+    assert.equal(state.registered.length, 1);
+    const [script] = state.registered;
+    assert.equal(script.id, bg.VIDEO_SCRIPT_ID);
+    assert.deepEqual(script.matches, ["http://*/*", "https://*/*"]);
+    assert.deepEqual(script.js, ["shared.js", "content.js"]);
+    assert.equal(script.allFrames, true);
+
+    shared.syncSettings.detectVideos = false;
+    await bg.syncVideoScript();
+    assert.equal(state.registered.length, 0, "detection off: unregistered");
+
+    shared.syncSettings.detectVideos = true;
+    state.granted = false;
+    await bg.syncVideoScript();
+    assert.equal(state.registered.length, 0, "page access revoked: stays unregistered");
+  });
+
+  test("concurrent triggers register the script once", async () => {
+    const chrome = makeChrome();
+    const state = withPermissionApis(chrome, true);
+    const bg = loadBackground(chrome);
+
+    await Promise.all([bg.syncVideoScript(), bg.syncVideoScript(), bg.syncVideoScript()]);
+    assert.equal(state.registerCalls, 1);
+    assert.equal(state.registered.length, 1);
+  });
+
+  test("without the scripting namespace sync does nothing and does not throw", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    const bg = loadBackground(chrome);
+    await assert.doesNotReject(() => bg.syncVideoScript());
+  });
+
+  test("the worker starts without webRequest and registers the sniffer once it is granted", () => {
+    const chrome = makeChrome();
+    const state = withPermissionApis(chrome, false);
+    delete chrome.webRequest; // A fresh install: optional permission not granted.
+    const bg = loadBackground(chrome);
+    assert.equal(bg.registerSniffer(), false, "no namespace, nothing to register");
+
+    const event = {
+      count: 0,
+      addListener(fn, filter, extra) {
+        this.count += 1;
+        this.fn = fn;
+        this.filter = filter;
+        this.extra = extra;
+      },
+      hasListener(fn) {
+        return this.fn === fn;
+      },
+    };
+    chrome.webRequest = { onResponseStarted: event }; // The user granted it.
+    state.onAdded({ permissions: ["webRequest"] });
+    assert.equal(event.count, 1);
+    assert.deepEqual(event.filter.types, ["media", "xmlhttprequest", "other"]);
+    assert.deepEqual(event.extra, ["responseHeaders"]);
+
+    state.onAdded({ origins: ["https://*/*"] }); // Another grant must not stack a duplicate.
+    assert.equal(event.count, 1);
+  });
+});
+
+describe("menu row titles", () => {
+  test("ampersands and percent signs are escaped so page titles display literally", () => {
+    const bg = loadBackground(makeChrome());
+    // "&" would otherwise be swallowed as an access-key marker, "%s" replaced.
+    assert.equal(bg.menuRowTitle("Tom & Jerry", ""), "Tom && Jerry");
+    assert.equal(bg.menuRowTitle("100% pure", "720p"), "100%% pure • 720p");
+    assert.equal(bg.menuRowTitle("Q&A: 50%s off", "1080p"), "Q&&A: 50%%s off • 1080p");
+  });
+});
+
+describe("worker keep-alive during long handoff waits", () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  test("pings an extension API while the task runs and stops afterwards", async () => {
+    const chrome = makeChrome();
+    let pings = 0;
+    chrome.runtime.getPlatformInfo = async () => {
+      pings += 1;
+      return {};
+    };
+    const bg = loadBackground(chrome);
+
+    const result = await bg.withWorkerKeepAlive(async () => {
+      await sleep(80);
+      return "done";
+    }, 10);
+    assert.equal(result, "done");
+    assert.ok(pings >= 3, `expected repeated pings, got ${pings}`);
+
+    const after = pings;
+    await sleep(50);
+    assert.equal(pings, after, "the timer is cleared when the task ends");
+  });
+
+  test("stops pinging when the task rejects", async () => {
+    const chrome = makeChrome();
+    let pings = 0;
+    chrome.runtime.getPlatformInfo = async () => {
+      pings += 1;
+      return {};
+    };
+    const bg = loadBackground(chrome);
+
+    await assert.rejects(
+      bg.withWorkerKeepAlive(async () => {
+        await sleep(30);
+        throw new Error("boom");
+      }, 10),
+      /boom/,
+    );
+    const after = pings;
+    await sleep(50);
+    assert.equal(pings, after);
+  });
+
+  test("runs the task unchanged where getPlatformInfo does not exist", async () => {
+    const bg = loadBackground(makeChrome());
+    assert.equal(await bg.withWorkerKeepAlive(async () => 42, 10), 42);
+  });
+
+  test("the keep-alive interval stays under Chrome's 30 s idle limit", () => {
+    const bg = loadBackground(makeChrome());
+    assert.ok(bg.KEEPALIVE_INTERVAL_MS < 30_000);
+  });
+});
+
+describe("warned tabs survive a worker restart", () => {
+  const tick = () => new Promise((r) => setTimeout(r, 30));
+
+  test("additions and removals are written through and restored", async () => {
+    const shared = {};
+    const bg1 = loadBackground(makeChrome(shared));
+    await bg1.warnedTabsReady;
+    bg1._warnedTabs.add(7);
+    bg1._warnedTabs.add(9);
+    await tick();
+    assert.deepEqual(shared.session.get("warnedTabs"), [7, 9]);
+
+    // A new worker instance over the same session storage.
+    const bg2 = loadBackground(makeChrome(shared));
+    await bg2.warnedTabsReady;
+    assert.equal(bg2._warnedTabs.has(7), true);
+    assert.equal(bg2._warnedTabs.has(9), true);
+
+    bg2._warnedTabs.delete(7);
+    await tick();
+    assert.deepEqual(shared.session.get("warnedTabs"), [9]);
+  });
+
+  test("ignores corrupt stored data", async () => {
+    const shared = {};
+    makeChrome(shared);
+    shared.session.set("warnedTabs", ["x", 3, null, { a: 1 }]);
+    const bg = loadBackground(makeChrome(shared));
+    await bg.warnedTabsReady;
+    assert.deepEqual([...bg._warnedTabs], [3]);
   });
 });

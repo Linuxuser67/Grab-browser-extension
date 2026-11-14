@@ -1,7 +1,7 @@
 // Popup: reflects chrome.storage.sync, saves on change.
 // bindSettingsForm comes from settings.js.
 
-bindSettingsForm(document);
+bindSettingsForm(document, { deferPermissionPrompt: true });
 
 const STATUS_REFRESH_INTERVAL_MS = 5_000;
 const STATUS_MESSAGE_TIMEOUT_MS = 4_000;
