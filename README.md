@@ -21,10 +21,11 @@ _Grab 5.7.0 or newer required for automatic interception (it uses Grab's local H
    - Firefox: open `about:debugging#/runtime/this-firefox`, **Load Temporary
      Add-on** → select the `manifest.json` inside the extracted folder.
 
-No native host setup needed. Automatic interception posts each URL to Grab's
-local endpoint (`http://127.0.0.1:9412/add`); `Alt+G` and the context menu hand
-`grab://` URLs to the browser, which routes them to Grab via the OS scheme
-handler.
+No native host setup needed. Everything is handed to Grab through its local
+endpoint (`http://127.0.0.1:9412/add`): automatic interception, `Alt+G`, the
+context menu and the video menu. If Grab isn't running, `Alt+G` and the
+context menu fall back to a `grab://` URL, which the browser routes to Grab via
+the OS scheme handler (that route cannot carry cookies).
 
 ### Developer mode (from source)
 
@@ -47,7 +48,8 @@ Grab must be installed with its desktop entry (it registers as the
 - **`Alt+G`**: sends the current tab to Grab (video pages open
   the New Download card, other links download normally).
 - **Right-click → Download with Grab**: on links, images, video, audio, and pages.
-- **Video detection** (on by default): videos you've started playing that
+- **Video detection** (opt-in: turning it on asks for access to web pages, see
+  [Permissions](#permissions)): videos you've started playing that
   are currently playing — including streams behind `blob:` players — appear under right-click →
   **Videos detected by Grab**, with a count badge on the toolbar button.
   Picking one opens it in Grab, which probes it like any other link.
@@ -91,8 +93,67 @@ stops working immediately.
 
 ## Permissions
 
-`downloads` (cancel intercepted downloads), `contextMenus`, `storage`
-(settings), `alarms` (size-wait deadlines that survive worker restarts),
-`activeTab` (read the current tab's URL for `Alt+G`), `webRequest` (spot
-video stream manifests), host access to http/https pages (video detection;
-also lets the background script POST to Grab's loopback endpoint).
+Nothing broad is granted at install time.
+
+Always on:
+
+| Permission | Why |
+|---|---|
+| `downloads` | cancel downloads Grab has taken over |
+| `contextMenus` | the "Download with Grab" and detected-video items |
+| `storage` | settings, the pairing code (local only), session state |
+| `alarms` | size-wait deadlines that survive worker restarts |
+| `activeTab` | read the current tab's URL when you press `Alt+G` or use the context menu, without access to every page |
+| `scripting` | register the video detector only while detection is on |
+| `http://127.0.0.1/*` | POST to Grab's loopback endpoint |
+
+Optional, requested on your click and dropped when the feature is turned off:
+
+| Permission | Requested when | Used for |
+|---|---|---|
+| access to `http://*/*`, `https://*/*` | you turn on video detection, or pair | the detector content script; reading a site's cookies |
+| `webRequest` | you turn on video detection | spotting stream manifests behind `blob:` players |
+| `cookies` | you pair with Grab | forwarding the site's cookies to a verified Grab |
+
+Without them, `Alt+G`, the context menu and (once paired) automatic
+interception still work; only video detection and cookie forwarding are off.
+The browser's extension toolbar popup cannot show a permission prompt, so
+turning video detection on from the popup opens the Options page to grant it.
+Open tabs need a reload after detection is turned on.
+
+## Security model
+
+The extension and Grab talk over unencrypted HTTP on the loopback interface.
+
+- Grab rejects requests whose `Host` is not its loopback name or whose
+  `Origin` is not a browser extension (DNS-rebinding and web-page requests).
+- Pairing: before sending cookies the extension makes Grab answer a fresh
+  nonce with an HMAC of the shared secret, so a program that grabbed the port
+  first cannot receive them. Every paired POST body is signed and carries a
+  timestamp and one-time nonce; Grab accepts a nonce once, inside a two-minute
+  window, so a captured request cannot be replayed.
+- Unpaired, URLs are still handed off but without cookies, and automatic
+  interception stays off.
+- Incognito cookies are never forwarded; partitioned cookies are skipped.
+
+Not covered: the `/hello` check and the following POST are separate requests,
+so they are not bound to one connection, and the body is signed but not
+encrypted. A local process that can both observe loopback traffic and bind the
+port after Grab verified is outside this model (it normally needs the same
+privileges that could read the cookie store directly). Binding the two
+requests together would need a change in Grab as well as here.
+
+## Known limitations of the handoff
+
+- Grab holds `?confirm=1` requests until you answer its dialog (up to 120 s).
+  Chrome documents that it stops an extension service worker when a `fetch()`
+  response takes more than 30 seconds to arrive. The extension pings an
+  extension API during the wait, which resets the 30 s idle timer, but it is
+  not verified that this also defers the fetch rule. If Chrome does stop the
+  worker, the browser's own download is left untouched (it is cancelled only
+  after Grab answers), so the cost is a possible duplicate, not a lost file.
+  Removing the limit needs a protocol that answers before the user does and
+  lets the extension poll for the result; that is a Grab change.
+- Grab's port (9412) is fixed in Grab, so the extension has no setting for it.
+  When another program answers on the port, a paired extension reports
+  "Running · Unverified" and sends it nothing.
