@@ -151,7 +151,13 @@ function directMenuRow(url, height) {
 /// Text of one menu row. "%" is doubled: menu titles treat "%s" as the
 /// selected text.
 function menuRowTitle(name, quality) {
-  return (quality ? `${name} • ${quality}` : name).replace(/%/g, "%%");
+  // Menu titles give two characters special meaning: "%s" is replaced with the
+  // selection and "&" marks the next character as an access key (and is not
+  // shown). Page-controlled names contain both ("Tom & Jerry", "100%"), so
+  // double each to display them literally.
+  return (quality ? `${name} • ${quality}` : name)
+    .replace(/&/g, "&&")
+    .replace(/%/g, "%%");
 }
 
 /// "hls", "dash" or null (a direct file), by URL extension only.
@@ -1155,39 +1161,127 @@ function onVideoEvent(tabId) {
   });
 }
 
-chrome.webRequest.onResponseStarted.addListener(
-  async (details) => {
-    if (!videoUi.detectVideosOn) return;
-    if (details.tabId == null || details.tabId < 0) return;
-    // Classify first: it is synchronous and rejects nearly every response,
-    // so the tabs.get round trip below only runs for real stream hits.
-    const kind = classifyStream(
-      details.url,
-      sniffedHeader(details.responseHeaders, "content-type"),
-    );
-    if (kind === null) return;
-    // Skip yt-dlp-exclusive hosts at collection time: their players use
-    // auth-gated URLs, so sniffed manifests are unusable noise. Filtering
-    // here (not just at menu-build) keeps videoFinds clean.
-    if (await isExcludedTab(details.tabId)) return;
-    await restoreVideoFinds(details.tabId);
-    noteSniffed(details.tabId, details.frameId, details.url, kind);
-    await persistVideoFinds(details.tabId);
-    onVideoEvent(details.tabId);
-    // A sniffed manifest may belong to a shadow-root player whose play
-    // events never reach the document. Nudge the tab to re-sweep (wiring
-    // shadow roots); debounced, with one retry in case the player mounts
-    // just after the sniff.
-    requestRescan(details.tabId);
-  },
-  {
-    urls: ["http://*/*", "https://*/*"],
-    // Players fetch streams as media or XHR/fetch requests; skip images,
-    // scripts, stylesheets and documents.
-    types: ["media", "xmlhttprequest", "other"],
-  },
-  ["responseHeaders"],
-);
+/// Sniff stream manifests and media responses. Registered by registerSniffer().
+async function onSniffedResponse(details) {
+  if (!videoUi.detectVideosOn) return;
+  if (details.tabId == null || details.tabId < 0) return;
+  // Classify first: it is synchronous and rejects nearly every response,
+  // so the tabs.get round trip below only runs for real stream hits.
+  const kind = classifyStream(
+    details.url,
+    sniffedHeader(details.responseHeaders, "content-type"),
+  );
+  if (kind === null) return;
+  // Skip yt-dlp-exclusive hosts at collection time: their players use
+  // auth-gated URLs, so sniffed manifests are unusable noise. Filtering
+  // here (not just at menu-build) keeps videoFinds clean.
+  if (await isExcludedTab(details.tabId)) return;
+  await restoreVideoFinds(details.tabId);
+  noteSniffed(details.tabId, details.frameId, details.url, kind);
+  await persistVideoFinds(details.tabId);
+  onVideoEvent(details.tabId);
+  // A sniffed manifest may belong to a shadow-root player whose play
+  // events never reach the document. Nudge the tab to re-sweep (wiring
+  // shadow roots); debounced, with one retry in case the player mounts
+  // just after the sniff.
+  requestRescan(details.tabId);
+}
+
+/// "webRequest" is an optional permission (granted with video detection), so
+/// the chrome.webRequest namespace does not exist until the user opts in. With
+/// the permission absent the worker is never woken for page traffic at all.
+/// Called at worker startup (the listener must exist synchronously to wake the
+/// worker) and again when the permission is granted at runtime.
+function registerSniffer() {
+  const event = chrome.webRequest && chrome.webRequest.onResponseStarted;
+  if (!event) return false;
+  if (typeof event.hasListener === "function" && event.hasListener(onSniffedResponse)) {
+    return true;
+  }
+  event.addListener(
+    onSniffedResponse,
+    {
+      urls: ["http://*/*", "https://*/*"],
+      // Players fetch streams as media or XHR/fetch requests; skip images,
+      // scripts, stylesheets and documents.
+      types: ["media", "xmlhttprequest", "other"],
+    },
+    ["responseHeaders"],
+  );
+  return true;
+}
+
+registerSniffer();
+
+// --- Video detector content script ------------------------------------------
+//
+// Not declared in the manifest: a static content_scripts entry for every site
+// is a permanent, install-time "read all your data" grant. The script is
+// registered here only while video detection is on AND the user granted page
+// access, and unregistered when either goes away. Runs serialized so two
+// triggers cannot both see "not registered" and double-register.
+
+const VIDEO_SCRIPT_ID = "grab-video-detector";
+let videoScriptSync = Promise.resolve();
+
+async function hasPageAccess() {
+  try {
+    return await chrome.permissions.contains({ origins: SHARED_PAGE_ORIGINS });
+  } catch {
+    return false;
+  }
+}
+
+async function syncVideoScriptNow() {
+  const scripting = chrome.scripting;
+  if (!scripting || typeof scripting.registerContentScripts !== "function") return;
+  const settings = await getSettings();
+  const wanted = settings.detectVideos !== false && (await hasPageAccess());
+  let registered = false;
+  try {
+    const found = await scripting.getRegisteredContentScripts({ ids: [VIDEO_SCRIPT_ID] });
+    registered = Array.isArray(found) && found.length > 0;
+  } catch {
+    // Treat an unreadable registry as "not registered"; a duplicate-id error
+    // below is caught as well.
+  }
+  try {
+    if (wanted && !registered) {
+      await scripting.registerContentScripts([
+        {
+          id: VIDEO_SCRIPT_ID,
+          matches: SHARED_PAGE_ORIGINS,
+          js: ["shared.js", "content.js"],
+          allFrames: true,
+          runAt: "document_idle",
+          persistAcrossSessions: true,
+        },
+      ]);
+    } else if (!wanted && registered) {
+      await scripting.unregisterContentScripts({ ids: [VIDEO_SCRIPT_ID] });
+    }
+  } catch {
+    // Registration can fail when the permission was revoked mid-call; the next
+    // permissions/settings event runs this again.
+  }
+}
+
+function syncVideoScript() {
+  videoScriptSync = videoScriptSync.then(syncVideoScriptNow, syncVideoScriptNow);
+  return videoScriptSync;
+}
+
+// Also run from the single onInstalled / onStartup / storage.onChanged
+// listeners in handoff.js and background.js.
+if (chrome.permissions && chrome.permissions.onAdded) {
+  chrome.permissions.onAdded.addListener(() => {
+    registerSniffer();
+    syncVideoScript();
+  });
+}
+if (chrome.permissions && chrome.permissions.onRemoved) {
+  chrome.permissions.onRemoved.addListener(() => { syncVideoScript(); });
+}
 
 /// Content-script video reports. Dispatched from the single runtime listener below.
 async function onVideoReport(msg, sender) {

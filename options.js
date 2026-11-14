@@ -1,5 +1,6 @@
 // Options page: reflects chrome.storage.sync and saves on change.
-// bindSettingsForm, loadPairingCode, savePairingCode come from settings.js.
+// bindSettingsForm, loadPairingCode, savePairingCode, releaseUnusedPermissions
+// come from settings.js; SHARED_PAGE_ORIGINS from shared.js.
 
 bindSettingsForm(document);
 
@@ -25,9 +26,14 @@ function isCurrentPairingOperation(revision, code) {
   );
 }
 
+/// Cookie forwarding needs the optional "cookies" permission and access to web
+/// pages (cookies.getAll is limited to sites the extension can access).
 async function hasCookiePermission() {
   try {
-    return await chrome.permissions.contains({ permissions: ["cookies"] });
+    return await chrome.permissions.contains({
+      permissions: ["cookies"],
+      origins: SHARED_PAGE_ORIGINS,
+    });
   } catch {
     // The permission state is unknown, not necessarily denied.
     return null;
@@ -126,12 +132,9 @@ async function savePairing() {
   if (code === "") {
     await savePairingCode("");
     // Always revoke cookie access when unpairing, even if the input is edited
-    // again while the storage operation is in flight.
-    try {
-      await chrome.permissions.remove({ permissions: ["cookies"] });
-    } catch {
-      // Permissions API unavailable, or already removed.
-    }
+    // again while the storage operation is in flight. Page access goes too
+    // unless video detection still uses it.
+    await releaseUnusedPermissions();
     if (isCurrentPairingOperation(revision, "")) {
       pairingEl.value = "";
       showPairingStatus("Not paired: links only");
@@ -153,9 +156,13 @@ async function savePairing() {
   showPairingStatus("Saved; verifying with Grab…");
 
   // The click is the user gesture the browser requires to grant optional
-  // cookie access. Verification is separate from this permission decision.
+  // cookie access, which also needs access to web pages. Verification is
+  // separate from this permission decision.
   try {
-    await chrome.permissions.request({ permissions: ["cookies"] });
+    await chrome.permissions.request({
+      permissions: ["cookies"],
+      origins: SHARED_PAGE_ORIGINS,
+    });
   } catch {
     // The code can still be verified; handoffs remain URL-only without cookies.
   }

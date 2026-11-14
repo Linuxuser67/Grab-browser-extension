@@ -118,6 +118,35 @@ async function fetchWithTimeout(url, opts, ms) {
   }
 }
 
+/// Interval for keeping the MV3 worker awake during a long handoff wait.
+const KEEPALIVE_INTERVAL_MS = 20_000;
+
+/// Run `task` while pinging an extension API on a timer. Chrome stops an idle
+/// MV3 worker after 30 s, and extension API calls reset that idle timer; the
+/// confirm wait below can last two minutes while the user reads Grab's dialog.
+/// Best effort only: Chrome's documentation also lists "a fetch() response
+/// takes more than 30 seconds to arrive" as a termination condition, and
+/// whether pings defer that one is unverified. If the worker is stopped
+/// anyway, the browser download is simply left alone (it is cancelled only
+/// after Grab answers 200). A protocol that returns before the user answers
+/// would remove the limit; see README "Known limitations".
+async function withWorkerKeepAlive(task, intervalMs = KEEPALIVE_INTERVAL_MS) {
+  const ping = () => {
+    try {
+      const result = chrome.runtime.getPlatformInfo?.();
+      if (result && typeof result.catch === "function") result.catch(() => {});
+    } catch {
+      // Not available here; the wait just runs without pings.
+    }
+  };
+  const timer = setInterval(ping, intervalMs);
+  try {
+    return await task();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 /// GET a JSON body under one deadline. The controller covers the body read:
 /// a listener that sends headers and then stalls must not hold a handoff open.
 /// A malformed body yields null, which callers treat as unverified.
@@ -220,12 +249,17 @@ function fitHandoffBody(url, cookies, userAgent, requestMetadata) {
   return fit(body, retained.size);
 }
 
-/// The cookies permission is optional and can be declined or revoked. When the
-/// Permissions API is unavailable, assume it is granted and let the read decide.
+/// Reading a site's cookies needs the optional "cookies" permission and access
+/// to that site; both are granted together when the user pairs. Either can be
+/// declined or revoked. When the Permissions API is unavailable, assume they
+/// are granted and let the read decide.
 async function hasCookiePermission() {
   if (typeof chrome.permissions?.contains !== "function") return true;
   try {
-    return await chrome.permissions.contains({ permissions: ["cookies"] });
+    return await chrome.permissions.contains({
+      permissions: ["cookies"],
+      origins: SHARED_PAGE_ORIGINS,
+    });
   } catch {
     return false;
   }
@@ -404,10 +438,12 @@ async function postToGrab(url, ctx) {
   try {
     // confirm=1: Grab answers only once the user has approved or declined, so
     // the browser's own download is cancelled only when Grab really took over.
-    const resp = await fetchWithTimeout(
-      `${GRAB_HTTP_URL}?confirm=1`,
-      { method: "POST", headers, body },
-      CONFIRM_TIMEOUT_MS,
+    const resp = await withWorkerKeepAlive(() =>
+      fetchWithTimeout(
+        `${GRAB_HTTP_URL}?confirm=1`,
+        { method: "POST", headers, body },
+        CONFIRM_TIMEOUT_MS,
+      ),
     );
     if (resp.status >= 200 && resp.status < 300 && ctx && typeof ctx === "object") {
       const acceptedHeader = resp.headers?.get?.("x-grab-cookies-accepted");
@@ -520,15 +556,17 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
       // grab:// navigation to the OS handler; no background tab is created.
       updateTab(tabId, GRAB_WAKE_URL);
       const deadline = Date.now() + wakeTimeoutMs;
-      while (Date.now() < deadline) {
-        await sleep(WAKE_POLL_MS);
-        try {
-          if (await verifyGrab(secret)) return true;
-        } catch {
-          // Not up yet.
+      return await withWorkerKeepAlive(async () => {
+        while (Date.now() < deadline) {
+          await sleep(WAKE_POLL_MS);
+          try {
+            if (await verifyGrab(secret)) return true;
+          } catch {
+            // Not up yet.
+          }
         }
-      }
-      return false;
+        return false;
+      });
     } finally {
       if (!keepWarning) {
         try {
@@ -558,6 +596,8 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
 /// back would duplicate the handoff.
 async function explicitSend(url, tabId, incognito) {
   if (!toGrabUrl(url)) return;
+  // The warned-tab set is rebuilt from session storage after a worker restart.
+  await warnedTabsReady;
   const ctx = { tabId, incognito };
   let status = await postToGrabWithRetry(url, ctx);
   if (status === 0 && (await wakeGrabAndWait(url, tabId, incognito, ctx))) {
@@ -652,6 +692,9 @@ chrome.runtime.onInstalled.addListener(async () => {
   // menu may already exist (create would throw on a duplicate id).
   await removeAllContextMenus();
   if (settings.showContextMenu) createContextMenu();
+  // Re-register (or drop) the optional video-detector content script; an
+  // update from a build that declared it statically needs this once.
+  syncVideoScript();
 });
 
 chrome.storage.onChanged.addListener(async (changes, area) => {
@@ -671,6 +714,7 @@ chrome.storage.onChanged.addListener(async (changes, area) => {
   if (changes.detectVideos) {
     videoUi.detectVideosOn = changes.detectVideos.newValue !== false;
     if (!videoUi.detectVideosOn) clearAllVideoUi();
+    syncVideoScript();
   }
 });
 

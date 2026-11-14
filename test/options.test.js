@@ -58,6 +58,8 @@ function makeOptions({
     },
   };
 
+  const requests = [];
+  let releaseCalls = 0;
   const chrome = {
     runtime: {
       sendMessage(message) {
@@ -67,7 +69,10 @@ function makeOptions({
       },
     },
     permissions: {
-      request: async () => cookiePermission,
+      request: async (query) => {
+        requests.push(query);
+        return cookiePermission;
+      },
       contains: async () => cookiePermission,
       remove: async () => true,
     },
@@ -79,6 +84,11 @@ function makeOptions({
   const context = vm.createContext({
     document,
     chrome,
+    SHARED_PAGE_ORIGINS: ["http://*/*", "https://*/*"],
+    // Real implementation lives in settings.js and is tested in settings.test.js.
+    async releaseUnusedPermissions() {
+      releaseCalls += 1;
+    },
     SHARED_PAIRING_CODE_RE: pairingCodePattern,
     normalizePairingCode,
     bindSettingsForm() {},
@@ -107,6 +117,10 @@ function makeOptions({
     releaseInitialRead,
     get savedCode() {
       return savedCode;
+    },
+    requests,
+    get releaseCalls() {
+      return releaseCalls;
     },
   };
 }
@@ -217,4 +231,42 @@ test("saving a new code shows Saved first and then the verification result", asy
     status.textContent,
     "Verified — Grab recognizes this code. Cookie access is not granted, so handoffs are URL-only.",
   );
+});
+
+test("pairing asks for the cookies permission together with page access", async () => {
+  const ui = makeOptions({ storedCode: "", cookiePermission: true });
+  const codeInput = ui.elements.get("pairingCode");
+  const status = ui.elements.get("pairingStatus");
+  await waitFor(() => status.textContent === "Not paired: links only");
+  codeInput.value = VALID_CODE;
+  codeInput.listeners.get("input")();
+
+  const savePromise = ui.elements.get("savePairing").listeners.get("click")();
+  await waitFor(() => ui.pendingMessages.length === 1, "saved code was not checked");
+  ui.pendingMessages[0].resolve({ state: "verified" });
+  await savePromise;
+
+  // cookies.getAll only works for sites the extension can access, so both are
+  // requested in one prompt; neither is requested at install time.
+  // The page runs in a separate vm realm; compare plain JSON.
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.requests)), [
+    { permissions: ["cookies"], origins: ["http://*/*", "https://*/*"] },
+  ]);
+});
+
+test("unpairing releases the optional permissions it no longer needs", async () => {
+  const ui = makeOptions({ storedCode: VALID_CODE });
+  const codeInput = ui.elements.get("pairingCode");
+  const status = ui.elements.get("pairingStatus");
+  await waitFor(() => ui.pendingMessages.length === 1);
+  ui.pendingMessages[0].resolve({ state: "verified" });
+  await waitFor(() => status.textContent.startsWith("Verified"));
+
+  codeInput.value = "";
+  codeInput.listeners.get("input")();
+  await ui.elements.get("savePairing").listeners.get("click")();
+
+  assert.equal(ui.savedCode, "");
+  assert.equal(ui.releaseCalls, 1);
+  assert.equal(status.textContent, "Not paired: links only");
 });
