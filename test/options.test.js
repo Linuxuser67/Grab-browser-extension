@@ -10,12 +10,19 @@ const OPTIONS_SOURCE = fs.readFileSync(
   path.join(__dirname, "..", "options.js"),
   "utf8",
 );
+const SHARED_SOURCE = fs.readFileSync(
+  path.join(__dirname, "..", "shared.js"),
+  "utf8",
+);
 const VALID_CODE = "ab".repeat(32);
 
 function makeElement(id) {
   return {
     id,
     value: "",
+    // Undefined, not false: a test that waits for `checked === false` must
+    // prove the stored setting was actually applied.
+    checked: undefined,
     textContent: "",
     attributes: new Map(),
     listeners: new Map(),
@@ -33,8 +40,10 @@ function makeElement(id) {
 
 function makeOptions({
   storedCode = VALID_CODE,
+  forwardCookies = true,
   cookiePermission = true,
   delayInitialLoad = false,
+  delayToggleLoad = false,
 } = {}) {
   const elements = new Map();
   const pendingMessages = [];
@@ -50,6 +59,17 @@ function makeOptions({
         releaseInitialRead = resolve;
       })
     : null;
+  let toggleReadStartedResolve;
+  let releaseToggleRead;
+  let toggleReadConsumed = false;
+  const toggleReadStarted = new Promise((resolve) => {
+    toggleReadStartedResolve = resolve;
+  });
+  const toggleReadGate = delayToggleLoad
+    ? new Promise((resolve) => {
+        releaseToggleRead = resolve;
+      })
+    : null;
 
   const document = {
     getElementById(id) {
@@ -60,6 +80,8 @@ function makeOptions({
 
   const requests = [];
   let releaseCalls = 0;
+  // Local storage holds the pairing code and the cookie-forwarding toggle.
+  const local = { pairingCode: storedCode, forwardCookies };
   const chrome = {
     runtime: {
       sendMessage(message) {
@@ -76,6 +98,27 @@ function makeOptions({
       contains: async () => cookiePermission,
       remove: async () => true,
     },
+    storage: {
+      local: {
+        get: async (defaults) => {
+          // Snapshot before waiting: a delayed read must deliver the value it
+          // found when it started, like a slow real storage call.
+          const result = { ...defaults, ...local };
+          if (
+            delayToggleLoad &&
+            defaults &&
+            Object.hasOwn(defaults, "forwardCookies") &&
+            !toggleReadConsumed
+          ) {
+            toggleReadConsumed = true;
+            toggleReadStartedResolve();
+            await toggleReadGate;
+          }
+          return result;
+        },
+        set: async (obj) => Object.assign(local, obj),
+      },
+    },
   };
 
   const normalizePairingCode = (raw) =>
@@ -84,13 +127,10 @@ function makeOptions({
   const context = vm.createContext({
     document,
     chrome,
-    SHARED_PAGE_ORIGINS: ["http://*/*", "https://*/*"],
     // Real implementation lives in settings.js and is tested in settings.test.js.
     async releaseUnusedPermissions() {
       releaseCalls += 1;
     },
-    SHARED_PAIRING_CODE_RE: pairingCodePattern,
-    normalizePairingCode,
     bindSettingsForm() {},
     async loadPairingCode() {
       if (delayInitialLoad && !initialReadConsumed) {
@@ -108,6 +148,8 @@ function makeOptions({
     },
   });
 
+  // shared.js holds the storage helpers both the page and the worker use.
+  vm.runInContext(SHARED_SOURCE, context, { filename: "shared.js" });
   vm.runInContext(OPTIONS_SOURCE, context, { filename: "options.js" });
 
   return {
@@ -115,6 +157,9 @@ function makeOptions({
     pendingMessages,
     initialReadStarted,
     releaseInitialRead,
+    toggleReadStarted,
+    releaseToggleRead,
+    local,
     get savedCode() {
       return savedCode;
     },
@@ -252,6 +297,85 @@ test("pairing asks for the cookies permission together with page access", async 
   assert.deepEqual(JSON.parse(JSON.stringify(ui.requests)), [
     { permissions: ["cookies"], origins: ["http://*/*", "https://*/*"] },
   ]);
+});
+
+test("the cookie-forwarding toggle shows the stored setting and saves changes", async () => {
+  const ui = makeOptions({ forwardCookies: false });
+  const toggle = ui.elements.get("forwardCookies");
+
+  await waitFor(() => toggle.checked === false, "the stored setting was not applied");
+  assert.equal(ui.local.forwardCookies, false);
+  assert.equal(ui.savedCode, VALID_CODE, "the pairing code is untouched");
+
+  toggle.checked = true;
+  await toggle.listeners.get("change")();
+  assert.equal(ui.local.forwardCookies, true);
+  assert.equal(ui.savedCode, VALID_CODE, "the toggle must not touch the pairing code");
+});
+
+test("the cookie-forwarding toggle works without a pairing code", async () => {
+  const ui = makeOptions({ storedCode: "", forwardCookies: true });
+  const toggle = ui.elements.get("forwardCookies");
+
+  await waitFor(() => toggle.checked === true, "the toggle did not load");
+  toggle.checked = false;
+  await toggle.listeners.get("change")();
+  assert.equal(ui.local.forwardCookies, false);
+  assert.equal(ui.savedCode, "");
+});
+
+test("a toggle change before the stored value loads is not overwritten", async () => {
+  const ui = makeOptions({ forwardCookies: false, delayToggleLoad: true });
+  const toggle = ui.elements.get("forwardCookies");
+
+  await ui.toggleReadStarted;
+  toggle.checked = true;
+  await toggle.listeners.get("change")();
+  ui.releaseToggleRead();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(toggle.checked, true, "the user's choice wins over the stale read");
+  assert.equal(ui.local.forwardCookies, true);
+});
+
+test("unpairing and re-pairing leave the toggle alone", async () => {
+  const ui = makeOptions({ storedCode: VALID_CODE, forwardCookies: false });
+  const toggle = ui.elements.get("forwardCookies");
+  const codeInput = ui.elements.get("pairingCode");
+  const save = ui.elements.get("savePairing");
+  await waitFor(() => toggle.checked === false, "the stored setting was not applied");
+  ui.pendingMessages[0].resolve({ state: "verified" });
+
+  codeInput.value = "";
+  codeInput.listeners.get("input")();
+  await save.listeners.get("click")();
+  assert.equal(ui.savedCode, "");
+  assert.equal(ui.local.forwardCookies, false, "unpairing keeps the toggle");
+
+  codeInput.value = VALID_CODE;
+  codeInput.listeners.get("input")();
+  const pairing = save.listeners.get("click")();
+  await waitFor(() => ui.pendingMessages.length === 2, "re-pairing was not verified");
+  ui.pendingMessages[1].resolve({ state: "verified" });
+  await pairing;
+
+  assert.equal(ui.savedCode, VALID_CODE);
+  assert.equal(ui.local.forwardCookies, false, "pairing keeps the toggle");
+  assert.equal(toggle.checked, false);
+});
+
+test("a toggle change during pairing verification refreshes the cookie status", async () => {
+  const ui = makeOptions({ forwardCookies: true });
+  const toggle = ui.elements.get("forwardCookies");
+  const status = ui.elements.get("pairingStatus");
+
+  await waitFor(() => ui.pendingMessages.length === 1, "the saved code was not verified");
+  toggle.checked = false;
+  await toggle.listeners.get("change")();
+  ui.pendingMessages[0].resolve({ state: "verified" });
+
+  await waitFor(() => status.textContent.startsWith("Verified"));
+  assert.match(status.textContent, /Cookie forwarding is off/);
 });
 
 test("unpairing releases the optional permissions it no longer needs", async () => {

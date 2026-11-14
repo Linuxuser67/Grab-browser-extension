@@ -227,12 +227,26 @@
           />
           <p class="hint" id="pairingHelp">
             With a code, the extension checks that it is talking to Grab, signs what
-            it sends, and shares the site's cookies so Grab can download pages that
-            need them. Without one, only links are sent. Leave empty to unpair.
+            it sends, and shares the site's cookies — while cookie forwarding is on
+            below — so Grab can download pages that need them. Without one, only
+            links are sent. Leave empty to unpair.
           </p>
         </div>
         <button type="button" id="savePairing">Save &amp; verify</button>
         <span id="pairingStatus" class="hint" role="status" aria-live="polite"></span>
+
+        <div class="setting">
+          <label class="checkbox">
+            <input type="checkbox" id="forwardCookies" />
+            <span>Share site cookies with Grab</span>
+          </label>
+          <p class="hint">
+            When on, a paired handoff sends the site's cookies so Grab can
+            download pages that need them. Turn this off to hand over links only,
+            even while paired.
+          </p>
+          <p class="hint" id="forwardCookiesStatus" role="status" aria-live="polite"></p>
+        </div>
       </fieldset>
 
       <p id="saved" role="status" aria-live="polite"></p>

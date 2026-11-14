@@ -66,7 +66,8 @@ Magnet links are passed to the OS untouched — Grab already handles `magnet:`.
 
 - Downloads that need the browser's session (logged-in direct links) forward
   the site's cookies to Grab — but only after you pair the extension (see
-  below). Unpaired, explicit sends (`Alt+G`, context menu) are URL-only, and automatic
+  below) and while the cookie-forwarding toggle is on. Unpaired, explicit sends
+  (`Alt+G`, context menu) are URL-only, and automatic
   interception stays off: an unverified listener on the port must never be able
   to cancel a browser download.
 - POST-form downloads hand Grab the action URL, which may not resolve to the file.
@@ -90,6 +91,11 @@ secret:
 
 If you click Regenerate in Grab's Preferences, pair again — the old code
 stops working immediately.
+
+The **Share site cookies with Grab** toggle in the same section turns cookie
+forwarding off: paired handoffs stay signed but carry only the URL, and the
+extension never reads the cookie store. The toggle is independent of the
+pairing code — pairing or unpairing never changes it.
 
 ## Permissions
 

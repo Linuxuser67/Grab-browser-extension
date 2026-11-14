@@ -86,6 +86,14 @@ test("shared.js declares the optional page origins once", () => {
   assert.deepEqual(JSON.parse(JSON.stringify(origins)), ORIGINS);
 });
 
+test("cookie forwarding defaults to on and round-trips through local storage", async () => {
+  const { state, context } = setup({ local: {} });
+  assert.equal(await context.loadForwardCookies(), true, "forwarding stays on until the user turns it off");
+  await context.saveForwardCookies(false);
+  assert.equal(state.local.forwardCookies, false);
+  assert.equal(await context.loadForwardCookies(), false);
+});
+
 test("releaseUnusedPermissions: nothing in use drops everything optional", async () => {
   const { state, context } = setup({ sync: { detectVideos: false } });
   await context.releaseUnusedPermissions();

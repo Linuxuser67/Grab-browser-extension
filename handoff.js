@@ -270,6 +270,9 @@ async function hasCookiePermission() {
 /// partition key, so exporting them as ordinary cookies would widen their scope.
 /// Errors propagate so the URL-only fallback can be accompanied by a warning.
 async function readCookies(url, storeId, ctx) {
+  // Last check before the cookie API: resolving the store may have taken a
+  // while, and the user may have flipped forwarding off since.
+  if (!(await loadForwardCookies())) return [];
   const filter = storeId ? { url, storeId } : { url };
   let all;
   try {
@@ -385,6 +388,13 @@ async function postToGrab(url, ctx) {
         ctx.cookieWarning =
           "Cookie access is not granted. Grant the extension's optional Cookies permission in Options to forward site authentication.";
       }
+    } else if (!(await loadForwardCookies())) {
+      // The user turned cookie forwarding off in Options: the paired request
+      // stays signed but carries no cookies. That is an intentional privacy
+      // choice, not a handoff failure, so leave the toolbar badge alone.
+      cookies = [];
+      // Drop a snapshot taken before the user flipped the toggle.
+      if (ctx && typeof ctx === "object") ctx.preparedCookies = undefined;
     } else if (ctx && Array.isArray(ctx.preparedCookies)) {
       // The cold-start preflight already resolved the source cookie store and
       // read these cookies. Reuse that snapshot instead of reading again after
@@ -431,6 +441,16 @@ async function postToGrab(url, ctx) {
     sentCookieCount = fitted.count;
     headers = { "Content-Type": "application/json" };
     if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
+    // A toggle flipped off while the body was built must not send a jar the
+    // user just withdrew: rebuild and re-sign the URL-only body.
+    if (sentCookieCount > 0 && !(await loadForwardCookies())) {
+      const bare = fitHandoffBody(url, [], userAgent, requestMetadata);
+      if (bare === null) return 413;
+      body = bare.body;
+      sentCookieCount = 0;
+      headers = { "Content-Type": "application/json" };
+      if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
+    }
   } catch {
     return 0; // Crypto failed; POST never sent, safe to fall back.
   }
@@ -514,13 +534,17 @@ async function prepareHandoffCookies(url, ctx) {
 /// Launch Grab without a URL, then wait until its local server answers.
 /// Returns true when a retry can carry the cookies over HTTP; false when the
 /// app never came up, the user never granted the Cookies permission, Grab is
-/// unpaired, the send is incognito, or the site has no cookies — all cases
-/// where the wake buys nothing and the caller must use the URL fallback now.
+/// unpaired, the send is incognito, cookie forwarding is off, or the site has
+/// no cookies — all cases where the wake buys nothing and the caller must use
+/// the URL fallback now.
 async function wakeGrabAndWait(url, tabId, incognito, ctx) {
   // The wake exists only to carry cookies over the retried POST.
   if (incognito === true) return false;
   const secret = await getPairingCode();
   if (!secret) return false;
+  // Cookie forwarding turned off: there is nothing to carry, so the wake
+  // would buy nothing.
+  if (!(await loadForwardCookies())) return false;
   if (!(await hasCookiePermission())) {
     if (ctx && typeof ctx === "object") {
       ctx.cookieWarning =
