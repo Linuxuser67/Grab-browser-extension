@@ -1,17 +1,43 @@
 name: check
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  # Reused by release.yml so a tag can't be packaged without passing the same checks.
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to check out (default: the triggering ref)"
+        type: string
+        default: ""
+permissions:
+  contents: read
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Actions are pinned to commit SHAs (tags can be moved); the comment
+      # names the release each SHA is.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
       - name: syntax check
         run: find . -type f -name '*.js' -not -path './.git/*' -print0 | xargs -0 -n1 node --check
       - name: firefox manifest in sync
         run: python3 build-aux/gen-firefox-manifest.py --check
+      - name: lint the Firefox build (web-ext)
+        # Assembles the files the Firefox zip ships, with the Firefox manifest,
+        # and validates manifest keys, permissions and API use against
+        # Mozilla's rules. Fails on any error or warning.
+        run: |
+          dir="$(mktemp -d)"
+          tar --exclude=./.git --exclude=./node_modules --exclude=./test \
+              --exclude=./amo-assets --exclude=./assets --exclude=./build-aux \
+              --exclude=./.github -cf - . | tar -xf - -C "$dir"
+          cp manifest.firefox.json "$dir/manifest.json"
+          npx --yes web-ext@10.8.0 lint --source-dir "$dir" --warnings-as-errors
       - name: Install shadow-root test dependency
         run: npm install --no-save --package-lock=false --ignore-scripts jsdom@30.1.3
       - name: tests
