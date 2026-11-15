@@ -54,7 +54,25 @@ function normalizePairingCode(raw) {
   return String(raw || "").replace(/\s+/g, "").toLowerCase();
 }
 
+/// Whether the extension may forward site cookies to Grab. The toggle lives
+/// in local storage beside the pairing code and is independent of it, so
+/// pairing and unpairing never changes it. Forwarding is on unless the stored
+/// value says otherwise.
+async function loadForwardCookies() {
+  try {
+    const stored = await chrome.storage.local.get({ forwardCookies: true });
+    return stored.forwardCookies !== false;
+  } catch {
+    return false; // Unknown state: do not forward cookies.
+  }
+}
+
+/// Store the cookie-forwarding toggle.
+async function saveForwardCookies(enabled) {
+  await chrome.storage.local.set({ forwardCookies: !!enabled });
+}
+
 // Export for the test hook (Node) without breaking browser globals.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { SHARED_DEFAULTS, SHARED_PAGE_ORIGINS, SHARED_PAIRING_CODE_RE, SHARED_EXCLUDED_HOSTS, sharedHostExcluded, normalizePairingCode };
+  module.exports = { SHARED_DEFAULTS, SHARED_PAGE_ORIGINS, SHARED_PAIRING_CODE_RE, SHARED_EXCLUDED_HOSTS, sharedHostExcluded, normalizePairingCode, loadForwardCookies, saveForwardCookies };
 }

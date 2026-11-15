@@ -7,8 +7,13 @@ bindSettingsForm(document);
 const pairingEl = document.getElementById("pairingCode");
 const pairingBtn = document.getElementById("savePairing");
 const pairingStatusEl = document.getElementById("pairingStatus");
+const forwardCookiesEl = document.getElementById("forwardCookies");
+const forwardCookiesStatusEl = document.getElementById("forwardCookiesStatus");
 
 let pairingStatusRevision = 0;
+// Bumped whenever the user changes the toggle, so a slow initial read cannot
+// overwrite their choice.
+let forwardCookiesRevision = 0;
 
 function showPairingStatus(text) {
   pairingStatusEl.textContent = text;
@@ -71,12 +76,17 @@ async function verifySavedPairing(code, cookieAccessGranted, revision) {
   }
 
   if (reply && reply.state === "verified") {
-    const cookieStatus =
-      cookieAccessGranted === true
+    // Read the toggle after the handshake: the user may have changed it while
+    // verification was pending, and the status must reflect the stored value.
+    const forwardCookies = await loadForwardCookies();
+    if (!isCurrentPairingOperation(revision, code)) return;
+    const cookieStatus = forwardCookies
+      ? cookieAccessGranted === true
         ? "Cookie access is granted."
         : cookieAccessGranted === false
           ? "Cookie access is not granted, so handoffs are URL-only."
-          : "Cookie permission status is unavailable.";
+          : "Cookie permission status is unavailable."
+      : "Cookie forwarding is off, so handoffs stay URL-only.";
     showPairingStatus(`Verified — Grab recognizes this code. ${cookieStatus}`);
   } else if (reply && reply.state === "unverified") {
     showPairingStatus(
@@ -180,4 +190,28 @@ pairingEl.addEventListener("input", () => {
 
 pairingBtn.addEventListener("click", savePairing);
 
+/// The cookie-forwarding toggle is stored beside the pairing code and is
+/// independent of it: pairing, unpairing and the code itself never change it.
+async function loadForwardCookiesToggle() {
+  const revision = forwardCookiesRevision;
+  const enabled = await loadForwardCookies();
+  if (revision === forwardCookiesRevision) forwardCookiesEl.checked = enabled;
+}
+
+forwardCookiesEl.addEventListener("change", async () => {
+  forwardCookiesRevision += 1;
+  const enabled = forwardCookiesEl.checked;
+  try {
+    await saveForwardCookies(enabled);
+  } catch {
+    forwardCookiesEl.checked = !enabled;
+    forwardCookiesStatusEl.textContent = "Could not save this setting.";
+    return;
+  }
+  forwardCookiesStatusEl.textContent = enabled
+    ? "Cookie forwarding is on."
+    : "Cookie forwarding is off; handoffs stay URL-only.";
+});
+
 loadPairing();
+loadForwardCookiesToggle();

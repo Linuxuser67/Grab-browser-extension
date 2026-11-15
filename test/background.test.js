@@ -441,6 +441,23 @@ describe("master interception toggle", () => {
     assert.equal(intercepted(chrome, 9), true);
   });
 
+  test("automatic interception reads no cookies when forwarding is off", async () => {
+    const chrome = makeChrome({
+      localSettings: { ...pairedLocal(), forwardCookies: false },
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    });
+    let reads = 0;
+    chrome.cookies.getAll = async () => {
+      reads += 1;
+      return [{ name: "sid", value: "v", domain: "example.com" }];
+    };
+    const bg = loadBackground(chrome);
+    void bg;
+    await chrome._listeners["downloads.onCreated"](item(9));
+    assert.equal(intercepted(chrome, 9), true, "the download is still handed over");
+    assert.equal(reads, 0, "an intercept must never touch the cookie store while off");
+  });
+
   test("the size-wait decision respects a toggle flipped off mid-wait", async () => {
     const shared = {
       localSettings: pairedLocal(),
@@ -1119,6 +1136,115 @@ describe("HTTP handoff to Grab", () => {
     assert.match(ctx.cookieWarning, /optional Cookies permission|first-party isolation/);
     const post = fetchCalls.find((c) => c.opts.method === "POST");
     assert.deepEqual(JSON.parse(post.opts.body).cookies, []);
+  });
+
+  test("a paired handoff sends no cookies when cookie forwarding is off", async () => {
+    mockPairedGrab();
+    await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: false });
+    let reads = 0;
+    chrome.cookies.getAll = async () => {
+      reads += 1;
+      return [{ name: "sid", value: "v", domain: "example.com" }];
+    };
+    const ctx = { tabId: 7 };
+    assert.equal(await bg.handOff("https://example.com/f.zip", ctx, [0, 0]), true);
+    assert.equal(reads, 0, "no cookie may be read while forwarding is off");
+    const post = posts()[0];
+    const sent = JSON.parse(post.opts.body);
+    assert.deepEqual(sent.cookies, [], "the handoff must stay URL-only");
+    assert.equal(
+      post.opts.headers["X-Grab-Token"],
+      hmac("grab-client\u0000", post.opts.body),
+      "the paired handoff stays signed even without cookies",
+    );
+    assert.equal(
+      ctx.cookieWarning,
+      undefined,
+      "turning forwarding off is a choice, not a handoff failure",
+    );
+  });
+
+  test("a toggle flipped off before the cookie read prevents the read and send", async () => {
+    mockPairedGrab();
+    await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: true });
+    let reads = 0;
+    chrome.cookies.getAll = async () => {
+      reads += 1;
+      return [{ name: "sid", value: "v", domain: "example.com" }];
+    };
+    // The user flips the toggle off while the permission check is pending.
+    chrome.permissions = {
+      contains: async () => {
+        await chrome.storage.local.set({ forwardCookies: false });
+        return true;
+      },
+    };
+
+    const ctx = { tabId: 7 };
+    assert.equal(await bg.handOff("https://example.com/f.zip", ctx, [0, 0]), true);
+    assert.equal(reads, 0, "a flip during the permission check must stop the read");
+    assert.deepEqual(JSON.parse(posts()[0].opts.body).cookies, []);
+  });
+
+  test("a prepared cookie snapshot is never sent after forwarding turns off", async () => {
+    mockPairedGrab();
+    await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: false });
+
+    const ctx = {
+      preparedCookies: [{ name: "sid", value: "v", domain: "example.com" }],
+    };
+    assert.equal(await bg.postToGrab("https://example.com/f.zip", ctx), 200);
+    assert.deepEqual(JSON.parse(posts()[0].opts.body).cookies, []);
+    assert.equal(ctx.preparedCookies, undefined, "the stale snapshot is dropped");
+  });
+
+  test("a toggle storage read failure fails closed", async () => {
+    mockPairedGrab();
+    await pair();
+    const realGet = chrome.storage.local.get;
+    chrome.storage.local.get = async (defaults) => {
+      if (defaults && Object.hasOwn(defaults, "forwardCookies")) {
+        throw new Error("storage unavailable");
+      }
+      return realGet(defaults);
+    };
+    let reads = 0;
+    chrome.cookies.getAll = async () => {
+      reads += 1;
+      return [{ name: "sid", value: "v", domain: "example.com" }];
+    };
+
+    const ctx = {};
+    assert.equal(await bg.handOff("https://example.com/f.zip", ctx, [0, 0]), true);
+    assert.equal(reads, 0, "an unknown toggle state must not read cookies");
+    const post = posts()[0];
+    assert.deepEqual(JSON.parse(post.opts.body).cookies, []);
+    assert.equal(
+      post.opts.headers["X-Grab-Token"],
+      hmac("grab-client\u0000", post.opts.body),
+    );
+  });
+
+  test("the cold-start wake reads no cookies when cookie forwarding is off", async () => {
+    mockPairedGrab();
+    await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: false });
+    let reads = 0;
+    chrome.cookies.getAll = async () => {
+      reads += 1;
+      return [{ name: "sid", value: "v", domain: "example.com" }];
+    };
+    const ctx = { tabId: 7 };
+    assert.equal(
+      await bg.wakeGrabAndWait("https://example.com/f.zip", 7, false, ctx),
+      false,
+    );
+    assert.equal(reads, 0, "the wake must not read cookies");
+    assert.equal(fetchCalls.length, 0, "the wake must not talk to Grab without cookies to carry");
+    assert.equal(
+      chrome._calls.filter(([name]) => name === "tabs.update").length,
+      0,
+      "the wake must not launch Grab when there are no cookies to carry",
+    );
   });
 
 
