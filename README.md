@@ -70,6 +70,10 @@ Magnet links are passed to the OS untouched — Grab already handles `magnet:`.
   (`Alt+G`, context menu) are URL-only, and automatic
   interception stays off: an unverified listener on the port must never be able
   to cancel a browser download.
+- When the browser provides one, the extension also forwards the download's
+  referrer URL. Grab uses it as the HTTP `Referer` header for sites that check
+  the originating page; it is sent to Grab over loopback and may be sent to the
+  download host.
 - POST-form downloads hand Grab the action URL, which may not resolve to the file.
 - Automatic interception requires Grab to be running. URLs longer than 2048
   characters are refused by Grab and stay in the browser.

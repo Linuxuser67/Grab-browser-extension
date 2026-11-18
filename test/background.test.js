@@ -155,7 +155,8 @@ function loadBackground(chrome) {
         : "";
       return { status: 200, ok: true, json: async () => ({ proof }) };
     }
-    chrome._calls.push(["handoff", JSON.parse(opts.body).url]);
+    const body = JSON.parse(opts.body);
+    chrome._calls.push(["handoff", body.url, body]);
     return { status: 200, ok: true };
   };
   const worker = { exports: {} };
@@ -315,6 +316,18 @@ describe("size-wait interception", () => {
     // Decided downloads leave no pending state behind.
     assert.equal(chrome._session.has("pendingSize:7"), false);
     assert.equal(chrome._alarms.has("size-wait:7"), false);
+  });
+
+  test("automatic interception forwards the browser-provided referrer", async () => {
+    const referer = "https://example.com/watch/episode?id=42";
+    const download = { ...bigItem(71), fileSize: 200 * MiB, referrer: referer };
+    chrome._downloads.set(download.id, { ...download, state: "in_progress" });
+    await listeners["downloads.onCreated"](download);
+
+    const handoff = chrome._calls.find(([name]) => name === "handoff");
+    assert.ok(handoff, "the browser download was handed to Grab");
+    assert.equal(handoff[2].referer, referer);
+    assert.equal(cancelled(download.id), true);
   });
 
   test("leaves a small download in the browser", async () => {
@@ -1340,6 +1353,15 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(await bg.handOff("https://example.com/f.zip", undefined, [0, 0]), false);
     assert.equal(fetchCalls.length, 3, "1 attempt + 2 retries");
     assert.equal(tabsCreated().length, 0);
+  });
+
+  test("normalizeReferer accepts HTTP(S), strips fragments, and rejects unsafe values", () => {
+    assert.equal(bg.normalizeReferer("https://example.com/watch?id=1#player"), "https://example.com/watch?id=1");
+    assert.equal(bg.normalizeReferer("http://example.com"), "http://example.com/");
+    assert.equal(bg.normalizeReferer("file:///etc/passwd"), undefined);
+    assert.equal(bg.normalizeReferer("javascript:alert(1)"), undefined);
+    assert.equal(bg.normalizeReferer("https://user:pass@example.com/"), undefined);
+    assert.equal(bg.normalizeReferer("x".repeat(2049)), undefined);
   });
 
   test("handOff forwards ctx to postToGrab (tabId reaches cookie lookup)", async () => {
