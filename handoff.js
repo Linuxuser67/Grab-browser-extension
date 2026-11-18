@@ -463,7 +463,11 @@ async function postToGrab(url, ctx) {
     // payload budget; don't drop the whole jar as the first fallback.
     // Every authenticated POST gets fresh signed metadata. Retrying postToGrab
     // generates a new nonce, so a network retry can never replay an earlier body.
-    const referer = normalizeReferer(ctx && typeof ctx === "object" ? ctx.referer : undefined);
+    // Source-page context is sent only over the paired, authenticated
+    // handoff. Unpaired explicit sends intentionally remain URL-only.
+    const referer = secret
+      ? normalizeReferer(ctx && typeof ctx === "object" ? ctx.referer : undefined)
+      : undefined;
     const requestMetadata = {
       ...(referer ? { referer } : {}),
       ...(secret
