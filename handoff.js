@@ -16,10 +16,9 @@ const CONFIRM_TIMEOUT_MS = 130_000;
 /// A pairing handshake is a loopback round trip.
 const HELLO_TIMEOUT_MS = 3_000;
 
-/// Launches Grab in a temporary background tab without handing it a download.
-/// A cold start cannot use the grab:// URL fallback when cookies must travel —
-/// that channel has no way to carry them. The user's current tab must remain
-/// untouched when the cookie-bearing HTTP retry succeeds.
+/// Launches Grab without handing it a download. The follow-up HTTP handoff
+/// carries the source-page referrer and, when enabled, the prepared cookie
+/// snapshot; the grab:// fallback can carry only the target URL.
 const GRAB_WAKE_URL = "grab://https/";
 /// How long to wait for a cold-started Grab to answer its local server.
 /// GTK startup and queue restoration can outlast a short browser-side timeout;
@@ -177,6 +176,20 @@ async function verifyGrab(secret) {
   if (!ok) return false;
   const expected = await hmacHex(secret, SERVER_CONTEXT, nonce);
   return constantTimeEqual(body && body.proof, expected);
+}
+
+/// Check readiness for an explicit URL-only handoff when the extension has no
+/// pairing code. This is the same unpaired trust level as an ordinary warm
+/// POST: only the response shape is checked, and no cookies are ever sent.
+async function isGrabReady(secret) {
+  if (secret) return verifyGrab(secret);
+
+  const nonce = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+  const { ok, body } = await fetchJsonWithTimeout(
+    `${GRAB_BASE_URL}/hello?n=${nonce}`,
+    HELLO_TIMEOUT_MS,
+  );
+  return ok && typeof body?.proof === "string" && /^[0-9a-f]{64}$/i.test(body.proof);
 }
 
 /// Prefer cookies most likely to carry authentication when the 100-cookie
@@ -536,6 +549,7 @@ async function prepareHandoffCookies(url, ctx) {
     const storeId = await resolveStoreId(ctx);
     if (storeId === null) {
       if (ctx && typeof ctx === "object") {
+        ctx.preparedCookies = [];
         ctx.cookieWarning =
           "Incognito cookie forwarding is disabled; Grab received the URL without cookies.";
       }
@@ -543,12 +557,11 @@ async function prepareHandoffCookies(url, ctx) {
     }
 
     const cookies = await readCookies(url, storeId, ctx);
-    if (cookies.length === 0) return false;
-
     if (ctx && typeof ctx === "object") ctx.preparedCookies = cookies;
-    return true;
+    return cookies.length > 0;
   } catch {
     if (ctx && typeof ctx === "object") {
+      ctx.preparedCookies = [];
       ctx.cookieWarning =
         "Grab could not read this site's cookies. Check the extension's optional Cookies permission or browser first-party isolation settings; the URL was sent without cookies.";
     }
@@ -556,33 +569,40 @@ async function prepareHandoffCookies(url, ctx) {
   }
 }
 
-/// Launch Grab without a URL, then wait until its local server answers.
-/// Returns true when a retry can carry the cookies over HTTP; false when the
-/// app never came up, the user never granted the Cookies permission, Grab is
-/// unpaired, the send is incognito, cookie forwarding is off, or the site has
-/// no cookies — all cases where the wake buys nothing and the caller must use
-/// the URL fallback now.
+/// Launch Grab without a URL, then wait for its local server to answer.
+/// Cookie forwarding is optional: the wake is also needed to preserve the
+/// source-page referrer when there are no cookies, forwarding is disabled, or
+/// the request comes from an incognito tab. Paired listeners must prove their
+/// identity before the retry; unpaired retries stay URL-only.
 async function wakeGrabAndWait(url, tabId, incognito, ctx) {
-  // The wake exists only to carry cookies over the retried POST.
-  if (incognito === true) return false;
   const secret = await getPairingCode();
-  if (!secret) return false;
-  // Cookie forwarding turned off: there is nothing to carry, so the wake
-  // would buy nothing.
-  if (!(await loadForwardCookies())) return false;
-  if (!(await hasCookiePermission())) {
-    if (ctx && typeof ctx === "object") {
-      ctx.cookieWarning =
-        "Cookie access is not granted. Grant the extension's optional Cookies permission in Options to forward site authentication.";
+
+  // Capture the cookie store before navigating the source tab, but only when
+  // the paired user has explicitly enabled forwarding and granted access.
+  // Failure or an empty jar must not prevent the URL/Referer handoff.
+  if (secret && incognito !== true) {
+    if (!(await hasCookiePermission())) {
+      if (ctx && typeof ctx === "object") {
+        ctx.cookieWarning =
+          "Cookie access is not granted. Grant the extension's optional Cookies permission in Options to forward site authentication.";
+      }
+    } else if (await loadForwardCookies()) {
+      await prepareHandoffCookies(url, ctx);
     }
-    return false;
   }
-  if (!(await prepareHandoffCookies(url, ctx))) return false;
-  // Check after the jar read: two sends that entered together both await it,
-  // and only the first may start a launch.
+
+  // Check after the optional cookie preflight: concurrent sends share one
+  // launch, while each retains its own URL, Referer, and cookie snapshot.
   if (wakeInFlight) {
     const ready = await wakeInFlight;
-    if (!ready && ctx && typeof ctx === "object") {
+    if (
+      !ready &&
+      ctx &&
+      typeof ctx === "object" &&
+      Array.isArray(ctx.preparedCookies) &&
+      ctx.preparedCookies.length > 0 &&
+      !ctx.cookieWarning
+    ) {
       ctx.cookieWarning =
         "Grab did not finish starting in time to receive the browser cookies. It was opened without them; retry after Grab is ready.";
     }
@@ -609,7 +629,7 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
         while (Date.now() < deadline) {
           await sleep(WAKE_POLL_MS);
           try {
-            if (await verifyGrab(secret)) return true;
+            if (await isGrabReady(secret)) return true;
           } catch {
             // Not up yet.
           }
@@ -628,7 +648,14 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
   wakeInFlight = run;
   try {
     const ready = await run;
-    if (!ready && ctx && typeof ctx === "object") {
+    if (
+      !ready &&
+      ctx &&
+      typeof ctx === "object" &&
+      Array.isArray(ctx.preparedCookies) &&
+      ctx.preparedCookies.length > 0 &&
+      !ctx.cookieWarning
+    ) {
       ctx.cookieWarning =
         "Grab did not finish starting in time to receive the browser cookies. It was opened without them; retry after Grab is ready.";
     }
@@ -655,15 +682,17 @@ async function explicitSend(url, tabId, incognito, sourceReferer) {
   };
   let status = await postToGrabWithRetry(url, ctx);
   if (status === 0 && (await wakeGrabAndWait(url, tabId, incognito, ctx))) {
-    // Grab was closed and has just started: retry over HTTP so the browser
-    // cookies still ride along. The grab:// fallback cannot carry them.
+    // Grab was closed and has just started: retry over HTTP so the source-page
+    // Referer and any permitted cookies travel with the handoff. The grab://
+    // fallback can carry only the target URL.
     status = await postToGrabWithRetry(url, ctx);
   }
   const tabArg =
     Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
   if (status === 0) {
     // Grab never came up: the OS launches it with the grab:// URL. That
-    // fallback cannot carry cookies, so surface any reason they were omitted.
+    // fallback cannot carry the source-page Referer or browser cookies, so
+    // surface any reason cookie forwarding was unavailable.
     sendToGrab(url, tabId);
     const alreadyWarned =
       Number.isInteger(tabId) && tabId >= 0 && warnedTabs.has(tabId);
