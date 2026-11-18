@@ -1963,7 +1963,7 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(posts().length, 0, "no POST ever reached Grab");
   });
 
-  test("unpaired cold start wakes Grab and preserves the Referer without cookies", async () => {
+  test("unpaired cold start remains URL-only when Grab is woken", async () => {
     const referer = "https://example.com/watch/episode";
     const targetUrl = "https://cdn.example.com/f.zip";
     bg._setWakeTimeout(1000);
@@ -1977,7 +1977,7 @@ describe("HTTP handoff to Grab", () => {
     assert.ok(post, "the URL-only HTTP retry reaches the unpaired Grab instance");
     const sent = JSON.parse(post.opts.body);
     assert.equal(sent.url, targetUrl);
-    assert.equal(sent.referer, referer);
+    assert.equal(sent.referer, undefined, "unpaired requests never disclose the source page");
     assert.deepEqual(sent.cookies, []);
     assert.equal(post.opts.headers["X-Grab-Token"], undefined);
   });
