@@ -987,7 +987,7 @@ describe("HTTP handoff to Grab", () => {
         const nonce = new URL(url).searchParams.get("n");
         const secret = chrome._local.pairingCode;
         const proof = secret
-          ? hmac("grab-server\\u0000", nonce)
+          ? hmac("grab-server\u0000", nonce)
           : "cd".repeat(32);
         return {
           status: 200,
@@ -1980,6 +1980,35 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(sent.referer, referer);
     assert.deepEqual(sent.cookies, []);
     assert.equal(post.opts.headers["X-Grab-Token"], undefined);
+  });
+
+  test("cold start with cookie forwarding off preserves Referer without reading cookies", async () => {
+    await pair();
+    await chrome.storage.local.set({ forwardCookies: false });
+    const referer = "https://example.com/watch/episode";
+    const targetUrl = "https://cdn.example.com/f.zip";
+    let reads = 0;
+    chrome.permissions = { contains: async () => true };
+    chrome.cookies.getAll = async () => {
+      reads += 1;
+      return [{
+        name: "session", value: "must-not-be-read", domain: "example.com",
+        hostOnly: true, path: "/", secure: true,
+      }];
+    };
+    bg._setWakeTimeout(1000);
+    mockColdStart();
+
+    await bg.explicitSend(targetUrl, 7, false, referer);
+
+    const updates = chrome._calls.filter(([name]) => name === "tabs.update");
+    assert.deepEqual(updates.map(([, args]) => args.url), ["grab://https/"]);
+    const post = posts().find((call) => call.opts.method === "POST");
+    assert.ok(post);
+    const sent = JSON.parse(post.opts.body);
+    assert.equal(sent.referer, referer);
+    assert.deepEqual(sent.cookies, []);
+    assert.equal(reads, 0, "the cookie store is not read while forwarding is disabled");
   });
 
   test("cold start without Cookies permission still forwards Referer, never cookies", async () => {
