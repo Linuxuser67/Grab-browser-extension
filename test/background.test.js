@@ -975,6 +975,43 @@ describe("HTTP handoff to Grab", () => {
   }
   const pair = () => chrome.storage.local.set({ pairingCode: SECRET });
 
+  /// Simulate a cold start: the first HTTP contact fails, the scheme handler
+  /// launches Grab, and subsequent readiness checks and handoffs succeed.
+  function mockColdStart() {
+    fetchCalls = [];
+    let grabUp = false;
+    globalThis.fetch = async (url, opts = {}) => {
+      fetchCalls.push({ url, opts });
+      if (url.includes("/hello")) {
+        if (!grabUp) throw new Error("connection refused");
+        const nonce = new URL(url).searchParams.get("n");
+        const secret = chrome._local.pairingCode;
+        const proof = secret
+          ? hmac("grab-server\\u0000", nonce)
+          : "cd".repeat(32);
+        return {
+          status: 200,
+          ok: true,
+          json: async () => ({ proof }),
+        };
+      }
+      if (!grabUp) throw new Error("connection refused");
+      return {
+        status: 200,
+        ok: true,
+        headers: { get: () => null },
+      };
+    };
+
+    const originalUpdate = chrome.tabs.update;
+    chrome.tabs.update = (a, b) => {
+      const target = b !== undefined ? b : a;
+      const url = typeof target === "string" ? target : target && target.url;
+      if (url === "grab://https/") grabUp = true;
+      return originalUpdate(a, b);
+    };
+  }
+
   beforeEach(() => {
     // Most handoff tests intentionally start unpaired; cases that need the
     // authenticated path call pair() explicitly.
@@ -1238,7 +1275,7 @@ describe("HTTP handoff to Grab", () => {
     );
   });
 
-  test("the cold-start wake reads no cookies when cookie forwarding is off", async () => {
+  test("the cold-start wake launches Grab without reading cookies when forwarding is off", async () => {
     mockPairedGrab();
     await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: false });
     let reads = 0;
@@ -1246,17 +1283,27 @@ describe("HTTP handoff to Grab", () => {
       reads += 1;
       return [{ name: "sid", value: "v", domain: "example.com" }];
     };
+    let fakeNow = 1_000;
+    const realNow = Date.now;
+    Date.now = () => fakeNow;
+    bg._setWakeTimeout(1000);
+    bg._setSleep(async (ms) => { fakeNow += ms; });
     const ctx = { tabId: 7 };
+    try {
+      assert.equal(
+        await bg.wakeGrabAndWait("https://example.com/f.zip", 7, false, ctx),
+        true,
+      );
+    } finally {
+      Date.now = realNow;
+      bg._setSleep((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    }
+    assert.equal(reads, 0, "the cookie store is not read while forwarding is off");
+    assert.equal(hellos().length, 1, "the extension still waits for Grab to become ready");
     assert.equal(
-      await bg.wakeGrabAndWait("https://example.com/f.zip", 7, false, ctx),
-      false,
-    );
-    assert.equal(reads, 0, "the wake must not read cookies");
-    assert.equal(fetchCalls.length, 0, "the wake must not talk to Grab without cookies to carry");
-    assert.equal(
-      chrome._calls.filter(([name]) => name === "tabs.update").length,
-      0,
-      "the wake must not launch Grab when there are no cookies to carry",
+      chrome._calls.filter(([name, args]) => name === "tabs.update" && args.url === "grab://https/").length,
+      1,
+      "the source tab wakes Grab even when no cookies will be sent",
     );
   });
 
@@ -1822,6 +1869,8 @@ describe("HTTP handoff to Grab", () => {
       }
       return { status: 200, ok: true };
     };
+    const referer = "https://example.com/watch/episode?id=42";
+    const targetUrl = "https://cdn.example.com/f.zip";
     let cookieReadCount = 0;
     chrome.cookies.getAll = async () => {
       cookieReadCount += 1;
@@ -1854,9 +1903,11 @@ describe("HTTP handoff to Grab", () => {
       await chrome._listeners["menus.onClicked"](
         {
           menuItemId: "sendToGrab",
-          pageUrl: "https://example.com/f.zip",
+          linkUrl: targetUrl,
+          frameUrl: referer,
+          pageUrl: referer,
         },
-        { id: 7, url: "https://example.com/f.zip", incognito: false },
+        { id: 7, url: referer, incognito: false },
       );
     } finally {
       Date.now = realNow;
@@ -1871,8 +1922,11 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(cookieReadCount, 1, "the preflight cookie snapshot is reused after Grab starts");
     const post = posts().find((call) => call.opts.method === "POST");
     assert.ok(post, "context-menu action retries over HTTP after Grab is ready");
+    const sent = JSON.parse(post.opts.body);
+    assert.equal(sent.url, targetUrl);
+    assert.equal(sent.referer, referer, "the originating page survives the cold-start wake");
     assert.deepEqual(
-      JSON.parse(post.opts.body).cookies.map((cookie) => cookie.name),
+      sent.cookies.map((cookie) => cookie.name),
       ["session"],
       "the cookie-bearing POST survives a 15-second cold start",
     );
@@ -1909,40 +1963,53 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(posts().length, 0, "no POST ever reached Grab");
   });
 
-  test("cold start without pairing skips the wake and falls back immediately", async () => {
-    bg._setWakeTimeout(1000); // would stall if the gate regressed
-    mockFetch("down");
+  test("unpaired cold start wakes Grab and preserves the Referer without cookies", async () => {
+    const referer = "https://example.com/watch/episode";
+    const targetUrl = "https://cdn.example.com/f.zip";
+    bg._setWakeTimeout(1000);
+    mockColdStart();
 
-    await bg.explicitSend("https://example.com/f.zip", 7, false);
+    await bg.explicitSend(targetUrl, 7, false, referer);
 
     const updates = chrome._calls.filter(([name]) => name === "tabs.update");
-    assert.deepEqual(
-      updates.map(([, args]) => args.url),
-      ["grab://https/example.com/f.zip"],
-      "main's single fallback navigation, with no wake first"
-    );
+    assert.deepEqual(updates.map(([, args]) => args.url), ["grab://https/"]);
+    const post = posts().find((call) => call.opts.method === "POST");
+    assert.ok(post, "the URL-only HTTP retry reaches the unpaired Grab instance");
+    const sent = JSON.parse(post.opts.body);
+    assert.equal(sent.url, targetUrl);
+    assert.equal(sent.referer, referer);
+    assert.deepEqual(sent.cookies, []);
+    assert.equal(post.opts.headers["X-Grab-Token"], undefined);
   });
 
-  test("cold start with Cookies permission revoked skips the wake", async () => {
+  test("cold start without Cookies permission still forwards Referer, never cookies", async () => {
     await pair();
     chrome.permissions = { contains: async () => false };
+    const referer = "https://example.com/watch/episode";
+    const targetUrl = "https://cdn.example.com/f.zip";
+    let reads = 0;
+    chrome.cookies.getAll = async () => {
+      reads += 1;
+      throw new Error("cookie access must not occur without permission");
+    };
     bg._setWakeTimeout(1000);
-    mockFetch("down");
+    mockColdStart();
 
-    await bg.explicitSend("https://example.com/f.zip", 7, false);
+    await bg.explicitSend(targetUrl, 7, false, referer);
 
     const updates = chrome._calls.filter(([name]) => name === "tabs.update");
-    assert.deepEqual(
-      updates.map(([, args]) => args.url),
-      ["grab://https/example.com/f.zip"],
-      "nothing to carry, so no cold-start wait"
-    );
+    assert.deepEqual(updates.map(([, args]) => args.url), ["grab://https/"]);
+    const post = posts().find((call) => call.opts.method === "POST");
+    assert.ok(post, "the HTTP retry occurs after the local server is ready");
+    const sent = JSON.parse(post.opts.body);
+    assert.equal(sent.referer, referer);
+    assert.deepEqual(sent.cookies, []);
+    assert.equal(reads, 0, "the cookie store is not touched");
     assert.ok(
       chrome._calls.some(
-        ([name, args]) =>
-          name === "action.setTitle" && /Cookies permission/.test(args.title),
+        ([name, args]) => name === "action.setTitle" && /Cookies permission/.test(args.title),
       ),
-      "URL-only fallback explains that cookie access is not granted",
+      "the missing permission remains visible",
     );
   });
 
@@ -1967,64 +2034,89 @@ describe("HTTP handoff to Grab", () => {
     assert.match(ctx.cookieWarning, /Cookie access is not granted/);
   });
 
-  test("cold-start cookie read failures are surfaced instead of silently skipping the wake", async () => {
+  test("cookie preflight failure does not block cold-start Referer delivery", async () => {
     await pair();
     chrome.permissions = { contains: async () => true };
+    const referer = "https://example.com/watch/episode";
+    const targetUrl = "https://cdn.example.com/f.zip";
+    let reads = 0;
     chrome.cookies.getAll = async () => {
+      reads += 1;
       throw new Error("simulated Chromium cookie access failure");
     };
     bg._setWakeTimeout(1000);
-    mockFetch("down");
+    mockColdStart();
 
-    await bg.explicitSend("https://example.com/f.zip", 7, false);
+    await bg.explicitSend(targetUrl, 7, false, referer);
 
     const updates = chrome._calls.filter(([name]) => name === "tabs.update");
-    assert.deepEqual(
-      updates.map(([, args]) => args.url),
-      ["grab://https/example.com/f.zip"],
-      "a failed cookie preflight must not wait for a cookie-bearing wake",
-    );
+    assert.deepEqual(updates.map(([, args]) => args.url), ["grab://https/"]);
+    const post = posts().find((call) => call.opts.method === "POST");
+    assert.ok(post);
+    const sent = JSON.parse(post.opts.body);
+    assert.equal(sent.referer, referer);
+    assert.deepEqual(sent.cookies, []);
+    assert.equal(reads, 1, "the failed cookie preflight is not repeated after navigation");
     assert.ok(
       chrome._calls.some(
         ([name, args]) =>
           name === "action.setTitle" &&
           /could not read this site's cookies/.test(args.title),
       ),
-      "the toolbar explains why the handoff was URL-only",
+      "the toolbar explains why cookies were omitted",
     );
   });
 
-  test("incognito sends skip the wake: no cookies are forwarded", async () => {
+  test("incognito cold start preserves Referer without reading or forwarding cookies", async () => {
     await pair();
-    chrome.cookies.getAll = async () => [{
-      name: "session", value: "abc", domain: "example.com",
-      hostOnly: true, path: "/", secure: true,
-    }];
+    const referer = "https://example.com/watch/episode";
+    const targetUrl = "https://cdn.example.com/f.zip";
+    let reads = 0;
+    chrome.cookies.getAll = async () => {
+      reads += 1;
+      return [{
+        name: "session", value: "abc", domain: "example.com",
+        hostOnly: true, path: "/", secure: true,
+      }];
+    };
     bg._setWakeTimeout(1000);
-    mockFetch("down");
+    mockColdStart();
 
-    await bg.explicitSend("https://example.com/f.zip", 7, true);
+    await bg.explicitSend(targetUrl, 7, true, referer);
 
     const updates = chrome._calls.filter(([name]) => name === "tabs.update");
-    assert.deepEqual(
-      updates.map(([, args]) => args.url),
-      ["grab://https/example.com/f.zip"]
-    );
+    assert.deepEqual(updates.map(([, args]) => args.url), ["grab://https/"]);
+    const post = posts().find((call) => call.opts.method === "POST");
+    assert.ok(post);
+    const sent = JSON.parse(post.opts.body);
+    assert.equal(sent.referer, referer);
+    assert.deepEqual(sent.cookies, []);
+    assert.equal(reads, 0);
   });
 
-  test("a site without cookies skips the wake", async () => {
+  test("a site without cookies still wakes Grab for the Referer-bearing retry", async () => {
     await pair();
+    const referer = "https://example.com/watch/episode";
+    const targetUrl = "https://cdn.example.com/f.zip";
+    let reads = 0;
+    chrome.permissions = { contains: async () => true };
+    chrome.cookies.getAll = async () => {
+      reads += 1;
+      return [];
+    };
     bg._setWakeTimeout(1000);
-    mockFetch("down");
+    mockColdStart();
 
-    await bg.explicitSend("https://example.com/f.zip", 7, false);
+    await bg.explicitSend(targetUrl, 7, false, referer);
 
     const updates = chrome._calls.filter(([name]) => name === "tabs.update");
-    assert.deepEqual(
-      updates.map(([, args]) => args.url),
-      ["grab://https/example.com/f.zip"],
-      "nothing to carry, so no launch round trip"
-    );
+    assert.deepEqual(updates.map(([, args]) => args.url), ["grab://https/"]);
+    const post = posts().find((call) => call.opts.method === "POST");
+    assert.ok(post);
+    const sent = JSON.parse(post.opts.body);
+    assert.equal(sent.referer, referer);
+    assert.deepEqual(sent.cookies, []);
+    assert.equal(reads, 1, "an empty snapshot is reused instead of querying after navigation");
   });
 
   test("a warned tab keeps its badge through the wake", async () => {
