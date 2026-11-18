@@ -21,11 +21,10 @@ describe("shadow-root video detection (jsdom)", () => {
     };
     // content.js runs its init at load time against globals.
     const g = dom.window;
-    // jsdom does not implement user activation; expose the property consumed
-    // by content.js on the window's Navigator instance.
+    // Simulate site autoplay: no transient user activation is present.
     Object.defineProperty(g.navigator, "userActivation", {
       configurable: true,
-      value: { isActive: true },
+      value: { isActive: false },
     });
     // Fresh module per test: the init block wires listeners on load.
     delete require.cache[require.resolve(CONTENT_PATH)];
@@ -78,7 +77,7 @@ describe("shadow-root video detection (jsdom)", () => {
     return v;
   }
 
-  test("play event in a shadow root triggers a video report", async () => {
+  test("autoplay play event in a shadow root triggers a report without user activation", async () => {
     const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
     const { messages, document, window, messageListener, cleanup } = loadContent(dom);
     try {
@@ -102,6 +101,21 @@ describe("shadow-root video detection (jsdom)", () => {
       assert.equal(last.videos[0].src, "https://example.com/v.mp4");
       // Let the debounce timer settle before restoring globals.
       await new Promise((r) => setTimeout(r, 500));
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("initial scan detects a video already playing before content-script injection", () => {
+    const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
+    const video = makeVideo(dom.window.document);
+    dom.window.document.body.appendChild(video);
+    const { messages, cleanup } = loadContent(dom);
+    try {
+      const report = messages.find((m) => m.type === "grab-videos-detected");
+      assert.ok(report, "the initial scan reports immediately");
+      assert.equal(report.videos.length, 1, "pre-existing autoplay is detected");
+      assert.equal(report.videos[0].src, "https://example.com/v.mp4");
     } finally {
       cleanup();
     }
