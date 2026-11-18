@@ -62,6 +62,8 @@ async function interceptDownload(item) {
   const ctx = {
     incognito: item.incognito === true,
     cookieStoreId: item.cookieStoreId,
+    // The browser supplies the actual referrer used for this download.
+    referer: item.referrer,
     requirePairing: true,
   };
   const status = await postToGrabWithRetry(url, ctx);

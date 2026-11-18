@@ -228,6 +228,7 @@ if (typeof module !== "undefined" && module.exports) {
     sharedHostExcluded,
     _setSleep,
     postToGrab,
+    normalizeReferer,
     resolveStoreId,
     requestRescan,
     postToGrabWithRetry,

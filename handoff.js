@@ -193,6 +193,27 @@ function cookieRetentionPriority(cookie) {
   return 4;
 }
 
+/// Accept only absolute HTTP(S) referrers that can safely be used as a Referer header.
+/// Keep the browser-provided path/query, but omit fragments and credentials.
+function normalizeReferer(value) {
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const raw = value.trim();
+  if (new TextEncoder().encode(raw).length > 2048) return undefined;
+  try {
+    const url = new URL(raw);
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      !url.hostname ||
+      url.username ||
+      url.password
+    ) return undefined;
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 function limitHandoffCookies(cookies) {
   return cookies
     .map((cookie, index) => ({ cookie, index }))
@@ -429,12 +450,16 @@ async function postToGrab(url, ctx) {
     // payload budget; don't drop the whole jar as the first fallback.
     // Every authenticated POST gets fresh signed metadata. Retrying postToGrab
     // generates a new nonce, so a network retry can never replay an earlier body.
-    const requestMetadata = secret
-      ? {
-          timestamp_ms: Date.now(),
-          nonce: bytesToHex(crypto.getRandomValues(new Uint8Array(16))),
-        }
-      : undefined;
+    const referer = normalizeReferer(ctx && typeof ctx === "object" ? ctx.referer : undefined);
+    const requestMetadata = {
+      ...(referer ? { referer } : {}),
+      ...(secret
+        ? {
+            timestamp_ms: Date.now(),
+            nonce: bytesToHex(crypto.getRandomValues(new Uint8Array(16))),
+          }
+        : {}),
+    };
     const fitted = fitHandoffBody(url, cookies, userAgent, requestMetadata);
     if (fitted === null) return 413; // Do not send a body Grab will reject.
     body = fitted.body;
@@ -618,11 +643,16 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
 /// isn't reachable at all (connection failure). If Grab responded — even
 /// with 409 (card opened or declined) or 408 — it handled the URL; falling
 /// back would duplicate the handoff.
-async function explicitSend(url, tabId, incognito) {
+async function explicitSend(url, tabId, incognito, sourceReferer) {
   if (!toGrabUrl(url)) return;
   // The warned-tab set is rebuilt from session storage after a worker restart.
   await warnedTabsReady;
-  const ctx = { tabId, incognito };
+  const referer = normalizeReferer(sourceReferer);
+  const ctx = {
+    tabId,
+    incognito,
+    ...(referer && referer !== url ? { referer } : {}),
+  };
   let status = await postToGrabWithRetry(url, ctx);
   if (status === 0 && (await wakeGrabAndWait(url, tabId, incognito, ctx))) {
     // Grab was closed and has just started: retry over HTTP so the browser
@@ -763,7 +793,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     // Try the paired HTTP handoff first (sends cookies, waits for Grab's
     // real answer); fall back to the grab:// navigation only when Grab isn't
     // reachable at all.
-    if (url) await explicitSend(url, tab && tab.id, tab && tab.incognito === true);
+    if (url) await explicitSend(url, tab && tab.id, tab && tab.incognito === true, tab && tab.url);
     return;
   }
   if (id !== "sendToGrab") return;
@@ -812,7 +842,15 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   // the browser — fall back to the page URL so yt-dlp can extract it there.
   // Try the paired HTTP handoff first (sends cookies); fall back to grab://
   // only when Grab isn't reachable at all.
-  if (target) await explicitSend(target, tab && tab.id, tab && tab.incognito === true);
+  if (target) {
+    const sourceReferer = info.frameUrl || pageUrl;
+    await explicitSend(
+      target,
+      tab && tab.id,
+      tab && tab.incognito === true,
+      sourceReferer !== target ? sourceReferer : undefined,
+    );
+  }
 });
 
 // The toolbar button now opens popup.html (default_popup in the manifest),
