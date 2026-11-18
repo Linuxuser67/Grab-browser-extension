@@ -49,8 +49,8 @@ Grab must be installed with its desktop entry (it registers as the
   the New Download card, other links download normally).
 - **Right-click → Download with Grab**: on links, images, video, audio, and pages.
 - **Video detection** (opt-in: turning it on asks for access to web pages, see
-  [Permissions](#permissions)): videos you've started playing that
-  are currently playing — including streams behind `blob:` players — appear under right-click →
+  [Permissions](#permissions)): currently playing videos — including site-initiated
+  autoplay and streams behind `blob:` players — appear under right-click →
   **Videos detected by Grab**, with a count badge on the toolbar button.
   Picking one opens it in Grab, which probes it like any other link.
   Skipped on video platforms yt-dlp handles itself (YouTube, TikTok,
@@ -70,10 +70,12 @@ Magnet links are passed to the OS untouched — Grab already handles `magnet:`.
   (`Alt+G`, context menu) are URL-only, and automatic
   interception stays off: an unverified listener on the port must never be able
   to cancel a browser download.
-- When the browser provides one, the extension also forwards the download's
-  referrer URL. Grab uses it as the HTTP `Referer` header for sites that check
-  the originating page; it is sent to Grab over loopback and may be sent to the
-  download host.
+- When the browser provides one, the extension forwards the
+  originating page's referrer with browser downloads, context-menu link/media
+  sends, and detected-video sends. Grab uses it as the HTTP `Referer` header
+  for sites that check the originating page; it is sent to Grab over loopback
+  and may be sent to the download host. Page sends through `Alt+G` do not
+  invent a self-referrer.
 - POST-form downloads hand Grab the action URL, which may not resolve to the file.
 - Automatic interception requires Grab to be running. URLs longer than 2048
   characters are refused by Grab and stay in the browser.
