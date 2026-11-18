@@ -420,6 +420,8 @@ describe("collectVideos (content script)", () => {
     src: opts.src || "",
     videoWidth: opts.w || 0,
     videoHeight: opts.h || 0,
+    paused: opts.paused === undefined ? true : opts.paused,
+    ended: opts.ended === undefined ? false : opts.ended,
     querySelectorAll: () => [],
     getBoundingClientRect: () => ({ width: opts.w || 0, height: opts.h || 0 }),
   });
@@ -472,20 +474,27 @@ describe("collectVideos (content script)", () => {
     assert.deepEqual(content.collectVideos(null, () => true), []);
   });
 
-  test("unstarted videos are excluded by the played predicate", () => {
-    const started = {
-      ...fakeVideo({ src: "https://cdn.example.com/a.mp4", w: 640, h: 360 }),
-      _started: true,
+  test("includes active user-started and autoplay videos but excludes idle videos", () => {
+    const userStarted = fakeVideo({
+      src: "https://cdn.example.com/user.mp4", w: 640, h: 360, paused: false,
+    });
+    const autoplay = {
+      ...fakeVideo({
+        src: "https://cdn.example.com/autoplay.mp4", w: 640, h: 360, paused: false,
+      }),
+      muted: true,
     };
-    const idle = {
-      ...fakeVideo({ src: "https://cdn.example.com/b.mp4", w: 640, h: 360 }),
-      _started: false,
-    };
+    const idle = fakeVideo({
+      src: "https://cdn.example.com/idle.mp4", w: 640, h: 360, paused: true,
+    });
     const videos = content.collectVideos(
-      fakeDoc([started, idle]),
-      (v) => v._started === true
+      fakeDoc([userStarted, autoplay, idle]),
+      content.isActiveVideo
     );
-    assert.deepEqual(videos, [{ src: "https://cdn.example.com/a.mp4", blob: false, height: 360 }]);
+    assert.deepEqual(videos, [
+      { src: "https://cdn.example.com/user.mp4", blob: false, height: 360 },
+      { src: "https://cdn.example.com/autoplay.mp4", blob: false, height: 360 },
+    ]);
   });
 
   test("a video with no decoded height yet reports none", () => {
@@ -497,17 +506,12 @@ describe("collectVideos (content script)", () => {
   });
 });
 
-describe("isStartedVideo (content script)", () => {
+describe("isActiveVideo (content script)", () => {
   let content;
   beforeEach(() => {
     content = loadContent();
   });
 
-  const playedSet = (videos) => {
-    const s = new WeakSet();
-    for (const v of videos) s.add(v);
-    return s;
-  };
   const pv = (opts) => ({
     muted: false,
     paused: true,
@@ -518,44 +522,37 @@ describe("isStartedVideo (content script)", () => {
   });
 
   test("user-started videos stay listed while actively playing", () => {
-    const video = pv({ paused: false, currentTime: 42 });
-    assert.equal(content.isStartedVideo(video, playedSet([video])), true);
+    assert.equal(content.isActiveVideo(pv({ paused: false, currentTime: 42 })), true);
   });
 
-  test("paused videos are removed immediately even though they were user-started", () => {
-    const video = pv({ paused: true, currentTime: 42 });
-    assert.equal(content.isStartedVideo(video, playedSet([video])), false);
-  });
-
-  test("ended videos are removed immediately even if paused is false", () => {
-    const video = pv({ paused: false, ended: true, currentTime: 42 });
-    assert.equal(content.isStartedVideo(video, playedSet([video])), false);
-  });
-
-  test("unlatched autoplay and muted previews do not count", () => {
-    const empty = playedSet([]);
+  test("unmuted autoplay is detected without user activation", () => {
     assert.equal(
-      content.isStartedVideo(pv({ muted: false, paused: false, currentTime: 5 }), empty),
-      false
-    );
-    assert.equal(
-      content.isStartedVideo(pv({ muted: true, paused: false, currentTime: 5 }), empty),
-      false
+      content.isActiveVideo(pv({ muted: false, paused: false, currentTime: 5 })),
+      true
     );
   });
 
-  test("missing videos or play latches do not count", () => {
-    const empty = playedSet([]);
-    const playing = pv({ paused: false, currentTime: 5 });
-    assert.equal(content.isStartedVideo(playing, empty), false);
-    assert.equal(content.isStartedVideo(null, empty), false);
+  test("muted autoplay is detected without user activation", () => {
+    assert.equal(
+      content.isActiveVideo(pv({ muted: true, paused: false, currentTime: 5 })),
+      true
+    );
+  });
+
+  test("paused and ended videos are excluded immediately", () => {
+    assert.equal(content.isActiveVideo(pv({ paused: true, currentTime: 42 })), false);
+    assert.equal(content.isActiveVideo(pv({ paused: false, ended: true })), false);
+  });
+
+  test("missing videos do not count", () => {
+    assert.equal(content.isActiveVideo(null), false);
   });
 });
 
 describe("detection wiring", () => {
   const tick = () => new Promise((r) => setTimeout(r, 30));
 
-  test("a sniffed manifest appears in the menu and badge once a video is played, and clicks hand off", async () => {
+  test("a sniffed manifest appears in the menu and badge once a video is active, and clicks hand off", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
     const L = chrome._listeners;
@@ -573,7 +570,7 @@ describe("detection wiring", () => {
       false,
       "no menu from sniffing alone"
     );
-    // She presses play: the content script reports the started video.
+    // An active video report makes the source eligible.
     L["runtime.onMessage"](
       {
         type: "grab-videos-detected",

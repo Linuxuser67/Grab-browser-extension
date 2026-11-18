@@ -1,9 +1,9 @@
 // Grab video detector (content script, isolated world, all frames).
 //
-// Reports <video> elements the user started playing that are still actively
-// playing and have usable http(s) sources. Pause/end reports explicitly retire
-// the entry from the background worker's right-click menu
-// ("Download video with Grab"). Videos whose source is a blob: URL (MSE
+// Reports sufficiently large <video> elements that are actively playing,
+// regardless of whether playback was started by the user or by the site.
+// Pause/end reports retire the entry from the background worker's right-click
+// menu ("Download video with Grab"). Videos whose source is a blob: URL (MSE
 // players) have no file behind them; those are flagged and the worker pairs
 // them with the stream manifests it sniffed via webRequest, the same approach
 // FDM/IDM-style downloaders use.
@@ -47,10 +47,11 @@ function isBigEnough(video) {
   return false;
 }
 
-/// Only actively playing videos that the user started stay in the menu.
-/// A pause or end removes the entry immediately; autoplay is never latched.
-function isStartedVideo(v, played) {
-  return !!v && !!played && played.has(v) && !v.paused && !v.ended;
+/// Only actively playing videos stay in the menu. Sites may start primary
+/// playback automatically, and transient user activation is not a reliable
+/// signal for distinguishing a real video from autoplay.
+function isActiveVideo(v) {
+  return !!v && !v.paused && !v.ended;
 }
 
 /// All <video> elements under `root`, piercing open shadow roots (custom
@@ -71,9 +72,8 @@ function allVideos(root, onShadowRoot) {
 }
 
 /// Pure over a document-like: [{src, blob, height?}] for each qualifying <video>.
-/// `isPlayed` decides which videos count as started by the user; the live
-/// wiring passes `(v) => isStartedVideo(v, played)`. Tests pass explicit
-/// predicates. Pierces shadow roots via allVideos.
+/// `isActive` decides which videos count as active; the live wiring passes
+/// `isActiveVideo`. Tests pass explicit predicates. Pierces shadow roots via allVideos.
 function collectVideos(doc, isPlayed, onShadowRoot) {
   const out = [];
   for (const v of allVideos(doc, onShadowRoot)) {
@@ -117,9 +117,8 @@ function pageVideoTitle(doc) {
 
 // --- Live wiring (browser only; the pure helpers above are unit-tested) ---
 //
-// Currently-playing detection: the menu offers only actively playing videos
-// the user started. Autoplay and player initialization events cannot latch a
-// video, and pause/end must retire its entry immediately.
+// Currently-playing detection: the menu offers actively playing videos,
+// whether playback was started by the site or the user. Pause/end retire entries.
 
 if (
   typeof chrome !== "undefined" &&
@@ -129,14 +128,13 @@ if (
   // worker applies the same gate to sniffed manifests.
   (typeof location === "undefined" || !isExcludedHost(location.hostname))
 ) {
-  const played = new WeakSet();
   let forceFrameReplace = false;
   let lastSent = "";
 
   function report() {
     // Full scans happen on startup, media events, and worker rescan requests,
     // not on every pointer/click interaction.
-    const videos = collectVideos(document, (v) => isStartedVideo(v, played), wireShadowRoot);
+    const videos = collectVideos(document, isActiveVideo, wireShadowRoot);
     const title = pageVideoTitle(document);
     // Pause/end reports must be able to clear stale frame state even when the
     // resulting video list equals the last local snapshot.
@@ -168,19 +166,10 @@ if (
   function onPlay(e) {
     const t = e && e.target;
     if (!t || t.tagName !== "VIDEO") return;
-    // Only latch a new video while the browser reports transient user
-    // activation; autoplay and inline previews stay out of the menu.
-    const userActive =
-      typeof navigator !== "undefined" &&
-      navigator.userActivation &&
-      navigator.userActivation.isActive;
-    if (userActive) {
-      played.add(t);
-      scheduleReport();
-    } else if (played.has(t)) {
-      // A previously user-started video resumed without a fresh activation.
-      scheduleReport();
-    }
+    // Site-initiated playback is valid media too. The report scan checks the
+    // live paused/ended state and the existing size threshold filters tiny
+    // inline previews and trackers.
+    scheduleReport();
   }
 
   function onStopped(e) {
@@ -190,10 +179,7 @@ if (
 
   function onEmptied(e) {
     const t = e && e.target;
-    if (t && t.tagName === "VIDEO") {
-      played.delete(t);
-      scheduleReport(true);
-    }
+    if (t && t.tagName === "VIDEO") scheduleReport(true);
   }
 
   // Media events don't bubble and aren't composed, so they never leave a
@@ -247,5 +233,5 @@ if (
 
 // Test hook for node:test.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { collectVideos, usableVideoSrc, sharedHostExcluded: isExcludedHost, SHARED_EXCLUDED_HOSTS: excludedHostList, MIN_VIDEO_PX, pageVideoTitle, isStartedVideo };
+  module.exports = { collectVideos, usableVideoSrc, sharedHostExcluded: isExcludedHost, SHARED_EXCLUDED_HOSTS: excludedHostList, MIN_VIDEO_PX, pageVideoTitle, isActiveVideo };
 }
