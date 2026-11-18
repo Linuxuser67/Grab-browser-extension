@@ -74,11 +74,11 @@ function allVideos(root, onShadowRoot) {
 /// Pure over a document-like: [{src, blob, height?}] for each qualifying <video>.
 /// `isActive` decides which videos count as active; the live wiring passes
 /// `isActiveVideo`. Tests pass explicit predicates. Pierces shadow roots via allVideos.
-function collectVideos(doc, isPlayed, onShadowRoot) {
+function collectVideos(doc, isActive, onShadowRoot) {
   const out = [];
   for (const v of allVideos(doc, onShadowRoot)) {
     if (!isBigEnough(v)) continue;
-    if (isPlayed && !isPlayed(v)) continue;
+    if (isActive && !isActive(v)) continue;
     const src = usableVideoSrc(v);
     const blob = !src && isBlobVideo(v);
     const entry = { src, blob };
