@@ -2085,7 +2085,11 @@ describe("HTTP handoff to Grab", () => {
     const sent = JSON.parse(post.opts.body);
     assert.equal(sent.referer, referer);
     assert.deepEqual(sent.cookies, []);
-    assert.equal(reads, 1, "the failed cookie preflight is not repeated after navigation");
+    assert.equal(
+      reads,
+      2,
+      "readCookies makes one partitionKey query and one compatibility fallback, with no post-navigation read",
+    );
     assert.ok(
       chrome._calls.some(
         ([name, args]) =>
