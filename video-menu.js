@@ -299,8 +299,8 @@ function isPrivateNetworkHost(host) {
 }
 
 /// Public playlists can be inspected. A private/local target is accepted only
-/// when it is the same host as the tab's own private origin; this keeps local
-/// media working without letting a public page probe arbitrary LAN addresses.
+/// when the tab's own origin is also private; a public page cannot use the
+/// extension's host permissions to probe arbitrary LAN devices.
 function isHlsPlaylistFetchAllowed(value, tabOrigin = null) {
   let url;
   try {
@@ -314,16 +314,13 @@ function isHlsPlaylistFetchAllowed(value, tabOrigin = null) {
     url.password
   ) return false;
 
-  const host = normalizedHlsHost(url.hostname);
-  if (!isPrivateNetworkHost(host)) return true;
+  if (!isPrivateNetworkHost(url.hostname)) return true;
   if (typeof tabOrigin !== "string" || !tabOrigin) return false;
   try {
     const origin = new URL(tabOrigin);
-    const originHost = normalizedHlsHost(origin.hostname);
     return (
       (origin.protocol === "http:" || origin.protocol === "https:") &&
-      isPrivateNetworkHost(originHost) &&
-      originHost === host
+      isPrivateNetworkHost(origin.hostname)
     );
   } catch {
     return false;

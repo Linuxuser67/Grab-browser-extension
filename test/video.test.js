@@ -1972,7 +1972,7 @@ describe("HLS master playlist filtering", () => {
     }
   });
 
-  test("allows a private playlist only on the same private tab origin", async () => {
+  test("allows private playlists when the tab's own origin is private", async () => {
     const bg = loadBackground(makeChrome());
     const originalFetch = globalThis.fetch;
     const requests = [];
@@ -1984,19 +1984,16 @@ describe("HLS master playlist filtering", () => {
       };
     };
     try {
-      const local = "http://192.168.1.20/master.m3u8";
+      const sameHost = "http://192.168.1.20/master.m3u8";
+      const anotherLanHost = "http://192.168.1.21/master.m3u8";
+      const privateTab = "http://192.168.1.20/watch";
+      assert.equal(await bg.isMasterPlaylist(sameHost, privateTab), true);
+      assert.equal(await bg.isMasterPlaylist(anotherLanHost, privateTab), true);
       assert.equal(
-        await bg.isMasterPlaylist(local, "http://192.168.1.20/watch"),
-        true,
-      );
-      assert.equal(
-        await bg.isMasterPlaylist(
-          "http://192.168.1.21/master.m3u8",
-          "http://192.168.1.20/watch",
-        ),
+        await bg.isMasterPlaylist(anotherLanHost, "https://public.example/watch"),
         null,
       );
-      assert.deepEqual(requests, [local]);
+      assert.deepEqual(requests, [sameHost, anotherLanHost]);
     } finally {
       globalThis.fetch = originalFetch;
     }
