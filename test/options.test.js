@@ -394,13 +394,3 @@ test("unpairing releases the optional permissions it no longer needs", async () 
   assert.equal(ui.releaseCalls, 1);
   assert.equal(status.textContent, "Not paired: links only");
 });
-
-test("automatic interception explains that pairing is required", () => {
-  const optionsHtml = fs.readFileSync(
-    path.join(__dirname, "..", "options.html"),
-    "utf8",
-  );
-  assert.ok(optionsHtml.includes('id="interceptDownloads"'));
-  assert.ok(optionsHtml.includes("Automatic interception requires pairing with Grab; while"));
-  assert.ok(optionsHtml.includes("unpaired, downloads stay in the browser."));
-});

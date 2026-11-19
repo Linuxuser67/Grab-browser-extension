@@ -95,6 +95,13 @@
         margin-top: 2px;
         accent-color: var(--accent);
       }
+
+      #interceptPairingNote {
+        margin: 4px 0 10px 24px;
+        font-size: 12px;
+        line-height: 1.4;
+        opacity: 0.8;
+      }
       input[type="text"],
       input[type="number"] {
         width: 100%;
@@ -216,6 +223,9 @@
       <input type="checkbox" id="interceptDownloads" />
       <span>Automatically send browser downloads to Grab</span>
     </label>
+    <p id="interceptPairingNote">
+      Requires pairing with Grab. While unpaired, downloads stay in the browser.
+    </p>
 
     <label for="minSizeMB">Only intercept downloads of at least</label>
     <div class="row">
