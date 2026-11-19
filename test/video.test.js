@@ -802,6 +802,217 @@ describe("detection wiring", () => {
     );
   });
 
+  test("frames without videos do not consume the frame budget", async () => {
+    // A page with ad and analytics iframes: every frame reports, but most
+    // have no video. Those empty reports must not use up the frame budget,
+    // or videos in later frames stop being detected.
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 161;
+    await L["tabs.onActivated"]({ tabId });
+
+    for (let frameId = 0; frameId < bg.MAX_VIDEO_FRAMES + 8; frameId++) {
+      await L["runtime.onMessage"](
+        { type: "grab-videos-detected", videos: [] },
+        { tab: { id: tabId, url: "https://example.com/" }, frameId },
+      );
+    }
+    assert.equal(
+      bg._videoFinds.get(tabId).frames.size,
+      0,
+      "frames without videos are not tracked at all"
+    );
+    const lateFrame = bg.MAX_VIDEO_FRAMES + 9;
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{ src: "https://cdn.example.com/late.mp4", blob: false }],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: lateFrame },
+    );
+
+    const findings = bg._videoFinds.get(tabId);
+    const late = findings.frames.get(lateFrame) || [];
+    assert.deepEqual(
+      late.map((video) => video.src),
+      ["https://cdn.example.com/late.mp4"],
+      "a video in a late frame is still detected"
+    );
+  });
+
+  test("a new frame evicts the oldest frame when the frame budget is full", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 162;
+    await L["tabs.onActivated"]({ tabId });
+
+    // The top frame's video must survive every eviction.
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{ src: "https://cdn.example.com/top.mp4", blob: false }],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    for (let frameId = 1; frameId < bg.MAX_VIDEO_FRAMES; frameId++) {
+      await L["runtime.onMessage"](
+        {
+          type: "grab-videos-detected",
+          videos: [{ src: `https://cdn.example.com/v/${frameId}.mp4`, blob: false }],
+        },
+        { tab: { id: tabId, url: "https://example.com/" }, frameId },
+      );
+    }
+    const newest = bg.MAX_VIDEO_FRAMES;
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{ src: `https://cdn.example.com/v/${newest}.mp4`, blob: false }],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: newest },
+    );
+
+    const findings = bg._videoFinds.get(tabId);
+    assert.ok(findings.frames.size <= bg.MAX_VIDEO_FRAMES, "frame IDs stay bounded");
+    const newestVideos = findings.frames.get(newest) || [];
+    assert.deepEqual(
+      newestVideos.map((video) => video.src),
+      [`https://cdn.example.com/v/${newest}.mp4`],
+      "the newest frame is detected even when the budget was full"
+    );
+    assert.equal(findings.frames.get(1), undefined, "the oldest frame was evicted");
+    assert.deepEqual(
+      (findings.frames.get(0) || []).map((video) => video.src),
+      ["https://cdn.example.com/top.mp4"],
+      "the top frame is never evicted"
+    );
+  });
+
+  test("an empty report from a new frame leaves existing detections untouched", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 163;
+    await L["tabs.onActivated"]({ tabId });
+
+    const manifest = "https://cdn.example.com/one/master.m3u8";
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 1, url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/one",
+      }] },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 1 },
+    );
+    // Fill the frame budget.
+    for (let frameId = 2; frameId <= bg.MAX_VIDEO_FRAMES; frameId++) {
+      await L["runtime.onMessage"](
+        {
+          type: "grab-videos-detected",
+          videos: [{ src: `https://cdn.example.com/v/${frameId}.mp4`, blob: false }],
+        },
+        { tab: { id: tabId, url: "https://example.com/" }, frameId },
+      );
+    }
+    // An empty report from a frame nobody knows must evict nothing.
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [] },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 999 },
+    );
+
+    const findings = bg._videoFinds.get(tabId);
+    assert.equal(
+      (findings.frames.get(1) || []).length,
+      1,
+      "the detected video survives an empty report"
+    );
+    assert.deepEqual(
+      findings.sniffedByFrame.get(1),
+      [manifest],
+      "the sniffed manifest survives an empty report"
+    );
+  });
+
+  test("a new frame takes the room of an older frame when the item cap is full", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 164;
+    await L["tabs.onActivated"]({ tabId });
+
+    // The top frame holds nearly every item slot.
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: Array.from({ length: bg.MAX_VIDEO_ITEMS - 1 }, (_, i) => ({
+          src: `https://cdn.example.com/top/${i}.mp4`, blob: false,
+        })),
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    // One older frame holds the last slot.
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: "https://cdn.example.com/old.mp4", blob: false }] },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 2 },
+    );
+    // A new frame must still be detected: the older frame yields its slot.
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: "https://cdn.example.com/new.mp4", blob: false }] },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 3 },
+    );
+
+    const findings = bg._videoFinds.get(tabId);
+    assert.deepEqual(
+      (findings.frames.get(3) || []).map((video) => video.src),
+      ["https://cdn.example.com/new.mp4"],
+      "the new video is detected even though the item cap was full"
+    );
+    assert.equal(findings.frames.get(2), undefined, "the older frame yielded its slot");
+  });
+
+  test("a manifest sniffed before its report survives when the frame budget is full", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 165;
+    await L["tabs.onActivated"]({ tabId });
+
+    for (let frameId = 1; frameId <= bg.MAX_VIDEO_FRAMES; frameId++) {
+      await L["webRequest.onResponseStarted"]({
+        tabId, frameId, url: `https://cdn.example.com/${frameId}/master.m3u8`,
+        responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+      });
+      await L["runtime.onMessage"](
+        { type: "grab-videos-detected", videos: [{
+          src: null, blob: true, blobUrl: `blob:https://example.com/${frameId}`,
+        }] },
+        { tab: { id: tabId, url: "https://example.com/" }, frameId },
+      );
+    }
+    // A new player fetches its manifest before its video element reports.
+    const manifest = "https://cdn.example.com/new/master.m3u8";
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 999, url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/new",
+      }] },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 999 },
+    );
+
+    assert.deepEqual(
+      await bg.resolvedBlobVideoUrlForFrame(tabId, 999),
+      manifest,
+      "the blob video still resolves to its manifest"
+    );
+  });
+
   test("a blob: video is paired with the tab's sniffed manifest", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
