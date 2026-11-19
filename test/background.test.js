@@ -1940,6 +1940,64 @@ describe("HTTP handoff to Grab", () => {
     );
   });
 
+  test("cold-start wake launches Grab before awaiting the cookie snapshot", async () => {
+    await pair();
+    await chrome.storage.local.set({ forwardCookies: true });
+    chrome.permissions = { contains: async () => true };
+    let launched = false;
+    let storeResolved = false;
+    chrome.tabs.get = async (id) => {
+      assert.equal(launched, false, "the source tab store is resolved before navigation");
+      storeResolved = true;
+      return {
+        id,
+        url: "https://example.com/watch",
+        cookieStoreId: "firefox-default",
+      };
+    };
+    mockColdStart();
+    const coldStartUpdate = chrome.tabs.update;
+    chrome.tabs.update = (a, b) => {
+      const target = b !== undefined ? b : a;
+      const update = typeof target === "string" ? target : target && target.url;
+      if (update === "grab://https/") launched = true;
+      return coldStartUpdate(a, b);
+    };
+
+    let resolveCookies;
+    const delayedCookies = new Promise((resolve) => {
+      resolveCookies = resolve;
+    });
+    chrome.cookies.getAll = async (options) => {
+      assert.equal(launched, true, "cookie reading starts after Grab is launched");
+      assert.equal(storeResolved, true, "the original tab store was captured first");
+      assert.equal(options.storeId, "firefox-default");
+      return delayedCookies;
+    };
+
+    let fakeNow = 1_000;
+    const realNow = Date.now;
+    Date.now = () => fakeNow;
+    bg._setWakeTimeout(1000);
+    bg._setSleep(async (ms) => { fakeNow += ms; });
+    const ctx = { tabId: 7 };
+    const pendingWake = bg.wakeGrabAndWait("https://example.com/file.zip", 7, false, ctx);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(launched, true, "Grab launch is not blocked by the cookie API");
+      resolveCookies([{
+        name: "session", value: "abc", domain: "example.com",
+        hostOnly: true, path: "/", secure: true,
+      }]);
+      assert.equal(await pendingWake, true);
+      assert.deepEqual(ctx.preparedCookies.map((cookie) => cookie.name), ["session"]);
+    } finally {
+      resolveCookies([]);
+      Date.now = realNow;
+      bg._setSleep((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    }
+  });
+
   test("cold start that never comes up falls back to the grab:// URL", async () => {
     await pair();
     chrome.cookies.getAll = async () => [{

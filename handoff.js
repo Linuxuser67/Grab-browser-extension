@@ -543,14 +543,13 @@ async function postToGrabWithRetry(url, ctx, retryDelays = HANDOFF_RETRY_DELAYS_
 /// instead of each navigating the tab to the wake URL.
 let wakeInFlight = null;
 
-/// Read the cookie jar before waking Grab and retain that exact snapshot for
-/// the authenticated retry. The preflight and POST must use the same resolved
-/// store and cookie result; a second read after launch could otherwise return
-/// a different jar. The snapshot stays in this short-lived context and is
-/// never persisted or sent before Grab proves its pairing.
-async function prepareHandoffCookies(url, ctx) {
+/// Read the cookie jar for a store resolved before the wake navigation. The
+/// caller starts this read after launching Grab so the two operations overlap,
+/// while the source tab's original cookie store remains fixed. The snapshot
+/// stays in this short-lived context and is sent only after Grab proves pairing.
+async function prepareHandoffCookies(url, ctx, resolvedStoreId = resolveStoreId(ctx)) {
   try {
-    const storeId = await resolveStoreId(ctx);
+    const storeId = await resolvedStoreId;
     if (storeId === null) {
       if (ctx && typeof ctx === "object") {
         ctx.preparedCookies = [];
@@ -581,9 +580,10 @@ async function prepareHandoffCookies(url, ctx) {
 async function wakeGrabAndWait(url, tabId, incognito, ctx) {
   const secret = await getPairingCode();
 
-  // Capture the cookie store before navigating the source tab, but only when
-  // the paired user has explicitly enabled forwarding and granted access.
-  // Failure or an empty jar must not prevent the URL/Referer handoff.
+  // Resolve the source tab's cookie store before navigation changes the tab,
+  // but defer the cookie read until after Grab has been launched.
+  let resolvedCookieStoreId;
+  let shouldPrepareCookies = false;
   if (secret && incognito !== true) {
     if (!(await hasCookiePermission())) {
       if (ctx && typeof ctx === "object") {
@@ -591,14 +591,27 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
           "Cookie access is not granted. Grant the extension's optional Cookies permission in Options to forward site authentication.";
       }
     } else if (await loadForwardCookies()) {
-      await prepareHandoffCookies(url, ctx);
+      try {
+        resolvedCookieStoreId = await resolveStoreId(ctx);
+        shouldPrepareCookies = true;
+      } catch {
+        if (ctx && typeof ctx === "object") {
+          ctx.preparedCookies = [];
+          ctx.cookieWarning =
+            "Grab could not resolve this site's cookie store. The URL was sent without cookies.";
+        }
+      }
     }
   }
+  const prepareCookies = () =>
+    shouldPrepareCookies
+      ? prepareHandoffCookies(url, ctx, Promise.resolve(resolvedCookieStoreId))
+      : Promise.resolve(false);
 
-  // Check after the optional cookie preflight: concurrent sends share one
-  // launch, while each retains its own URL, Referer, and cookie snapshot.
+  // Concurrent sends share one launch, but each captures its own cookie jar
+  // from the store resolved before that tab was navigated.
   if (wakeInFlight) {
-    const ready = await wakeInFlight;
+    const [ready] = await Promise.all([wakeInFlight, prepareCookies()]);
     if (
       !ready &&
       ctx &&
@@ -619,15 +632,16 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
     Number.isInteger(tabId) && tabId >= 0 && warnedTabs.has(tabId);
   const run = (async () => {
     try {
+      // Launch through the tab the user acted on before waiting for the cookie
+      // snapshot. The browser delegates grab:// to the OS handler; no
+      // background tab is created.
+      updateTab(tabId, GRAB_WAKE_URL);
       if (!keepWarning) {
         try {
           await chrome.action.setBadgeText({ ...tabArg, text: "…" });
           await chrome.action.setTitle({ ...tabArg, title: "Starting Grab…" });
         } catch {}
       }
-      // Launch through the tab the user acted on. The browser delegates the
-      // grab:// navigation to the OS handler; no background tab is created.
-      updateTab(tabId, GRAB_WAKE_URL);
       const deadline = Date.now() + wakeTimeoutMs;
       return await withWorkerKeepAlive(async () => {
         while (Date.now() < deadline) {
@@ -651,7 +665,7 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
   })();
   wakeInFlight = run;
   try {
-    const ready = await run;
+    const [ready] = await Promise.all([run, prepareCookies()]);
     if (
       !ready &&
       ctx &&
