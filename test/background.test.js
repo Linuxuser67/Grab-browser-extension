@@ -119,6 +119,7 @@ function makeChrome(shared) {
     },
     runtime: {
       onInstalled: capture("runtime.onInstalled"),
+      id: "grab-extension-test",
       onMessage: capture("runtime.onMessage"),
       onStartup: capture("runtime.onStartup"),
       openOptionsPage: async () => calls.push(["runtime.openOptionsPage"]),
@@ -611,7 +612,7 @@ describe("handoff tab separation (review fix 1)", () => {
     const chrome = makeChrome();
     loadBackground(chrome);
     // Simulate video detection for tab 1.
-    const sender = { tab: { id: 1, url: "https://example.com/" }, frameId: 0 };
+    const sender = { id: chrome.runtime.id, tab: { id: 1, url: "https://example.com/" }, frameId: 0 };
     await chrome._listeners["runtime.onMessage"](
       {
         type: "grab-videos-detected",
@@ -641,7 +642,7 @@ describe("handoff tab separation (review fix 1)", () => {
   test("right-click matches video by srcUrl among multiple detected", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
-    const sender = { tab: { id: 2, url: "https://example.com/feed" }, frameId: 0 };
+    const sender = { id: chrome.runtime.id, tab: { id: 2, url: "https://example.com/feed" }, frameId: 0 };
     await chrome._listeners["runtime.onMessage"](
       {
         type: "grab-videos-detected",
@@ -675,7 +676,7 @@ describe("handoff tab separation (review fix 1)", () => {
     const chrome = makeChrome();
     loadBackground(chrome);
     await chrome._listeners["tabs.onActivated"]({ tabId: 7 });
-    const sender = { tab: { id: 7, url: "https://example.com/" }, frameId: 0 };
+    const sender = { id: chrome.runtime.id, tab: { id: 7, url: "https://example.com/" }, frameId: 0 };
     // Initial report with a played video.
     await chrome._listeners["runtime.onMessage"](
       {
@@ -715,7 +716,7 @@ describe("handoff tab separation (review fix 1)", () => {
     const chrome = makeChrome();
     loadBackground(chrome);
     await chrome._listeners["tabs.onActivated"]({ tabId: 8 });
-    const sender = { tab: { id: 8, url: "https://example.com/" }, frameId: 0 };
+    const sender = { id: chrome.runtime.id, tab: { id: 8, url: "https://example.com/" }, frameId: 0 };
     await chrome._listeners["runtime.onMessage"](
       {
         type: "grab-videos-detected",
@@ -2700,9 +2701,30 @@ describe("review hardening (1.5.8)", () => {
     globalThis.fetch = runningFetch;
     const ask = () =>
       new Promise((resolve) => {
-        const kept = chrome._listeners["runtime.onMessage"]({ type: "grab-status" }, {}, resolve);
+        const kept = chrome._listeners["runtime.onMessage"](
+          { type: "grab-status" },
+          { id: chrome.runtime.id },
+          resolve,
+        );
         assert.equal(kept, true, "channel stays open for the async answer");
       });
+
+    const listener = chrome._listeners["runtime.onMessage"];
+    assert.equal(
+      listener({ type: "grab-status" }, { id: "another-extension" }, () => {}),
+      false,
+      "messages from a different extension are ignored",
+    );
+    assert.equal(
+      listener({ type: "grab-status" }, { id: chrome.runtime.id, tab: { id: 7 } }, () => {}),
+      false,
+      "content-script senders cannot read popup runtime status",
+    );
+    assert.equal(
+      listener({ type: "grab-status" }, { tab: { id: 7 } }, () => {}),
+      false,
+      "senders without the extension ID are ignored",
+    );
 
     assert.deepEqual(await ask(), { state: "running-unpaired" });
     assert.match(requested[0], /^http:\/\/127\.0\.0\.1:9412\/hello\?n=[0-9a-f]{32}$/);
