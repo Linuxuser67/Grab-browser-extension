@@ -172,7 +172,11 @@ getSettings().then((s) => {
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Messages are internal to this extension. Page content scripts may report
+  // detections, but the popup-only status request must never be answered to a tab.
+  if (!sender || sender.id !== chrome.runtime.id) return false;
   if (msg && msg.type === "grab-status") {
+    if (sender.tab) return false;
     grabStatus().then(sendResponse);
     return true; // Keep the channel open for the async answer.
   }
