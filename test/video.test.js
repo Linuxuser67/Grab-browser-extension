@@ -1956,6 +1956,51 @@ describe("HLS master playlist filtering", () => {
     assert.equal(await bg.isMasterPlaylist("http://localhost/master.m3u8"), null);
     assert.equal(await bg.isMasterPlaylist("https://user:pass@example.com/master.m3u8"), null);
   });
+
+  test("rejects private, carrier-grade NAT, and IPv6 ULA playlist targets from public tabs", async () => {
+    const bg = loadBackground(makeChrome());
+    const targets = [
+      "http://10.0.0.1/master.m3u8",
+      "http://172.16.0.1/master.m3u8",
+      "http://192.168.1.1/master.m3u8",
+      "http://100.64.0.1/master.m3u8",
+      "http://[fd00::1]/master.m3u8",
+      "http://[fc00::1]/master.m3u8",
+    ];
+    for (const target of targets) {
+      assert.equal(await bg.isMasterPlaylist(target), null, target);
+    }
+  });
+
+  test("allows a private playlist only on the same private tab origin", async () => {
+    const bg = loadBackground(makeChrome());
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async (value) => {
+      requests.push(String(value));
+      return {
+        ok: true,
+        text: async () => "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nrendition.m3u8",
+      };
+    };
+    try {
+      const local = "http://192.168.1.20/master.m3u8";
+      assert.equal(
+        await bg.isMasterPlaylist(local, "http://192.168.1.20/watch"),
+        true,
+      );
+      assert.equal(
+        await bg.isMasterPlaylist(
+          "http://192.168.1.21/master.m3u8",
+          "http://192.168.1.20/watch",
+        ),
+        null,
+      );
+      assert.deepEqual(requests, [local]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe("opt-in video access", () => {

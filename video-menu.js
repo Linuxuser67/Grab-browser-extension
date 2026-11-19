@@ -69,6 +69,17 @@ async function isExcludedTab(tabId) {
   }
 }
 
+/// The HLS fetch policy needs the top-level origin to distinguish a local
+/// player's own manifest from a public page's attempt to probe another host.
+async function tabOriginForHlsFetch(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return tab && typeof tab.url === "string" ? new URL(tab.url).origin : null;
+  } catch {
+    return null;
+  }
+}
+
 /// Classify a sniffed response URL: "manifest" for HLS/DASH playlists,
 /// "media" for direct video files, null for everything else (segments,
 /// audio, images, pages). Manifests win on content type alone because some
@@ -241,10 +252,56 @@ function isHlsPlaylistUrl(value) {
   }
 }
 
-/// Reject obvious local-only targets before using the extension's host
-/// permissions. Redirects are disabled below, so a public URL cannot redirect
-/// this privileged fetch to a loopback or metadata endpoint.
-function isHlsPlaylistFetchAllowed(value) {
+/// Normalize URL.hostname for IP and local-host checks. URL parses IPv6
+/// literals with brackets, unlike ordinary DNS names.
+function normalizedHlsHost(host) {
+  return String(host || "").toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+}
+
+/// True for address ranges that are not public destinations. The extension
+/// fetch runs with host permissions, so it must not turn page-controlled media
+/// URLs into blind requests to a user's LAN.
+function isPrivateNetworkHost(host) {
+  const value = normalizedHlsHost(host);
+  if (
+    value === "localhost" ||
+    value.endsWith(".localhost") ||
+    value.endsWith(".local") ||
+    value.endsWith(".internal") ||
+    value.endsWith(".home.arpa") ||
+    (!value.includes(".") && !value.includes(":"))
+  ) return true;
+
+  if (value.includes(":")) {
+    return (
+      value === "::" ||
+      value === "::1" ||
+      value.startsWith("::ffff:") ||
+      /^fe[89ab]/.test(value) ||
+      /^f[cd]/.test(value)
+    );
+  }
+
+  const ipv4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!ipv4) return false;
+  const octets = ipv4.slice(1).map(Number);
+  if (octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a, b] = octets;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127)
+  );
+}
+
+/// Public playlists can be inspected. A private/local target is accepted only
+/// when it is the same host as the tab's own private origin; this keeps local
+/// media working without letting a public page probe arbitrary LAN addresses.
+function isHlsPlaylistFetchAllowed(value, tabOrigin = null) {
   let url;
   try {
     url = new URL(value);
@@ -257,31 +314,29 @@ function isHlsPlaylistFetchAllowed(value) {
     url.password
   ) return false;
 
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
-  if (host === "localhost" || host.endsWith(".localhost")) return false;
-  if (host.includes(":")) {
-    return !(
-      host === "::" ||
-      host === "::1" ||
-      host.startsWith("::ffff:") ||
-      /^fe[89ab]/.test(host)
+  const host = normalizedHlsHost(url.hostname);
+  if (!isPrivateNetworkHost(host)) return true;
+  if (typeof tabOrigin !== "string" || !tabOrigin) return false;
+  try {
+    const origin = new URL(tabOrigin);
+    const originHost = normalizedHlsHost(origin.hostname);
+    return (
+      (origin.protocol === "http:" || origin.protocol === "https:") &&
+      isPrivateNetworkHost(originHost) &&
+      originHost === host
     );
+  } catch {
+    return false;
   }
-  const ipv4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host);
-  if (ipv4) {
-    const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
-    if (a === 0 || a === 127 || (a === 169 && b === 254)) return false;
-  }
-  return true;
 }
 
 /// Fetch a playlist without cookies, redirects, or unbounded response bodies.
 /// Null means the content could not be safely inspected; callers keep it.
-async function fetchHlsPlaylistText(value) {
+async function fetchHlsPlaylistText(value, tabOrigin = null) {
+  if (!isHlsPlaylistFetchAllowed(value, tabOrigin)) return null;
   if (hlsPlaylistTextCache.has(value)) {
     return hlsPlaylistTextCache.get(value);
   }
-  if (!isHlsPlaylistFetchAllowed(value)) return null;
 
   const controller = new AbortController();
   const timer = setTimeout(
@@ -338,8 +393,8 @@ async function fetchHlsPlaylistText(value) {
 
 /// True only for a playlist containing the HLS multivariant marker.
 /// Null represents an unreadable playlist and must not cause filtering.
-async function isMasterPlaylist(value) {
-  const text = await fetchHlsPlaylistText(value);
+async function isMasterPlaylist(value, tabOrigin = null) {
+  const text = await fetchHlsPlaylistText(value, tabOrigin);
   if (text === null) return null;
   return text.slice(0, 4096).includes("#EXT-X-STREAM-INF:");
 }
@@ -383,7 +438,7 @@ function hlsChildPlaylistKeys(text, masterUrl) {
 /// Prefer confirmed HLS masters over only the child playlists they explicitly
 /// reference. Unknown playlists, unrelated streams, DASH manifests, and direct
 /// files are preserved. Candidate fetches run with bounded concurrency.
-async function preferMasterPlaylists(urls) {
+async function preferMasterPlaylists(urls, tabOrigin = null) {
   const manifests = [...new Set((urls || []).filter(isHlsPlaylistUrl))];
   if (manifests.length === 0) return urls || [];
 
@@ -395,7 +450,7 @@ async function preferMasterPlaylists(urls) {
       while (next < manifests.length) {
         const index = next++;
         const url = manifests[index];
-        results.set(url, await isMasterPlaylist(url));
+        results.set(url, await isMasterPlaylist(url, tabOrigin));
       }
     },
   );
@@ -406,7 +461,7 @@ async function preferMasterPlaylists(urls) {
   for (const url of manifests) {
     if (results.get(url) !== true) continue;
     masterKeys.add(urlPathKey(url));
-    const text = await fetchHlsPlaylistText(url);
+    const text = await fetchHlsPlaylistText(url, tabOrigin);
     if (text === null) continue;
     for (const key of hlsChildPlaylistKeys(text, url)) childKeys.add(key);
   }
@@ -942,7 +997,7 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId) {
   const videos = finds.frames.get(frameId) || [];
   if (videos.length !== 1 || videos[0].blob !== true) return null;
   let urls = mergedVideoUrlsForFrame(tabId, frameId);
-  if (urls.length > 1) urls = await preferMasterPlaylists(urls);
+  if (urls.length > 1) urls = await preferMasterPlaylists(urls, await tabOriginForHlsFetch(tabId));
   return urls.length === 1 ? urls[0] : null;
 }
 
@@ -959,11 +1014,11 @@ async function resolvedVideoUrlsForFrame(tabId, frameId) {
   const video = videos[0];
   if (video && video.blob === true) {
     let urls = mergedVideoUrlsForFrame(tabId, frameId);
-    if (urls.length > 1) urls = await preferMasterPlaylists(urls);
+    if (urls.length > 1) urls = await preferMasterPlaylists(urls, await tabOriginForHlsFetch(tabId));
     return urls;
   }
   let urls = mergedVideoUrlsForFrame(tabId, frameId);
-  if (urls.length > 1) urls = await preferMasterPlaylists(urls);
+  if (urls.length > 1) urls = await preferMasterPlaylists(urls, await tabOriginForHlsFetch(tabId));
   return video && video.src ? urls : [];
 }
 
