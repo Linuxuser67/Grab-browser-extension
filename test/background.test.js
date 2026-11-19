@@ -119,6 +119,7 @@ function makeChrome(shared) {
     },
     runtime: {
       onInstalled: capture("runtime.onInstalled"),
+      id: "grab-extension-test",
       onMessage: capture("runtime.onMessage"),
       onStartup: capture("runtime.onStartup"),
       openOptionsPage: async () => calls.push(["runtime.openOptionsPage"]),
@@ -611,7 +612,7 @@ describe("handoff tab separation (review fix 1)", () => {
     const chrome = makeChrome();
     loadBackground(chrome);
     // Simulate video detection for tab 1.
-    const sender = { tab: { id: 1, url: "https://example.com/" }, frameId: 0 };
+    const sender = { id: chrome.runtime.id, tab: { id: 1, url: "https://example.com/" }, frameId: 0 };
     await chrome._listeners["runtime.onMessage"](
       {
         type: "grab-videos-detected",
@@ -641,7 +642,7 @@ describe("handoff tab separation (review fix 1)", () => {
   test("right-click matches video by srcUrl among multiple detected", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
-    const sender = { tab: { id: 2, url: "https://example.com/feed" }, frameId: 0 };
+    const sender = { id: chrome.runtime.id, tab: { id: 2, url: "https://example.com/feed" }, frameId: 0 };
     await chrome._listeners["runtime.onMessage"](
       {
         type: "grab-videos-detected",
@@ -675,7 +676,7 @@ describe("handoff tab separation (review fix 1)", () => {
     const chrome = makeChrome();
     loadBackground(chrome);
     await chrome._listeners["tabs.onActivated"]({ tabId: 7 });
-    const sender = { tab: { id: 7, url: "https://example.com/" }, frameId: 0 };
+    const sender = { id: chrome.runtime.id, tab: { id: 7, url: "https://example.com/" }, frameId: 0 };
     // Initial report with a played video.
     await chrome._listeners["runtime.onMessage"](
       {
@@ -715,7 +716,7 @@ describe("handoff tab separation (review fix 1)", () => {
     const chrome = makeChrome();
     loadBackground(chrome);
     await chrome._listeners["tabs.onActivated"]({ tabId: 8 });
-    const sender = { tab: { id: 8, url: "https://example.com/" }, frameId: 0 };
+    const sender = { id: chrome.runtime.id, tab: { id: 8, url: "https://example.com/" }, frameId: 0 };
     await chrome._listeners["runtime.onMessage"](
       {
         type: "grab-videos-detected",
@@ -1648,7 +1649,12 @@ describe("HTTP handoff to Grab", () => {
     });
     assert.equal(posts().length, 1);
     assert.equal(tabsCreated().length, 0);
-    assert.ok(chrome._calls.some(([name, id]) => name === "cancel" && id === 77));
+    const cancelIndex = chrome._calls.findIndex(([name, id]) => name === "cancel" && id === 77);
+    const removeIndex = chrome._calls.findIndex(([name, id]) => name === "removeFile" && id === 77);
+    const eraseIndex = chrome._calls.findIndex(([name, args]) => name === "erase" && args.id === 77);
+    assert.ok(cancelIndex >= 0, "browser download is cancelled after Grab accepts it");
+    assert.ok(removeIndex > cancelIndex, "the partial browser file is removed after cancellation");
+    assert.ok(eraseIndex > removeIndex, "the browser history entry is erased after file cleanup");
   });
 
   test("automatic interception leaves the download in the browser when Grab is down", async () => {
@@ -1938,6 +1944,64 @@ describe("HTTP handoff to Grab", () => {
       true,
       "the context-menu action reports its wake state",
     );
+  });
+
+  test("cold-start wake launches Grab before awaiting the cookie snapshot", async () => {
+    await pair();
+    await chrome.storage.local.set({ forwardCookies: true });
+    chrome.permissions = { contains: async () => true };
+    let launched = false;
+    let storeResolved = false;
+    chrome.tabs.get = async (id) => {
+      assert.equal(launched, false, "the source tab store is resolved before navigation");
+      storeResolved = true;
+      return {
+        id,
+        url: "https://example.com/watch",
+        cookieStoreId: "firefox-default",
+      };
+    };
+    mockColdStart();
+    const coldStartUpdate = chrome.tabs.update;
+    chrome.tabs.update = (a, b) => {
+      const target = b !== undefined ? b : a;
+      const update = typeof target === "string" ? target : target && target.url;
+      if (update === "grab://https/") launched = true;
+      return coldStartUpdate(a, b);
+    };
+
+    let resolveCookies;
+    const delayedCookies = new Promise((resolve) => {
+      resolveCookies = resolve;
+    });
+    chrome.cookies.getAll = async (options) => {
+      assert.equal(launched, true, "cookie reading starts after Grab is launched");
+      assert.equal(storeResolved, true, "the original tab store was captured first");
+      assert.equal(options.storeId, "firefox-default");
+      return delayedCookies;
+    };
+
+    let fakeNow = 1_000;
+    const realNow = Date.now;
+    Date.now = () => fakeNow;
+    bg._setWakeTimeout(1000);
+    bg._setSleep(async (ms) => { fakeNow += ms; });
+    const ctx = { tabId: 7 };
+    const pendingWake = bg.wakeGrabAndWait("https://example.com/file.zip", 7, false, ctx);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(launched, true, "Grab launch is not blocked by the cookie API");
+      resolveCookies([{
+        name: "session", value: "abc", domain: "example.com",
+        hostOnly: true, path: "/", secure: true,
+      }]);
+      assert.equal(await pendingWake, true);
+      assert.deepEqual(ctx.preparedCookies.map((cookie) => cookie.name), ["session"]);
+    } finally {
+      resolveCookies([]);
+      Date.now = realNow;
+      bg._setSleep((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    }
   });
 
   test("cold start that never comes up falls back to the grab:// URL", async () => {
@@ -2637,9 +2701,30 @@ describe("review hardening (1.5.8)", () => {
     globalThis.fetch = runningFetch;
     const ask = () =>
       new Promise((resolve) => {
-        const kept = chrome._listeners["runtime.onMessage"]({ type: "grab-status" }, {}, resolve);
+        const kept = chrome._listeners["runtime.onMessage"](
+          { type: "grab-status" },
+          { id: chrome.runtime.id },
+          resolve,
+        );
         assert.equal(kept, true, "channel stays open for the async answer");
       });
+
+    const listener = chrome._listeners["runtime.onMessage"];
+    assert.equal(
+      listener({ type: "grab-status" }, { id: "another-extension" }, () => {}),
+      false,
+      "messages from a different extension are ignored",
+    );
+    assert.equal(
+      listener({ type: "grab-status" }, { id: chrome.runtime.id, tab: { id: 7 } }, () => {}),
+      false,
+      "content-script senders cannot read popup runtime status",
+    );
+    assert.equal(
+      listener({ type: "grab-status" }, { tab: { id: 7 } }, () => {}),
+      false,
+      "senders without the extension ID are ignored",
+    );
 
     assert.deepEqual(await ask(), { state: "running-unpaired" });
     assert.match(requested[0], /^http:\/\/127\.0\.0\.1:9412\/hello\?n=[0-9a-f]{32}$/);

@@ -89,11 +89,10 @@ async function interceptDownload(item) {
   } catch {
     // Already gone; the onChanged guard below still cleans up.
   }
-  try {
-    await chrome.downloads.removeFile(item.id);
-  } catch {
-    // Nothing written yet or already removed.
-  }
+  // A successful interception replaces the browser's copy entirely: remove
+  // its partial file and erase the history entry, just like the fast-finish
+  // race above.
+  await removeBrowserCopy(item.id);
 }
 
 // Downloads parked while waiting for their size to become known, when the
