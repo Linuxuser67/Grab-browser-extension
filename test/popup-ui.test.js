@@ -42,3 +42,11 @@ test("popup status uses a compact dot and distinct semantic states", () => {
   assert.ok(js.includes("setInterval(checkGrabStatus, STATUS_REFRESH_INTERVAL_MS)"));
   assert.ok(js.includes('document.addEventListener("visibilitychange"'));
 });
+
+test("popup explains that automatic interception requires pairing", () => {
+  const noteStart = html.indexOf('id="interceptPairingNote"');
+  assert.ok(noteStart >= 0, "pairing note should be present below interception toggle");
+  const note = html.slice(noteStart, html.indexOf("</p>", noteStart));
+  assert.match(note, /Requires pairing with Grab/i);
+  assert.match(note, /While unpaired, downloads stay in the browser/i);
+});
