@@ -1648,7 +1648,12 @@ describe("HTTP handoff to Grab", () => {
     });
     assert.equal(posts().length, 1);
     assert.equal(tabsCreated().length, 0);
-    assert.ok(chrome._calls.some(([name, id]) => name === "cancel" && id === 77));
+    const cancelIndex = chrome._calls.findIndex(([name, id]) => name === "cancel" && id === 77);
+    const removeIndex = chrome._calls.findIndex(([name, id]) => name === "removeFile" && id === 77);
+    const eraseIndex = chrome._calls.findIndex(([name, args]) => name === "erase" && args.id === 77);
+    assert.ok(cancelIndex >= 0, "browser download is cancelled after Grab accepts it");
+    assert.ok(removeIndex > cancelIndex, "the partial browser file is removed after cancellation");
+    assert.ok(eraseIndex > removeIndex, "the browser history entry is erased after file cleanup");
   });
 
   test("automatic interception leaves the download in the browser when Grab is down", async () => {
