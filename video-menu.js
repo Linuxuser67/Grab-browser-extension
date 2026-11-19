@@ -526,6 +526,79 @@ function createVideoFinds() {
   return { frames: new Map(), sniffedByFrame: new Map(), kindsByFrame: new Map(), title: "" };
 }
 
+/// Frame IDs tracked for a tab, across the DOM, network and kind maps. One
+/// budget covers all three: a frame never occupies two slots.
+function trackedFrameIds(f) {
+  const ids = new Set();
+  for (const id of f.frames.keys()) ids.add(id);
+  for (const id of f.sniffedByFrame.keys()) ids.add(id);
+  for (const id of f.kindsByFrame.keys()) ids.add(id);
+  return ids;
+}
+
+/// Drop every trace of a frame. Chrome's frame ids grow with the frame, so
+/// the smallest id is the oldest one.
+function dropFrame(f, frameId) {
+  f.frames.delete(frameId);
+  f.sniffedByFrame.delete(frameId);
+  f.kindsByFrame.delete(frameId);
+}
+
+/// Evict the oldest tracked frame to free a slot. The top frame is kept
+/// (its title tracks SPA navigation), and so is `keepId`.
+function evictOldestFrame(f, keepId) {
+  let victim = null;
+  for (const id of trackedFrameIds(f)) {
+    if (id === 0 || id === keepId) continue;
+    if (victim === null || id < victim) victim = id;
+  }
+  if (victim === null) return false;
+  dropFrame(f, victim);
+  return true;
+}
+
+/// Evict the oldest frames that hold videos until `needed` item slots are
+/// free, so a new detection is never dropped for lack of room.
+function freeVideoSlots(f, keepId, needed) {
+  let freed = 0;
+  while (freed < needed) {
+    let victim = null;
+    for (const [id, videos] of f.frames) {
+      if (id === 0 || id === keepId) continue;
+      if (!videos || videos.length === 0) continue;
+      if (victim === null || id < victim) victim = id;
+    }
+    if (victim === null) return freed;
+    freed += f.frames.get(victim).length;
+    dropFrame(f, victim);
+  }
+  return freed;
+}
+
+/// Videos retained for the tab, excluding one frame.
+function countFrameVideos(f, excludeId) {
+  let total = 0;
+  for (const [id, videos] of f.frames) {
+    if (id === excludeId) continue;
+    total += Array.isArray(videos) ? videos.length : 0;
+  }
+  return total;
+}
+
+/// Keep the tracked-frame set inside the budget: the top frame plus the
+/// newest frames.
+function pruneTrackedFrames(f) {
+  const ids = trackedFrameIds(f);
+  if (ids.size <= MAX_VIDEO_FRAMES) return;
+  const keep = new Set([0]);
+  for (const id of [...ids].filter((id) => id !== 0).sort((a, b) => b - a).slice(0, MAX_VIDEO_FRAMES - 1)) {
+    keep.add(id);
+  }
+  for (const id of ids) {
+    if (!keep.has(id)) dropFrame(f, id);
+  }
+}
+
 /// The v2 key drops old tab-wide sniffed URLs: after an upgrade there is no
 /// reliable way to determine which frame created them.
 const videoStateKey = (tabId) => "videoFinds:v2:" + tabId;
@@ -744,12 +817,15 @@ async function restoreVideoFinds(tabId) {
           if (kinds.size) kindsByFrame.set(pair[0], kinds);
         }
 
-        videoFinds.set(tabId, {
+        const restored = {
           frames,
           sniffedByFrame,
           kindsByFrame,
           title: typeof saved.title === "string" ? saved.title.slice(0, MAX_VIDEO_TITLE_LENGTH) : "",
-        });
+        };
+        videoFinds.set(tabId, restored);
+        // One budget covers every tracked frame, whatever map it lives in.
+        pruneTrackedFrames(restored);
       }
     } catch {
       // Session storage may be unavailable; fresh reports can still recover.
@@ -946,11 +1022,12 @@ function noteSniffed(tabId, frameId, url, kind) {
     videoFinds.set(tabId, f);
   }
   const sourceFrame = Number.isInteger(frameId) && frameId >= 0 ? frameId : 0;
-  if (!f.sniffedByFrame.has(sourceFrame) && f.sniffedByFrame.size >= MAX_VIDEO_FRAMES) {
-    const staleFrame = [...f.sniffedByFrame.keys()].find((id) => !f.frames.has(id));
-    if (staleFrame === undefined) return;
-    f.sniffedByFrame.delete(staleFrame);
-    f.kindsByFrame.delete(staleFrame);
+  // A frame needs a slot before its manifest can be recorded: evict the
+  // oldest one instead of dropping the manifest, or a blob player that
+  // reports its video later can never be resolved.
+  const tracked = trackedFrameIds(f);
+  if (!tracked.has(sourceFrame) && tracked.size >= MAX_VIDEO_FRAMES) {
+    if (!evictOldestFrame(f, sourceFrame)) return;
   }
   let kinds = f.kindsByFrame.get(sourceFrame);
   if (!kinds) {
@@ -1305,42 +1382,52 @@ async function onVideoReport(msg, sender) {
     videoFinds.set(tabId, f);
   }
   // Bound frame state before accepting reports. Preserve the top frame when
-  // replacing an older entry because its title tracks SPA navigation.
+  // replacing an older entry because its title tracks SPA navigation; evict
+  // the oldest other frame instead, so a page that keeps adding frames keeps
+  // detecting videos instead of hitting a permanent wall.
   const hadFrame = f.frames.has(frameId);
   let changed = false;
-  let acceptFrame = true;
-  if (!hadFrame && f.frames.size >= MAX_VIDEO_FRAMES) {
-    if (frameId === 0) {
-      const evictFrame = [...f.frames.keys()].find((id) => id !== 0);
-      if (evictFrame !== undefined) {
-        f.frames.delete(evictFrame);
-        f.sniffedByFrame.delete(evictFrame);
-        f.kindsByFrame.delete(evictFrame);
-        changed = true;
-      } else {
-        acceptFrame = false;
-      }
-    } else {
-      acceptFrame = false;
+  // Validate the report before touching any state: an empty report from a
+  // frame without a video must not evict a live detection.
+  const candidates = normalizeVideoReport(msg.videos, MAX_VIDEO_ITEMS);
+  if (candidates.length > 0) {
+    // A frame that is not tracked yet needs a slot; evict the oldest one.
+    const tracked = trackedFrameIds(f);
+    if (!tracked.has(frameId) && tracked.size >= MAX_VIDEO_FRAMES) {
+      if (evictOldestFrame(f, frameId)) changed = true;
     }
-  }
-  if (acceptFrame) {
-    let otherVideoCount = 0;
-    for (const [id, existing] of f.frames) {
-      if (id !== frameId) otherVideoCount += Array.isArray(existing) ? existing.length : 0;
+    // The item cap is shared by every frame: when the report does not fit,
+    // the oldest video-bearing frames yield their slots.
+    let otherVideoCount = countFrameVideos(f, frameId);
+    const overflow = otherVideoCount + candidates.length - MAX_VIDEO_ITEMS;
+    if (overflow > 0) {
+      const freed = freeVideoSlots(f, frameId, overflow);
+      if (freed > 0) {
+        changed = true;
+        otherVideoCount -= freed;
+      }
     }
     const allowance = Math.max(0, MAX_VIDEO_ITEMS - otherVideoCount);
-    const videos = normalizeVideoReport(msg.videos, allowance);
-    // Preserve ordinary empty re-reports for live streams; pause/end/reset
-    // reports intentionally replace their frame's prior snapshot.
-    if (videos.length > 0 || !hadFrame || msg.replaceFrame === true) {
+    const videos = candidates.slice(0, allowance);
+    // A frame without videos must not occupy a frame slot: pages create
+    // iframes over time (ads, embeds) and empty entries would use up the
+    // budget, so later videos would stop being detected.
+    if (videos.length > 0) {
       f.frames.set(frameId, videos);
-      if (msg.replaceFrame === true) {
-        f.sniffedByFrame.delete(frameId);
-        f.kindsByFrame.delete(frameId);
-      }
       changed = true;
     }
+  } else if (hadFrame && msg.replaceFrame === true) {
+    // Authoritative empty report (pause, end, source reset): retire the
+    // frame's snapshot instead of keeping an empty slot.
+    f.frames.delete(frameId);
+    changed = true;
+  }
+  // Pause/end/reset reports drop the frame's sniffed manifests: the player
+  // may have swapped its video element, so the old stream no longer applies.
+  if (msg.replaceFrame === true) {
+    f.sniffedByFrame.delete(frameId);
+    f.kindsByFrame.delete(frameId);
+    changed = true;
   }
   // The video's own title for menu labels.
   // The top frame's title follows the page (SPAs change it without a
