@@ -1655,6 +1655,11 @@ describe("HTTP handoff to Grab", () => {
     assert.ok(cancelIndex >= 0, "browser download is cancelled after Grab accepts it");
     assert.ok(removeIndex > cancelIndex, "the partial browser file is removed after cancellation");
     assert.ok(eraseIndex > removeIndex, "the browser history entry is erased after file cleanup");
+    assert.equal(
+      chrome._session.has("claimedDownload:77"),
+      false,
+      "successful interception releases its claim without waiting for onChanged",
+    );
   });
 
   test("automatic interception leaves the download in the browser when Grab is down", async () => {

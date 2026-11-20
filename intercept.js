@@ -91,8 +91,10 @@ async function interceptDownload(item) {
   }
   // A successful interception replaces the browser's copy entirely: remove
   // its partial file and erase the history entry, just like the fast-finish
-  // race above.
+  // race above. Do not rely on onChanged to release the session claim: the
+  // cancel transition can race with this cleanup or be absent after a restart.
   await removeBrowserCopy(item.id);
+  await unclaimDownload(item.id);
 }
 
 // Downloads parked while waiting for their size to become known, when the
