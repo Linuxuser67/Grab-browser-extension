@@ -149,8 +149,8 @@ The extension and Grab talk over unencrypted HTTP on the loopback interface.
   URL—including its query string, which may contain a signed or short-lived
   access token—in a paired, HMAC-signed JSON body to
   `http://127.0.0.1:9412/inspect-hls`. This is loopback traffic; the request
-  contains no cookies and suppresses the `Referer` header. Grab fetches the playlist through its
-  public-only DNS guard, and its response contains only query-free
+  contains no cookies and suppresses the `Referer` header. Grab fetches the
+  playlist through its public-only DNS guard, and its response contains only
   origin/path keys, not the source query string.
 - Unpaired, URLs are still handed off but without cookies, and automatic
   interception stays off.
