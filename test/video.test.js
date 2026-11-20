@@ -2162,10 +2162,13 @@ describe("HLS master playlist filtering", () => {
     );
   });
 
-  test("negative-caches public inspection failures for only the short TTL", async () => {
-    const originalNow = Date.now;
-    let now = 1_000;
-    Date.now = () => now;
+  test("negative-caches public inspection failures with a monotonic TTL", async () => {
+    const originalMonotonicNow = performance.now;
+    const originalWallClockNow = Date.now;
+    let monotonicNow = 1_000;
+    let wallClockNow = 1_000;
+    performance.now = () => monotonicNow;
+    Date.now = () => wallClockNow;
     try {
       const bg = loadBackground(makeChrome());
       const url = "https://cdn.example.com/v/42/master.m3u8?token=temporary";
@@ -2180,11 +2183,20 @@ describe("HLS master playlist filtering", () => {
       assert.deepEqual(await inspect(), [url]);
       assert.equal(attempts, 1, "failed reads are cached rather than retried per rebuild");
 
-      now += bg.HLS_PUBLIC_INSPECTION_CACHE_TTL_MS + 1;
+      // A wall-clock rollback must not extend the cache entry.
+      wallClockNow -= 60_000;
+      monotonicNow += bg.HLS_PUBLIC_INSPECTION_CACHE_TTL_MS - 1;
       assert.deepEqual(await inspect(), [url]);
-      assert.equal(attempts, 2, "an expired negative entry is inspected again");
+      assert.equal(attempts, 1, "wall-clock changes do not expire a still-fresh entry");
+
+      // The monotonic deadline still expires it at the configured TTL.
+      wallClockNow += 120_000;
+      monotonicNow += 2;
+      assert.deepEqual(await inspect(), [url]);
+      assert.equal(attempts, 2, "the monotonic TTL expires the negative entry");
     } finally {
-      Date.now = originalNow;
+      performance.now = originalMonotonicNow;
+      Date.now = originalWallClockNow;
     }
   });
 

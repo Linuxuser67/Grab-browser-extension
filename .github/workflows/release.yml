@@ -23,6 +23,18 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ inputs.tag || github.ref_name }}
+      - name: verify release tag targets current main
+        run: |
+          # Publishing a tag created before the latest fixes would otherwise
+          # pass the version check while packaging stale source.
+          git fetch --no-tags origin main
+          TAG_SHA="$(git rev-parse HEAD)"
+          MAIN_SHA="$(git rev-parse FETCH_HEAD)"
+          if [ "$TAG_SHA" != "$MAIN_SHA" ]; then
+            echo "Release tag targets $TAG_SHA, but main is $MAIN_SHA."
+            echo "Create the release tag from current main after all fixes are merged."
+            exit 1
+          fi
       - name: verify tag matches manifest version
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
