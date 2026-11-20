@@ -1982,6 +1982,73 @@ describe("HLS master playlist filtering", () => {
     }
   });
 
+  test("verifies Grab once for a batch of public HLS playlists", async () => {
+    const secret = "1a".repeat(32);
+    const candidates = [
+      "https://cdn.example.com/one/master.m3u8",
+      "https://cdn.example.com/two/master.m3u8",
+      "https://cdn.example.com/three/master.m3u8",
+    ];
+    const chrome = makeChrome({ localSettings: { pairingCode: secret } });
+    const bg = loadBackground(chrome);
+    const originalFetch = globalThis.fetch;
+    let helloRequests = 0;
+    let inspectRequests = 0;
+    const hmac = async (context, message) => {
+      const keyBytes = new Uint8Array(
+        secret.match(/.{2}/g).map((byte) => Number.parseInt(byte, 16)),
+      );
+      const key = await crypto.subtle.importKey(
+        "raw",
+        keyBytes,
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      );
+      const signature = await crypto.subtle.sign(
+        "HMAC",
+        key,
+        new TextEncoder().encode(context + message),
+      );
+      return Array.from(new Uint8Array(signature), (byte) =>
+        byte.toString(16).padStart(2, "0")
+      ).join("");
+    };
+    globalThis.fetch = async (value, options = {}) => {
+      const url = new URL(String(value));
+      if (url.pathname === "/hello") {
+        helloRequests += 1;
+        const nonce = url.searchParams.get("n");
+        return {
+          ok: true,
+          json: async () => ({ proof: await hmac("grab-server\0", nonce) }),
+        };
+      }
+      if (url.pathname === "/inspect-hls") {
+        inspectRequests += 1;
+        assert.equal(
+          options.headers["X-Grab-Token"],
+          await hmac("grab-inspect-hls\0", options.body),
+        );
+        return {
+          ok: true,
+          text: async () => JSON.stringify({ is_master: false, child_keys: [] }),
+        };
+      }
+      throw new Error("unexpected request: " + String(value));
+    };
+    try {
+      assert.deepEqual(
+        await bg.preferMasterPlaylists(candidates, "https://page.example/watch", candidates),
+        candidates,
+      );
+      assert.equal(helloRequests, 1);
+      assert.equal(inspectRequests, candidates.length);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("unknown Grab inspection preserves every candidate", async () => {
     const candidates = [
       "https://cdn.example.com/observed/master.m3u8",
@@ -2035,7 +2102,7 @@ describe("HLS master playlist filtering", () => {
       if (url.pathname === "/inspect-hls") {
         requests.push({ url: String(value), options });
         const body = JSON.parse(options.body);
-        assert.equal(options.headers["X-Grab-Token"], await hmac("grab-client\0", options.body));
+        assert.equal(options.headers["X-Grab-Token"], await hmac("grab-inspect-hls\0", options.body));
         assert.equal(body.url, "https://cdn.example.com/master.m3u8?sig=secret");
         assert.equal(typeof body.timestamp_ms, "number");
         assert.match(body.nonce, /^[0-9a-f]{32}$/);
