@@ -2023,7 +2023,7 @@ describe("HLS master playlist filtering", () => {
       requests.push(String(value));
       return {
         ok: true,
-        text: async () => "#EXTM3U\\n#EXT-X-STREAM-INF:BANDWIDTH=1\\nrendition.m3u8",
+        text: async () => "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nrendition.m3u8",
       };
     };
     const targets = [
