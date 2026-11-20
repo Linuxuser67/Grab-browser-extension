@@ -2115,6 +2115,79 @@ describe("HLS master playlist filtering", () => {
     }
   });
 
+  test("caches successful public inspections by full URL and shares in-flight reads", async () => {
+    const bg = loadBackground(makeChrome());
+    const masterA = "https://cdn.example.com/v/42/master.m3u8?token=alpha";
+    const masterB = "https://cdn.example.com/v/42/master.m3u8?token=beta";
+    const child = "https://cdn.example.com/v/42/chunklist.m3u8";
+    const inspected = [];
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let started;
+    const bothStarted = new Promise((resolve) => { started = resolve; });
+    const inspector = async (url) => {
+      inspected.push(url);
+      if (inspected.length === 2) started();
+      await gate;
+      return url === masterA || url === masterB
+        ? { is_master: true, child_keys: [child] }
+        : { is_master: false, child_keys: [] };
+    };
+
+    const candidatesA = [masterA, child];
+    const first = bg.preferMasterPlaylists(candidatesA, null, candidatesA, inspector);
+    const concurrent = bg.preferMasterPlaylists(candidatesA, null, candidatesA, inspector);
+    await bothStarted;
+    release();
+    const [firstResult, concurrentResult] = await Promise.all([first, concurrent]);
+    assert.deepEqual(firstResult, [masterA]);
+    assert.deepEqual(concurrentResult, [masterA]);
+    assert.equal(inspected.length, 2, "concurrent menu rebuilds share the same two inspections");
+
+    assert.deepEqual(
+      await bg.preferMasterPlaylists(candidatesA, null, candidatesA, inspector),
+      [masterA],
+    );
+    assert.equal(inspected.length, 2, "a cached success avoids another public inspection");
+
+    const candidatesB = [masterB, child];
+    assert.deepEqual(
+      await bg.preferMasterPlaylists(candidatesB, null, candidatesB, inspector),
+      [masterB],
+    );
+    assert.deepEqual(
+      inspected.sort(),
+      [masterA, masterB, child].sort(),
+      "a different signed query string gets a distinct cache entry",
+    );
+  });
+
+  test("negative-caches public inspection failures for only the short TTL", async () => {
+    const originalNow = Date.now;
+    let now = 1_000;
+    Date.now = () => now;
+    try {
+      const bg = loadBackground(makeChrome());
+      const url = "https://cdn.example.com/v/42/master.m3u8?token=temporary";
+      let attempts = 0;
+      const inspector = async () => {
+        attempts += 1;
+        throw new Error("Grab inspection unavailable");
+      };
+      const inspect = () => bg.preferMasterPlaylists([url], null, [url], inspector);
+
+      assert.deepEqual(await inspect(), [url]);
+      assert.deepEqual(await inspect(), [url]);
+      assert.equal(attempts, 1, "failed reads are cached rather than retried per rebuild");
+
+      now += bg.HLS_PUBLIC_INSPECTION_CACHE_TTL_MS + 1;
+      assert.deepEqual(await inspect(), [url]);
+      assert.equal(attempts, 2, "an expired negative entry is inspected again");
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
   test("shares the four-request HLS inspection limit across concurrent menu builds", async () => {
     const secret = "1a".repeat(32);
     const firstBatch = Array.from({ length: 4 }, (_, index) =>
@@ -2194,6 +2267,101 @@ describe("HLS master playlist filtering", () => {
         `observed ${maximumActiveInspections} simultaneous HLS inspections`,
       );
     } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("refreshes the Grab proof after inspections wait beyond the batch freshness window", async () => {
+    const secret = "1a".repeat(32);
+    const candidates = Array.from({ length: 6 }, (_, index) =>
+      `https://cdn.example.com/queued/${index}/master.m3u8`
+    );
+    const bg = loadBackground(makeChrome({ localSettings: { pairingCode: secret } }));
+    const originalFetch = globalThis.fetch;
+    const originalNow = Date.now;
+    let now = originalNow();
+    Date.now = () => now;
+    let helloRequests = 0;
+    let inspectRequests = 0;
+    let activeInspections = 0;
+    let maximumActiveInspections = 0;
+    let releaseFirstWave;
+    const firstWaveGate = new Promise((resolve) => { releaseFirstWave = resolve; });
+    let signalFirstWave;
+    const firstWaveStarted = new Promise((resolve) => { signalFirstWave = resolve; });
+    const hmac = async (context, message) => {
+      const keyBytes = new Uint8Array(
+        secret.match(/.{2}/g).map((byte) => Number.parseInt(byte, 16)),
+      );
+      const key = await crypto.subtle.importKey(
+        "raw",
+        keyBytes,
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      );
+      const signature = await crypto.subtle.sign(
+        "HMAC",
+        key,
+        new TextEncoder().encode(context + message),
+      );
+      return Array.from(new Uint8Array(signature), (byte) =>
+        byte.toString(16).padStart(2, "0")
+      ).join("");
+    };
+    globalThis.fetch = async (value, options = {}) => {
+      const url = new URL(String(value));
+      if (url.pathname === "/hello") {
+        helloRequests += 1;
+        const nonce = url.searchParams.get("n");
+        return {
+          ok: true,
+          json: async () => ({ proof: await hmac("grab-server\\0", nonce) }),
+        };
+      }
+      if (url.pathname === "/inspect-hls") {
+        inspectRequests += 1;
+        activeInspections += 1;
+        maximumActiveInspections = Math.max(maximumActiveInspections, activeInspections);
+        assert.equal(
+          options.headers["X-Grab-Token"],
+          await hmac("grab-inspect-hls\\0", options.body),
+        );
+        if (inspectRequests === 4) signalFirstWave();
+        if (inspectRequests <= 4) await firstWaveGate;
+        activeInspections -= 1;
+        return {
+          ok: true,
+          text: async () => JSON.stringify({ is_master: false, child_keys: [] }),
+        };
+      }
+      throw new Error("unexpected request: " + String(value));
+    };
+
+    try {
+      const pending = bg.preferMasterPlaylists(
+        candidates,
+        "https://page.example/watch",
+        candidates,
+      );
+      await firstWaveStarted;
+      assert.equal(helloRequests, 1, "the first four concurrent requests share one fresh proof");
+      now += bg.HLS_INSPECTION_HANDSHAKE_MAX_AGE_MS + 1;
+      releaseFirstWave();
+      assert.deepEqual(await pending, candidates);
+      assert.equal(inspectRequests, candidates.length);
+      assert.equal(
+        helloRequests,
+        2,
+        "the queued second wave obtains a fresh proof after the first proof ages out",
+      );
+      assert.ok(
+        maximumActiveInspections <= 4,
+        `observed ${maximumActiveInspections} simultaneous HLS inspections`,
+      );
+    } finally {
+      releaseFirstWave();
+      Date.now = originalNow;
       globalThis.fetch = originalFetch;
     }
   });
