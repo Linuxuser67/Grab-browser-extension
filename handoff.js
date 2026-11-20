@@ -278,6 +278,7 @@ async function inspectHlsPlaylistWithGrab(value, verifiedSecret = null) {
       const response = await fetch(GRAB_BASE_URL + "/inspect-hls", {
         method: "POST",
         credentials: "omit",
+        referrerPolicy: "no-referrer",
         redirect: "error",
         headers: {
           "Content-Type": "application/json",
