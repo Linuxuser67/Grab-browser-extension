@@ -485,6 +485,21 @@ async function preferMasterPlaylists(
   const manifests = [...new Set((sniffedUrls || []).filter(isHlsPlaylistUrl))];
   if (manifests.length === 0) return urls || [];
 
+  let batchInspector = inspectPublic;
+  if (inspectPublic === inspectHlsPlaylistWithGrab) {
+    const hasPublicPlaylist = manifests.some((value) => {
+      try {
+        return !isPrivateNetworkHost(new URL(value).hostname);
+      } catch {
+        return false;
+      }
+    });
+    if (hasPublicPlaylist) {
+      batchInspector = await createHlsInspectionInspectorForBatch();
+      if (!batchInspector) batchInspector = async () => null;
+    }
+  }
+
   const results = new Map();
   let next = 0;
   const workers = Array.from(
@@ -493,7 +508,7 @@ async function preferMasterPlaylists(
       while (next < manifests.length) {
         const index = next++;
         const url = manifests[index];
-        results.set(url, await inspectHlsPlaylist(url, tabOrigin, inspectPublic));
+        results.set(url, await inspectHlsPlaylist(url, tabOrigin, batchInspector));
       }
     },
   );
