@@ -2049,6 +2049,89 @@ describe("HLS master playlist filtering", () => {
     }
   });
 
+  test("shares the four-request HLS inspection limit across concurrent menu builds", async () => {
+    const secret = "1a".repeat(32);
+    const firstBatch = Array.from({ length: 4 }, (_, index) =>
+      \`https://cdn.example.com/first/\${index}/master.m3u8\`
+    );
+    const secondBatch = Array.from({ length: 4 }, (_, index) =>
+      \`https://cdn.example.com/second/\${index}/master.m3u8\`
+    );
+    const bg = loadBackground(makeChrome({ localSettings: { pairingCode: secret } }));
+    const originalFetch = globalThis.fetch;
+    let helloRequests = 0;
+    let inspectRequests = 0;
+    let activeInspections = 0;
+    let maximumActiveInspections = 0;
+    const hmac = async (context, message) => {
+      const keyBytes = new Uint8Array(
+        secret.match(/.{2}/g).map((byte) => Number.parseInt(byte, 16)),
+      );
+      const key = await crypto.subtle.importKey(
+        "raw",
+        keyBytes,
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      );
+      const signature = await crypto.subtle.sign(
+        "HMAC",
+        key,
+        new TextEncoder().encode(context + message),
+      );
+      return Array.from(new Uint8Array(signature), (byte) =>
+        byte.toString(16).padStart(2, "0")
+      ).join("");
+    };
+    globalThis.fetch = async (value, options = {}) => {
+      const url = new URL(String(value));
+      if (url.pathname === "/hello") {
+        helloRequests += 1;
+        const nonce = url.searchParams.get("n");
+        return {
+          ok: true,
+          json: async () => ({ proof: await hmac("grab-server\0", nonce) }),
+        };
+      }
+      if (url.pathname === "/inspect-hls") {
+        inspectRequests += 1;
+        activeInspections += 1;
+        maximumActiveInspections = Math.max(maximumActiveInspections, activeInspections);
+        assert.equal(
+          options.headers["X-Grab-Token"],
+          await hmac("grab-inspect-hls\0", options.body),
+        );
+        // Keep requests overlapped so independent per-batch limits would
+        // exceed Grab's process-wide four-request semaphore.
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        activeInspections -= 1;
+        return {
+          ok: true,
+          text: async () => JSON.stringify({ is_master: false, child_keys: [] }),
+        };
+      }
+      throw new Error("unexpected request: " + String(value));
+    };
+
+    try {
+      const [first, second] = await Promise.all([
+        bg.preferMasterPlaylists(firstBatch, "https://page.example/watch", firstBatch),
+        bg.preferMasterPlaylists(secondBatch, "https://page.example/watch", secondBatch),
+      ]);
+      assert.deepEqual(first, firstBatch);
+      assert.deepEqual(second, secondBatch);
+      assert.equal(helloRequests, 2);
+      assert.equal(inspectRequests, 8);
+      assert.equal(activeInspections, 0);
+      assert.ok(
+        maximumActiveInspections <= 4,
+        \`observed \${maximumActiveInspections} simultaneous HLS inspections\`,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("unknown Grab inspection preserves every candidate", async () => {
     const candidates = [
       "https://cdn.example.com/observed/master.m3u8",
