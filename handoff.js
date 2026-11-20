@@ -17,6 +17,7 @@ const CONFIRM_TIMEOUT_MS = 130_000;
 const HELLO_TIMEOUT_MS = 3_000;
 /// Paired HLS inspection is read-only and returns only path keys.
 const HLS_INSPECT_TIMEOUT_MS = 5_000;
+const HLS_INSPECTION_HANDSHAKE_MAX_AGE_MS = 2_000;
 const MAX_HLS_INSPECT_RESPONSE_BYTES = 16 * 1024;
 const MAX_HLS_INSPECT_CHILDREN = 256;
 
@@ -212,17 +213,49 @@ async function verifyGrab(secret) {
 /// The request contains no cookies or Referer; the response contains no query
 /// strings. Null means the inspection was unavailable and callers must keep
 /// every candidate rather than guessing which rendition is a child.
-/// Prepare one authenticated inspection session for a batch. Each POST
-/// remains individually HMAC-authenticated; the handshake proves the current
-/// loopback listener once before the batch starts.
-async function createHlsInspectionInspectorForBatch() {
-  try {
-    const secret = await getPairingCode();
-    if (!secret || !(await verifyGrab(secret))) return null;
-    return (value) => inspectHlsPlaylistWithGrab(value, secret);
-  } catch {
-    return null;
-  }
+/// Prepare one inspector for a batch. It shares a recent listener proof
+/// between requests, but refreshes it after queueing has made that proof stale.
+/// Verification is deferred until the request owns an inspection slot.
+function createHlsInspectionInspectorForBatch() {
+  let verifiedSecret = null;
+  let verifiedAt = 0;
+  let verificationAttempted = false;
+  let verificationPromise = null;
+
+  const getFreshVerifiedSecret = async () => {
+    const now = Date.now();
+    if (
+      verificationAttempted &&
+      now >= verifiedAt &&
+      now - verifiedAt < HLS_INSPECTION_HANDSHAKE_MAX_AGE_MS
+    ) return verifiedSecret;
+
+    if (!verificationPromise) {
+      verificationPromise = (async () => {
+        let secret = null;
+        try {
+          const candidate = await getPairingCode();
+          if (candidate && await verifyGrab(candidate)) secret = candidate;
+        } catch {
+          // A failed proof leaves the inspection unavailable; never fall back
+          // to an unverified loopback POST.
+        }
+        verifiedSecret = secret;
+        verifiedAt = Date.now();
+        verificationAttempted = true;
+        return secret;
+      })();
+    }
+
+    const pending = verificationPromise;
+    try {
+      return await pending;
+    } finally {
+      if (verificationPromise === pending) verificationPromise = null;
+    }
+  };
+
+  return (value) => inspectHlsPlaylistWithGrab(value, getFreshVerifiedSecret);
 }
 
 /// Ask the paired Grab process to inspect a browser-observed public HLS URL.
@@ -245,19 +278,24 @@ async function inspectHlsPlaylistWithGrab(value, verifiedSecret = null) {
     !/\.(?:m3u8|m3u)$/i.test(url.pathname)
   ) return null;
 
-  let secret = verifiedSecret;
-  if (secret === null) {
+  return withHlsInspectionSlot(async () => {
+    // Verify the listener only after acquiring the slot. A batch shares the
+    // proof briefly, but renews it if this request waited behind earlier work.
+    let secret;
     try {
-      secret = await getPairingCode();
-      if (!secret || !(await verifyGrab(secret))) return null;
+      if (typeof verifiedSecret === "function") {
+        secret = await verifiedSecret();
+      } else {
+        secret = typeof verifiedSecret === "string" ? verifiedSecret : await getPairingCode();
+        if (!secret || !(await verifyGrab(secret))) return null;
+      }
     } catch {
       return null;
     }
-  }
+    if (!secret) return null;
 
-  return withHlsInspectionSlot(async () => {
-    // Create the timestamp, nonce, signature and deadline only after a shared
-    // slot is acquired. Waiting behind another tab must not age the request.
+    // Create the timestamp, nonce, signature and deadline only after the
+    // slot and a sufficiently recent listener proof are both available.
     const body = JSON.stringify({
       url: value,
       timestamp_ms: Date.now(),
