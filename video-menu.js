@@ -244,6 +244,14 @@ const HLS_PLAYLIST_TEXT_LIMIT = 256 * 1024;
 const HLS_PLAYLIST_FETCH_TIMEOUT_MS = 5000;
 const HLS_PLAYLIST_FETCH_CONCURRENCY = 4;
 
+// Public playlist inspections are read-only classifications. Keep both
+// successful and failed results briefly so live-playlist re-requests and
+// repeated menu rebuilds do not re-resolve the same full URL on every refresh.
+const HLS_PUBLIC_INSPECTION_CACHE_TTL_MS = 10_000;
+const HLS_PUBLIC_INSPECTION_CACHE_MAX_ENTRIES = 128;
+const hlsPublicInspectionCache = new Map();
+const hlsPublicInspectionPending = new Map();
+
 function isHlsPlaylistUrl(value) {
   try {
     const url = new URL(value);
@@ -396,6 +404,68 @@ async function fetchHlsPlaylistText(value, tabOrigin = null) {
   }
 }
 
+function copyHlsInspection(result) {
+  return result === null
+    ? null
+    : { is_master: result.is_master, child_keys: [...result.child_keys] };
+}
+
+function normalizeHlsInspection(result) {
+  if (
+    !result ||
+    typeof result.is_master !== "boolean" ||
+    !Array.isArray(result.child_keys) ||
+    result.child_keys.length > 256 ||
+    !result.child_keys.every((key) => typeof key === "string" && key.length <= 2048)
+  ) return null;
+  return { is_master: result.is_master, child_keys: [...result.child_keys] };
+}
+
+/// Cache public inspections by the complete URL, including signed query
+/// parameters. Null is cached too: a transient failure must not trigger another
+/// loopback inspection on every menu rebuild. Concurrent callers share a read.
+async function inspectPublicHlsPlaylistCached(value, inspectPublic) {
+  const now = Date.now();
+  const cached = hlsPublicInspectionCache.get(value);
+  if (cached && cached.expiresAt > now) {
+    // Refresh LRU order without extending the fixed TTL.
+    hlsPublicInspectionCache.delete(value);
+    hlsPublicInspectionCache.set(value, cached);
+    return copyHlsInspection(cached.result);
+  }
+  if (cached) hlsPublicInspectionCache.delete(value);
+
+  const pending = hlsPublicInspectionPending.get(value);
+  if (pending) return copyHlsInspection(await pending);
+
+  const request = (async () => {
+    let result = null;
+    if (typeof inspectPublic === "function") {
+      try {
+        result = normalizeHlsInspection(await inspectPublic(value));
+      } catch {
+        result = null;
+      }
+    }
+    hlsPublicInspectionCache.set(value, {
+      expiresAt: Date.now() + HLS_PUBLIC_INSPECTION_CACHE_TTL_MS,
+      result,
+    });
+    while (hlsPublicInspectionCache.size > HLS_PUBLIC_INSPECTION_CACHE_MAX_ENTRIES) {
+      hlsPublicInspectionCache.delete(hlsPublicInspectionCache.keys().next().value);
+    }
+    return result;
+  })();
+  hlsPublicInspectionPending.set(value, request);
+  try {
+    return copyHlsInspection(await request);
+  } finally {
+    if (hlsPublicInspectionPending.get(value) === request) {
+      hlsPublicInspectionPending.delete(value);
+    }
+  }
+}
+
 /// Inspect a private playlist locally only when the page itself is private.
 /// Public-looking hosts go through Grab's paired resolver so the extension
 /// never re-resolves an observed public hostname in its own network context.
@@ -415,20 +485,7 @@ async function inspectHlsPlaylist(value, tabOrigin = null, inspectPublic = inspe
       child_keys: [...hlsChildPlaylistKeys(text, value)],
     };
   }
-  if (typeof inspectPublic !== "function") return null;
-  try {
-    const result = await inspectPublic(value);
-    if (
-      !result ||
-      typeof result.is_master !== "boolean" ||
-      !Array.isArray(result.child_keys) ||
-      result.child_keys.length > 256 ||
-      !result.child_keys.every((key) => typeof key === "string" && key.length <= 2048)
-    ) return null;
-    return result;
-  } catch {
-    return null;
-  }
+  return inspectPublicHlsPlaylistCached(value, inspectPublic);
 }
 
 /// True only for a playlist confirmed as a multivariant master.
