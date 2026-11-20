@@ -117,7 +117,7 @@ Always on:
 | `alarms` | size-wait deadlines that survive worker restarts |
 | `activeTab` | read the current tab's URL when you press `Alt+G` or use the context menu, without access to every page |
 | `scripting` | register the video detector only while detection is on |
-| `http://127.0.0.1/*` | POST to Grab's loopback endpoint |
+| `http://127.0.0.1/*` | POST to Grab's local `/add` and `/inspect-hls` endpoints; HLS inspection sends the full public playlist URL, including any query string, over loopback (see [Security model](#security-model)) |
 
 Optional, requested on your click and dropped when the feature is turned off:
 
@@ -144,6 +144,14 @@ The extension and Grab talk over unencrypted HTTP on the loopback interface.
   first cannot receive them. Every paired POST body is signed and carries a
   timestamp and one-time nonce; Grab accepts a nonce once, inside a two-minute
   window, so a captured request cannot be replayed.
+- Public HLS inspection: when video detection inspects a browser-observed
+  public `.m3u8` or `.m3u` playlist, the extension POSTs the full playlist
+  URL—including its query string, which may contain a signed or short-lived
+  access token—in a paired, HMAC-signed JSON body to
+  `http://127.0.0.1:9412/inspect-hls`. This is loopback traffic; the request
+  contains no cookies or `Referer`. Grab fetches the playlist through its
+  public-only DNS guard, and its response contains only query-free
+  origin/path keys, not the source query string.
 - Unpaired, URLs are still handed off but without cookies, and automatic
   interception stays off.
 - Incognito cookies are never forwarded; partitioned cookies are skipped.
