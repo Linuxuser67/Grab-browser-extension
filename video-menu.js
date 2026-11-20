@@ -425,7 +425,9 @@ function normalizeHlsInspection(result) {
 /// parameters. Null is cached too: a transient failure must not trigger another
 /// loopback inspection on every menu rebuild. Concurrent callers share a read.
 async function inspectPublicHlsPlaylistCached(value, inspectPublic) {
-  const now = Date.now();
+  // performance.now() is monotonic, so wall-clock adjustments cannot extend
+  // a cached classification beyond its fixed TTL.
+  const now = performance.now();
   const cached = hlsPublicInspectionCache.get(value);
   if (cached && cached.expiresAt > now) {
     // Refresh LRU order without extending the fixed TTL.
@@ -448,7 +450,7 @@ async function inspectPublicHlsPlaylistCached(value, inspectPublic) {
       }
     }
     hlsPublicInspectionCache.set(value, {
-      expiresAt: Date.now() + HLS_PUBLIC_INSPECTION_CACHE_TTL_MS,
+      expiresAt: performance.now() + HLS_PUBLIC_INSPECTION_CACHE_TTL_MS,
       result,
     });
     while (hlsPublicInspectionCache.size > HLS_PUBLIC_INSPECTION_CACHE_MAX_ENTRIES) {
