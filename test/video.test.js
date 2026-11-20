@@ -2316,7 +2316,7 @@ describe("HLS master playlist filtering", () => {
         const nonce = url.searchParams.get("n");
         return {
           ok: true,
-          json: async () => ({ proof: await hmac("grab-server\\0", nonce) }),
+          json: async () => ({ proof: await hmac("grab-server\0", nonce) }),
         };
       }
       if (url.pathname === "/inspect-hls") {
@@ -2325,7 +2325,7 @@ describe("HLS master playlist filtering", () => {
         maximumActiveInspections = Math.max(maximumActiveInspections, activeInspections);
         assert.equal(
           options.headers["X-Grab-Token"],
-          await hmac("grab-inspect-hls\\0", options.body),
+          await hmac("grab-inspect-hls\0", options.body),
         );
         if (inspectRequests === 4) signalFirstWave();
         if (inspectRequests <= 4) await firstWaveGate;
