@@ -1853,7 +1853,7 @@ describe("HLS master playlist filtering", () => {
     };
     try {
       const bg = loadBackground(makeChrome());
-      return await bg.preferMasterPlaylists(urls);
+      return await bg.preferMasterPlaylists(urls, null, urls);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1920,7 +1920,10 @@ describe("HLS master playlist filtering", () => {
     };
     try {
       const bg = loadBackground(makeChrome());
-      assert.deepEqual(await bg.preferMasterPlaylists([master, child]), [master, child]);
+      assert.deepEqual(
+        await bg.preferMasterPlaylists([master, child], null, [master, child]),
+        [master, child],
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1950,6 +1953,36 @@ describe("HLS master playlist filtering", () => {
     );
   });
 
+  test("only browser-sniffed playlists are fetched in extension context", async () => {
+    const pageReportedMaster = "https://page-selected.example/private/master.m3u8";
+    const browserSniffedMaster = "https://cdn.example.com/observed/master.m3u8";
+    const requests = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, options) => {
+      requests.push(String(url));
+      assert.equal(options.credentials, "omit");
+      assert.equal(options.redirect, "error");
+      return {
+        ok: true,
+        status: 200,
+        text: async () => MASTER,
+      };
+    };
+    try {
+      const bg = loadBackground(makeChrome());
+      const candidates = [pageReportedMaster, browserSniffedMaster];
+      const result = await bg.preferMasterPlaylists(
+        candidates,
+        "https://public.example/watch",
+        [browserSniffedMaster],
+      );
+      assert.deepEqual(requests, [browserSniffedMaster]);
+      assert.deepEqual(result, candidates);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("rejects loopback and credential-bearing playlist fetches", async () => {
     const bg = loadBackground(makeChrome());
     assert.equal(await bg.isMasterPlaylist("http://127.0.0.1/master.m3u8"), null);
@@ -1964,8 +1997,15 @@ describe("HLS master playlist filtering", () => {
       "http://172.16.0.1/master.m3u8",
       "http://192.168.1.1/master.m3u8",
       "http://100.64.0.1/master.m3u8",
+      "http://192.0.0.8/master.m3u8",
+      "http://198.18.0.1/master.m3u8",
+      "http://198.19.255.255/master.m3u8",
+      "http://224.0.0.1/master.m3u8",
+      "http://240.0.0.1/master.m3u8",
       "http://[fd00::1]/master.m3u8",
       "http://[fc00::1]/master.m3u8",
+      "http://[ff02::1]/master.m3u8",
+      "http://[fec0::1]/master.m3u8",
     ];
     for (const target of targets) {
       assert.equal(await bg.isMasterPlaylist(target), null, target);

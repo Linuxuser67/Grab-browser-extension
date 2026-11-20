@@ -278,7 +278,9 @@ function isPrivateNetworkHost(host) {
       value === "::1" ||
       value.startsWith("::ffff:") ||
       /^fe[89ab]/.test(value) ||
-      /^f[cd]/.test(value)
+      /^fec[0-9a-f]/.test(value) ||
+      /^f[cd]/.test(value) ||
+      /^ff/.test(value)
     );
   }
 
@@ -293,8 +295,10 @@ function isPrivateNetworkHost(host) {
     a === 127 ||
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127)
+    (a === 192 && (b === 0 || b === 168)) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    a >= 224
   );
 }
 
@@ -435,8 +439,12 @@ function hlsChildPlaylistKeys(text, masterUrl) {
 /// Prefer confirmed HLS masters over only the child playlists they explicitly
 /// reference. Unknown playlists, unrelated streams, DASH manifests, and direct
 /// files are preserved. Candidate fetches run with bounded concurrency.
-async function preferMasterPlaylists(urls, tabOrigin = null) {
-  const manifests = [...new Set((urls || []).filter(isHlsPlaylistUrl))];
+async function preferMasterPlaylists(urls, tabOrigin = null, sniffedUrls = []) {
+  // The second fetch is privileged extension-context I/O. Only inspect HLS
+  // URLs that the browser itself observed in webRequest; page-reported video
+  // sources remain visible as candidates but never trigger a blind extension
+  // fetch to a page-selected host.
+  const manifests = [...new Set((sniffedUrls || []).filter(isHlsPlaylistUrl))];
   if (manifests.length === 0) return urls || [];
 
   const results = new Map();
@@ -994,7 +1002,13 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId) {
   const videos = finds.frames.get(frameId) || [];
   if (videos.length !== 1 || videos[0].blob !== true) return null;
   let urls = mergedVideoUrlsForFrame(tabId, frameId);
-  if (urls.length > 1) urls = await preferMasterPlaylists(urls, await tabOriginForHlsFetch(tabId));
+  if (urls.length > 1) {
+    urls = await preferMasterPlaylists(
+      urls,
+      await tabOriginForHlsFetch(tabId),
+      sniffedUrlsForFrame(finds, frameId),
+    );
+  }
   return urls.length === 1 ? urls[0] : null;
 }
 
@@ -1011,11 +1025,23 @@ async function resolvedVideoUrlsForFrame(tabId, frameId) {
   const video = videos[0];
   if (video && video.blob === true) {
     let urls = mergedVideoUrlsForFrame(tabId, frameId);
-    if (urls.length > 1) urls = await preferMasterPlaylists(urls, await tabOriginForHlsFetch(tabId));
+    if (urls.length > 1) {
+      urls = await preferMasterPlaylists(
+        urls,
+        await tabOriginForHlsFetch(tabId),
+        sniffedUrlsForFrame(finds, frameId),
+      );
+    }
     return urls;
   }
   let urls = mergedVideoUrlsForFrame(tabId, frameId);
-  if (urls.length > 1) urls = await preferMasterPlaylists(urls, await tabOriginForHlsFetch(tabId));
+  if (urls.length > 1) {
+    urls = await preferMasterPlaylists(
+      urls,
+      await tabOriginForHlsFetch(tabId),
+      sniffedUrlsForFrame(finds, frameId),
+    );
+  }
   return video && video.src ? urls : [];
 }
 
