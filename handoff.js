@@ -259,8 +259,8 @@ function createHlsInspectionInspectorForBatch() {
 }
 
 /// Ask the paired Grab process to inspect a browser-observed public HLS URL.
-/// Standalone calls verify the listener themselves; a batch may pass the
-/// secret from a just-completed handshake to avoid one /hello round trip per URL.
+/// Standalone calls verify after acquiring a slot. Batch calls share a recent
+/// proof and refresh it on-slot when queueing makes it too old.
 async function inspectHlsPlaylistWithGrab(value, verifiedSecret = null) {
   if (typeof value !== "string" || new TextEncoder().encode(value).length > 2048) {
     return null;
