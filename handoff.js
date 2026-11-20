@@ -20,6 +20,31 @@ const HLS_INSPECT_TIMEOUT_MS = 5_000;
 const MAX_HLS_INSPECT_RESPONSE_BYTES = 16 * 1024;
 const MAX_HLS_INSPECT_CHILDREN = 256;
 
+/// Share Grab's four-request HLS inspection budget across every tab and frame
+/// handled by this background context. Per-menu worker limits alone allow
+/// concurrent batches to exceed the server's process-wide semaphore.
+const HLS_INSPECTION_CONCURRENCY = 4;
+let activeHlsInspections = 0;
+const queuedHlsInspections = [];
+
+async function withHlsInspectionSlot(operation) {
+  if (activeHlsInspections < HLS_INSPECTION_CONCURRENCY) {
+    activeHlsInspections += 1;
+  } else {
+    await new Promise((resolve) => queuedHlsInspections.push(resolve));
+  }
+
+  try {
+    return await operation();
+  } finally {
+    // Hand the occupied slot directly to the oldest waiter. The active count
+    // stays unchanged until the queue is empty, so no fifth request can enter.
+    const next = queuedHlsInspections.shift();
+    if (next) next();
+    else activeHlsInspections -= 1;
+  }
+}
+
 /// Launches Grab without handing it a download. The follow-up HTTP handoff
 /// carries the source-page referrer and, when enabled, the prepared cookie
 /// snapshot; the grab:// fallback can carry only the target URL.
@@ -230,69 +255,74 @@ async function inspectHlsPlaylistWithGrab(value, verifiedSecret = null) {
     }
   }
 
-  const body = JSON.stringify({
-    url: value,
-    timestamp_ms: Date.now(),
-    nonce: bytesToHex(crypto.getRandomValues(new Uint8Array(16))),
-  });
-  if (new TextEncoder().encode(body).length > 4096) return null;
-
-  let token;
-  try {
-    token = await hmacHex(secret, HLS_INSPECTION_CONTEXT, body);
-  } catch {
-    return null;
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), HLS_INSPECT_TIMEOUT_MS);
-  try {
-    const response = await fetch(GRAB_BASE_URL + "/inspect-hls", {
-      method: "POST",
-      credentials: "omit",
-      redirect: "error",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Grab-Token": token,
-      },
-      body,
-      signal: controller.signal,
+  return withHlsInspectionSlot(async () => {
+    // Create the timestamp, nonce, signature and deadline only after a shared
+    // slot is acquired. Waiting behind another tab must not age the request.
+    const body = JSON.stringify({
+      url: value,
+      timestamp_ms: Date.now(),
+      nonce: bytesToHex(crypto.getRandomValues(new Uint8Array(16))),
     });
-    if (!response.ok) return null;
-    const text = await response.text();
-    if (new TextEncoder().encode(text).length > MAX_HLS_INSPECT_RESPONSE_BYTES) {
+    if (new TextEncoder().encode(body).length > 4096) return null;
+
+    let token;
+    try {
+      token = await hmacHex(secret, HLS_INSPECTION_CONTEXT, body);
+    } catch {
       return null;
     }
-    const result = JSON.parse(text);
-    if (
-      !result ||
-      typeof result.is_master !== "boolean" ||
-      !Array.isArray(result.child_keys) ||
-      result.child_keys.length > MAX_HLS_INSPECT_CHILDREN ||
-      !result.child_keys.every((key) => {
-        if (typeof key !== "string" || new TextEncoder().encode(key).length > 2048) return false;
-        try {
-          const child = new URL(key);
-          return (
-            (child.protocol === "http:" || child.protocol === "https:") &&
-            !child.username &&
-            !child.password &&
-            !child.search &&
-            !child.hash &&
-            child.origin + child.pathname === key
-          );
-        } catch {
-          return false;
-        }
-      }) ||
-      (!result.is_master && result.child_keys.length !== 0)
-    ) return null;
-    return { is_master: result.is_master, child_keys: result.child_keys };
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), HLS_INSPECT_TIMEOUT_MS);
+    try {
+      const response = await fetch(GRAB_BASE_URL + "/inspect-hls", {
+        method: "POST",
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
+        redirect: "error",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Grab-Token": token,
+        },
+        body,
+        signal: controller.signal,
+      });
+      if (!response.ok) return null;
+      const text = await response.text();
+      if (new TextEncoder().encode(text).length > MAX_HLS_INSPECT_RESPONSE_BYTES) {
+        return null;
+      }
+      const result = JSON.parse(text);
+      if (
+        !result ||
+        typeof result.is_master !== "boolean" ||
+        !Array.isArray(result.child_keys) ||
+        result.child_keys.length > MAX_HLS_INSPECT_CHILDREN ||
+        !result.child_keys.every((key) => {
+          if (typeof key !== "string" || new TextEncoder().encode(key).length > 2048) return false;
+          try {
+            const child = new URL(key);
+            return (
+              (child.protocol === "http:" || child.protocol === "https:") &&
+              !child.username &&
+              !child.password &&
+              !child.search &&
+              !child.hash &&
+              child.origin + child.pathname === key
+            );
+          } catch {
+            return false;
+          }
+        }) ||
+        (!result.is_master && result.child_keys.length !== 0)
+      ) return null;
+      return { is_master: result.is_master, child_keys: result.child_keys };
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  });
 }
 
 /// Check readiness for an explicit URL-only handoff when the extension has no
