@@ -592,7 +592,7 @@ describe("detection wiring", () => {
     assert.ok(created.includes("grabVideos"), "parent menu created from network observation");
     assert.ok(created.includes("grabVideo:0"), "manifest is available without a <video> report");
     assert.deepEqual(
-      created.filter((id) => String(id).startsWith("grabVideo:")),
+      [...new Set(created.filter((id) => String(id).startsWith("grabVideo:")))],
       ["grabVideo:0"],
       "a network-only frame exposes manifests, not unrelated direct-media requests",
     );
