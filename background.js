@@ -233,6 +233,7 @@ if (typeof module !== "undefined" && module.exports) {
     _setSleep,
     postToGrab,
     normalizeReferer,
+    inspectHlsPlaylistWithGrab,
     resolveStoreId,
     requestRescan,
     postToGrabWithRetry,
