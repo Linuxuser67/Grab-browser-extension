@@ -394,12 +394,46 @@ async function fetchHlsPlaylistText(value, tabOrigin = null) {
   }
 }
 
-/// True only for a playlist containing the HLS multivariant marker.
-/// Null represents an unreadable playlist and must not cause filtering.
-async function isMasterPlaylist(value, tabOrigin = null) {
-  const text = await fetchHlsPlaylistText(value, tabOrigin);
-  if (text === null) return null;
-  return text.slice(0, 4096).includes("#EXT-X-STREAM-INF:");
+/// Inspect a private playlist locally only when the page itself is private.
+/// Public-looking hosts go through Grab's paired resolver so the extension
+/// never re-resolves an observed public hostname in its own network context.
+async function inspectHlsPlaylist(value, tabOrigin = null, inspectPublic = inspectHlsPlaylistWithGrab) {
+  if (!isHlsPlaylistUrl(value)) return null;
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (isPrivateNetworkHost(url.hostname)) {
+    const text = await fetchHlsPlaylistText(value, tabOrigin);
+    if (text === null) return null;
+    return {
+      is_master: text.slice(0, 4096).includes("#EXT-X-STREAM-INF:"),
+      child_keys: [...hlsChildPlaylistKeys(text, value)],
+    };
+  }
+  if (typeof inspectPublic !== "function") return null;
+  try {
+    const result = await inspectPublic(value);
+    if (
+      !result ||
+      typeof result.is_master !== "boolean" ||
+      !Array.isArray(result.child_keys) ||
+      result.child_keys.length > 256 ||
+      !result.child_keys.every((key) => typeof key === "string" && key.length <= 2048)
+    ) return null;
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+/// True only for a playlist confirmed as a multivariant master.
+/// Null represents an unreadable or unverified playlist and must not filter it.
+async function isMasterPlaylist(value, tabOrigin = null, inspectPublic = inspectHlsPlaylistWithGrab) {
+  const result = await inspectHlsPlaylist(value, tabOrigin, inspectPublic);
+  return result === null ? null : result.is_master;
 }
 
 /// Resolve playlist references against the master URL. Only explicit
@@ -439,13 +473,15 @@ function hlsChildPlaylistKeys(text, masterUrl) {
 }
 
 /// Prefer confirmed HLS masters over only the child playlists they explicitly
-/// reference. Unknown playlists, unrelated streams, DASH manifests, and direct
-/// files are preserved. Candidate fetches run with bounded concurrency.
-async function preferMasterPlaylists(urls, tabOrigin = null, sniffedUrls = []) {
-  // The second fetch is privileged extension-context I/O. Only inspect HLS
-  // URLs that the browser itself observed in webRequest; page-reported video
-  // sources remain visible as candidates but never trigger a blind extension
-  // fetch to a page-selected host.
+/// reference. Public hosts are inspected by Grab through its guarded resolver;
+/// syntactically private hosts retain the existing private-page-only local path.
+/// Unknown playlists, unrelated streams, DASH manifests, and direct files stay.
+async function preferMasterPlaylists(
+  urls,
+  tabOrigin = null,
+  sniffedUrls = [],
+  inspectPublic = inspectHlsPlaylistWithGrab,
+) {
   const manifests = [...new Set((sniffedUrls || []).filter(isHlsPlaylistUrl))];
   if (manifests.length === 0) return urls || [];
 
@@ -457,7 +493,7 @@ async function preferMasterPlaylists(urls, tabOrigin = null, sniffedUrls = []) {
       while (next < manifests.length) {
         const index = next++;
         const url = manifests[index];
-        results.set(url, await isMasterPlaylist(url, tabOrigin));
+        results.set(url, await inspectHlsPlaylist(url, tabOrigin, inspectPublic));
       }
     },
   );
@@ -466,11 +502,10 @@ async function preferMasterPlaylists(urls, tabOrigin = null, sniffedUrls = []) {
   const masterKeys = new Set();
   const childKeys = new Set();
   for (const url of manifests) {
-    if (results.get(url) !== true) continue;
+    const inspection = results.get(url);
+    if (!inspection || inspection.is_master !== true) continue;
     masterKeys.add(urlPathKey(url));
-    const text = await fetchHlsPlaylistText(url, tabOrigin);
-    if (text === null) continue;
-    for (const key of hlsChildPlaylistKeys(text, url)) childKeys.add(key);
+    for (const key of inspection.child_keys) childKeys.add(key);
   }
 
   if (masterKeys.size === 0 || childKeys.size === 0) return urls || [];

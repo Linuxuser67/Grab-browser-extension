@@ -15,6 +15,10 @@ const HANDOFF_RETRY_DELAYS_MS = [300, 900];
 const CONFIRM_TIMEOUT_MS = 130_000;
 /// A pairing handshake is a loopback round trip.
 const HELLO_TIMEOUT_MS = 3_000;
+/// Paired HLS inspection is read-only and returns only path keys.
+const HLS_INSPECT_TIMEOUT_MS = 5_000;
+const MAX_HLS_INSPECT_RESPONSE_BYTES = 16 * 1024;
+const MAX_HLS_INSPECT_CHILDREN = 256;
 
 /// Launches Grab without handing it a download. The follow-up HTTP handoff
 /// carries the source-page referrer and, when enabled, the prepared cookie
@@ -170,12 +174,106 @@ async function fetchJsonWithTimeout(url, ms) {
 async function verifyGrab(secret) {
   const nonce = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
   const { ok, body } = await fetchJsonWithTimeout(
-    `${GRAB_BASE_URL}/hello?n=${nonce}`,
+    GRAB_BASE_URL + "/hello?n=" + nonce,
     HELLO_TIMEOUT_MS,
   );
   if (!ok) return false;
   const expected = await hmacHex(secret, SERVER_CONTEXT, nonce);
   return constantTimeEqual(body && body.proof, expected);
+}
+
+/// Ask the paired Grab process to inspect a browser-observed public HLS URL.
+/// The request contains no cookies or Referer; the response contains no query
+/// strings. Null means the inspection was unavailable and callers must keep
+/// every candidate rather than guessing which rendition is a child.
+async function inspectHlsPlaylistWithGrab(value) {
+  if (typeof value !== "string" || new TextEncoder().encode(value).length > 2048) {
+    return null;
+  }
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username ||
+    url.password ||
+    !/\.(?:m3u8|m3u)$/i.test(url.pathname)
+  ) return null;
+
+  let secret;
+  try {
+    secret = await getPairingCode();
+    if (!secret || !(await verifyGrab(secret))) return null;
+  } catch {
+    return null;
+  }
+
+  const body = JSON.stringify({
+    url: value,
+    timestamp_ms: Date.now(),
+    nonce: bytesToHex(crypto.getRandomValues(new Uint8Array(16))),
+  });
+  if (new TextEncoder().encode(body).length > 4096) return null;
+
+  let token;
+  try {
+    token = await hmacHex(secret, CLIENT_CONTEXT, body);
+  } catch {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HLS_INSPECT_TIMEOUT_MS);
+  try {
+    const response = await fetch(GRAB_BASE_URL + "/inspect-hls", {
+      method: "POST",
+      credentials: "omit",
+      redirect: "error",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Grab-Token": token,
+      },
+      body,
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const text = await response.text();
+    if (new TextEncoder().encode(text).length > MAX_HLS_INSPECT_RESPONSE_BYTES) {
+      return null;
+    }
+    const result = JSON.parse(text);
+    if (
+      !result ||
+      typeof result.is_master !== "boolean" ||
+      !Array.isArray(result.child_keys) ||
+      result.child_keys.length > MAX_HLS_INSPECT_CHILDREN ||
+      !result.child_keys.every((key) => {
+        if (typeof key !== "string" || new TextEncoder().encode(key).length > 2048) return false;
+        try {
+          const child = new URL(key);
+          return (
+            (child.protocol === "http:" || child.protocol === "https:") &&
+            !child.username &&
+            !child.password &&
+            !child.search &&
+            !child.hash &&
+            child.origin + child.pathname === key
+          );
+        } catch {
+          return false;
+        }
+      }) ||
+      (!result.is_master && result.child_keys.length !== 0)
+    ) return null;
+    return { is_master: result.is_master, child_keys: result.child_keys };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /// Check readiness for an explicit URL-only handoff when the extension has no

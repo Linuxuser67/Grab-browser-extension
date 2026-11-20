@@ -37,6 +37,7 @@ function makeChrome(shared) {
   const session = shared.session || (shared.session = new Map());
   const downloads = shared.downloads || (shared.downloads = new Map());
   const syncSettings = shared.syncSettings || (shared.syncSettings = {});
+  const localSettings = shared.localSettings || {};
   const alarms = new Map();
   const calls = [];
 
@@ -90,6 +91,9 @@ function makeChrome(shared) {
     },
     storage: {
       onChanged: capture("storage.onChanged"),
+      local: {
+        get: async (defaults) => ({ ...defaults, ...localSettings }),
+      },
       sync: {
         get: async (defaults) => ({ ...defaults, ...syncSettings }),
       },
@@ -1842,21 +1846,17 @@ describe("HLS master playlist filtering", () => {
   const MEDIA = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nsegment.ts\n";
 
   async function filterWithPlaylists(urls, playlists) {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = async (url, options) => {
-      assert.equal(options.credentials, "omit");
-      assert.equal(options.redirect, "error");
+    const bg = loadBackground(makeChrome());
+    const inspect = async (url) => {
       const body = playlists.get(String(url));
-      return body === undefined
-        ? { ok: false, status: 404, text: async () => "" }
-        : { ok: true, status: 200, text: async () => body };
+      if (body === undefined) return null;
+      const isMaster = body.slice(0, 4096).includes("#EXT-X-STREAM-INF:");
+      return {
+        is_master: isMaster,
+        child_keys: isMaster ? [...bg.hlsChildPlaylistKeys(body, url)] : [],
+      };
     };
-    try {
-      const bg = loadBackground(makeChrome());
-      return await bg.preferMasterPlaylists(urls, null, urls);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    return bg.preferMasterPlaylists(urls, null, urls, inspect);
   }
 
   test("drops only explicit variant and audio playlist references", async () => {
@@ -1909,24 +1909,19 @@ describe("HLS master playlist filtering", () => {
     );
   });
 
-  test("does not forward cookies or follow redirects to inspect a master", async () => {
-    const originalFetch = globalThis.fetch;
+  test("preserves candidates when the paired Grab inspector rejects a master", async () => {
     const master = "https://cdn.example.com/v/42/master.m3u8";
     const child = "https://cdn.example.com/v/42/chunklist.m3u8";
-    globalThis.fetch = async (_url, options) => {
-      assert.equal(options.credentials, "omit");
-      assert.equal(options.redirect, "error");
-      throw new TypeError("authenticated playlist cannot be inspected");
-    };
-    try {
-      const bg = loadBackground(makeChrome());
-      assert.deepEqual(
-        await bg.preferMasterPlaylists([master, child], null, [master, child]),
+    const bg = loadBackground(makeChrome());
+    assert.deepEqual(
+      await bg.preferMasterPlaylists(
         [master, child],
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+        null,
+        [master, child],
+        async () => null,
+      ),
+      [master, child],
+    );
   });
 
   test("does not let DASH manifests suppress HLS playlists", async () => {
@@ -1953,31 +1948,123 @@ describe("HLS master playlist filtering", () => {
     );
   });
 
-  test("only browser-sniffed playlists are fetched in extension context", async () => {
+  test("only browser-sniffed public playlists use the paired Grab inspector", async () => {
     const pageReportedMaster = "https://page-selected.example/private/master.m3u8";
     const browserSniffedMaster = "https://cdn.example.com/observed/master.m3u8";
-    const requests = [];
+    const browserSniffedChild = "https://cdn.example.com/observed/rendition.m3u8";
+    const inspections = [];
+    const candidates = [pageReportedMaster, browserSniffedMaster, browserSniffedChild];
+    const inspector = async (url) => {
+      inspections.push(url);
+      return url === browserSniffedMaster
+        ? {
+            is_master: true,
+            child_keys: ["https://cdn.example.com/observed/rendition.m3u8"],
+          }
+        : { is_master: false, child_keys: [] };
+    };
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async (url, options) => {
-      requests.push(String(url));
-      assert.equal(options.credentials, "omit");
-      assert.equal(options.redirect, "error");
-      return {
-        ok: true,
-        status: 200,
-        text: async () => MASTER,
-      };
+    globalThis.fetch = async () => {
+      throw new Error("public playlist inspection must not fetch from the extension");
     };
     try {
       const bg = loadBackground(makeChrome());
-      const candidates = [pageReportedMaster, browserSniffedMaster];
       const result = await bg.preferMasterPlaylists(
         candidates,
         "https://public.example/watch",
-        [browserSniffedMaster],
+        [browserSniffedMaster, browserSniffedChild],
+        inspector,
       );
-      assert.deepEqual(requests, [browserSniffedMaster]);
-      assert.deepEqual(result, candidates);
+      assert.deepEqual(inspections, [browserSniffedMaster, browserSniffedChild]);
+      assert.deepEqual(result, [pageReportedMaster, browserSniffedMaster]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("unknown Grab inspection preserves every candidate", async () => {
+    const candidates = [
+      "https://cdn.example.com/observed/master.m3u8",
+      "https://cdn.example.com/observed/rendition.m3u8",
+    ];
+    const bg = loadBackground(makeChrome());
+    const result = await bg.preferMasterPlaylists(
+      candidates,
+      "https://public.example/watch",
+      candidates,
+      async () => null,
+    );
+    assert.deepEqual(result, candidates);
+  });
+
+  test("uses the paired HMAC endpoint and omits browser credentials", async () => {
+    const secret = "1a".repeat(32);
+    const chrome = makeChrome({ localSettings: { pairingCode: secret } });
+    const bg = loadBackground(chrome);
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    const hmac = async (context, message) => {
+      const keyBytes = new Uint8Array(
+        secret.match(/.{2}/g).map((byte) => Number.parseInt(byte, 16)),
+      );
+      const key = await crypto.subtle.importKey(
+        "raw",
+        keyBytes,
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      );
+      const signature = await crypto.subtle.sign(
+        "HMAC",
+        key,
+        new TextEncoder().encode(context + message),
+      );
+      return Array.from(new Uint8Array(signature), (byte) =>
+        byte.toString(16).padStart(2, "0")
+      ).join("");
+    };
+    globalThis.fetch = async (value, options = {}) => {
+      const url = new URL(String(value));
+      if (url.pathname === "/hello") {
+        const nonce = url.searchParams.get("n");
+        return {
+          ok: true,
+          json: async () => ({ proof: await hmac("grab-server\0", nonce) }),
+        };
+      }
+      if (url.pathname === "/inspect-hls") {
+        requests.push({ url: String(value), options });
+        const body = JSON.parse(options.body);
+        assert.equal(options.headers["X-Grab-Token"], await hmac("grab-client\0", options.body));
+        assert.equal(body.url, "https://cdn.example.com/master.m3u8?sig=secret");
+        assert.equal(typeof body.timestamp_ms, "number");
+        assert.match(body.nonce, /^[0-9a-f]{32}$/);
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            is_master: true,
+            child_keys: ["https://cdn.example.com/rendition.m3u8"],
+          }),
+        };
+      }
+      throw new Error("unexpected request: " + String(value));
+    };
+    try {
+      const result = await bg.inspectHlsPlaylistWithGrab(
+        "https://cdn.example.com/master.m3u8?sig=secret",
+      );
+      assert.deepEqual(result, {
+        is_master: true,
+        child_keys: ["https://cdn.example.com/rendition.m3u8"],
+      });
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].url, "http://127.0.0.1:9412/inspect-hls");
+      assert.equal(requests[0].options.credentials, "omit");
+      assert.equal(requests[0].options.redirect, "error");
+      assert.equal(
+        Object.keys(requests[0].options.headers).some((key) => key.toLowerCase() === "cookie"),
+        false,
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -2017,28 +2104,20 @@ describe("HLS master playlist filtering", () => {
 
   test("allows globally reachable 192.0.0.9/.10 and hosts outside the IETF /24", async () => {
     const bg = loadBackground(makeChrome());
-    const originalFetch = globalThis.fetch;
-    const requests = [];
-    globalThis.fetch = async (value) => {
-      requests.push(String(value));
-      return {
-        ok: true,
-        text: async () => "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nrendition.m3u8",
-      };
-    };
     const targets = [
       "http://192.0.0.9/master.m3u8",
       "http://192.0.0.10/master.m3u8",
       "http://192.0.66.1/master.m3u8",
     ];
-    try {
-      for (const target of targets) {
-        assert.equal(await bg.isMasterPlaylist(target), true, target);
-      }
-      assert.deepEqual(requests, targets);
-    } finally {
-      globalThis.fetch = originalFetch;
+    const inspected = [];
+    const inspector = async (value) => {
+      inspected.push(value);
+      return { is_master: true, child_keys: [] };
+    };
+    for (const target of targets) {
+      assert.equal(await bg.isMasterPlaylist(target, null, inspector), true, target);
     }
+    assert.deepEqual(inspected, targets);
   });
 
   test("allows private playlists when the tab's own origin is private", async () => {
