@@ -201,7 +201,8 @@ describe("classifyStream", () => {
     const L = chrome._listeners;
     await L["tabs.onActivated"]({ tabId: 5 });
     L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://a.example.com/a.mp4", responseHeaders: [] });
-    // Played-only menu: the sniffed URL needs a started video to surface.
+    // Direct-media sniffing remains associated with an observed video; the
+    // independent network-only path is reserved for HLS/DASH manifests.
     L["runtime.onMessage"](
       { type: "grab-videos-detected", videos: [{ src: "https://a.example.com/v.mp4", blob: false }] },
       { tab: { id: 5 } }
@@ -578,14 +579,25 @@ describe("detection wiring", () => {
       url: manifest,
       responseHeaders: [],
     });
+    await L["webRequest.onResponseStarted"]({
+      tabId: 5,
+      frameId: 4,
+      url: "https://cdn.example.com/s/preview.mp4",
+      responseHeaders: [],
+    });
     await tick();
     await tick();
 
     const created = chrome._calls.filter(([n]) => n === "menus.create").map(([, id]) => id);
     assert.ok(created.includes("grabVideos"), "parent menu created from network observation");
     assert.ok(created.includes("grabVideo:0"), "manifest is available without a <video> report");
-    assert.deepEqual(await chrome._listeners["runtime.onMessage"] && chrome._calls
-      .filter(([n]) => n === "action.setBadgeText").at(-1)[1], { tabId: 5, text: "1" });
+    assert.deepEqual(
+      created.filter((id) => String(id).startsWith("grabVideo:")),
+      ["grabVideo:0"],
+      "a network-only frame exposes manifests, not unrelated direct-media requests",
+    );
+    const badges = chrome._calls.filter(([n]) => n === "action.setBadgeText");
+    assert.deepEqual(badges.at(-1)[1], { tabId: 5, text: "1" });
 
     await L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, null);
     assert.ok(
