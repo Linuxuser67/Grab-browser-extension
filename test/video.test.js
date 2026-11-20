@@ -201,7 +201,8 @@ describe("classifyStream", () => {
     const L = chrome._listeners;
     await L["tabs.onActivated"]({ tabId: 5 });
     L["webRequest.onResponseStarted"]({ tabId: 5, url: "https://a.example.com/a.mp4", responseHeaders: [] });
-    // Played-only menu: the sniffed URL needs a started video to surface.
+    // Direct-media sniffing remains associated with an observed video; the
+    // independent network-only path is reserved for HLS/DASH manifests.
     L["runtime.onMessage"](
       { type: "grab-videos-detected", videos: [{ src: "https://a.example.com/v.mp4", blob: false }] },
       { tab: { id: 5 } }
@@ -247,10 +248,19 @@ describe("classifyStream", () => {
   });
 
   test("manifest content types classify without an extension", () => {
-    assert.equal(
-      bg.classifyStream("https://cdn.example.com/s/playlist", "application/vnd.apple.mpegurl"),
-      "manifest"
-    );
+    for (const contentType of [
+      "application/vnd.apple.mpegurl",
+      "application/x-mpegurl",
+      "application/mpegurl",
+      "audio/x-mpegurl",
+      "audio/mpegurl",
+    ]) {
+      assert.equal(
+        bg.classifyStream("https://cdn.example.com/s/playlist", contentType),
+        "manifest",
+        contentType,
+      );
+    }
     assert.equal(
       bg.classifyStream("https://cdn.example.com/s/playlist", "application/dash+xml"),
       "manifest"
@@ -556,49 +566,43 @@ describe("isActiveVideo (content script)", () => {
 describe("detection wiring", () => {
   const tick = () => new Promise((r) => setTimeout(r, 30));
 
-  test("a sniffed manifest appears in the menu and badge once a video is active, and clicks hand off", async () => {
+  test("a network-observed HLS manifest appears without a DOM video and can be handed off", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
     const L = chrome._listeners;
+    const manifest = "https://cdn.example.com/s/stream.m3u8";
 
     await L["tabs.onActivated"]({ tabId: 5 });
-    L["webRequest.onResponseStarted"]({
+    await L["webRequest.onResponseStarted"]({
       tabId: 5,
-      url: "https://cdn.example.com/s/stream.m3u8",
+      frameId: 4,
+      url: manifest,
+      responseHeaders: [],
+    });
+    await L["webRequest.onResponseStarted"]({
+      tabId: 5,
+      frameId: 4,
+      url: "https://cdn.example.com/s/preview.mp4",
       responseHeaders: [],
     });
     await tick();
-    // Sniffing alone shows nothing: no video was started.
-    assert.equal(
-      chrome._calls.some(([n, id]) => n === "menus.create" && String(id).startsWith("grabVideo")),
-      false,
-      "no menu from sniffing alone"
-    );
-    // An active video report makes the source eligible.
-    L["runtime.onMessage"](
-      {
-        type: "grab-videos-detected",
-        videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }],
-      },
-      { tab: { id: 5 } }
-    );
     await tick();
 
     const created = chrome._calls.filter(([n]) => n === "menus.create").map(([, id]) => id);
-    assert.ok(created.includes("grabVideos"), "parent menu created");
-    assert.ok(created.includes("grabVideo:0"), "child menu created");
-    assert.ok(created.includes("grabVideo:1"), "sniffed manifest rides along");
-
+    assert.ok(created.includes("grabVideos"), "parent menu created from network observation");
+    assert.ok(created.includes("grabVideo:0"), "manifest is available without a <video> report");
+    assert.deepEqual(
+      [...new Set(created.filter((id) => String(id).startsWith("grabVideo:")))],
+      ["grabVideo:0"],
+      "a network-only frame exposes manifests, not unrelated direct-media requests",
+    );
     const badges = chrome._calls.filter(([n]) => n === "action.setBadgeText");
-    const badge = badges[badges.length - 1];
-    assert.deepEqual(badge[1], { tabId: 5, text: "2" });
+    assert.deepEqual(badges.at(-1)[1], { tabId: 5, text: "1" });
 
-    await L["menus.onClicked"]({ menuItemId: "grabVideo:1" }, null);
+    await L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, null);
     assert.ok(
-      chrome._calls.some(
-        ([n, url]) => n === "handoff" && url === "https://cdn.example.com/s/stream.m3u8"
-      ),
-      "click hands off via HTTP"
+      chrome._calls.some(([n, url]) => n === "handoff" && url === manifest),
+      "the selected playlist is handed off through HTTP"
     );
   });
 
@@ -1197,13 +1201,17 @@ describe("detection wiring", () => {
     assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), null);
   });
 
-  test("multiple players in one frame do not inherit ambiguous sniffed streams", async () => {
+  test("multiple players expose separate network candidates without guessing an element match", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);
     const L = chrome._listeners;
     const tabId = 142;
+    const manifests = [
+      "https://cdn.example.com/a/master.m3u8",
+      "https://cdn.example.com/b/master.m3u8",
+    ];
     await L["tabs.onActivated"]({ tabId });
-    for (const url of ["https://cdn.example.com/a/master.m3u8", "https://cdn.example.com/b/master.m3u8"]) {
+    for (const url of manifests) {
       await L["webRequest.onResponseStarted"]({ tabId, frameId: 0, url, responseHeaders: [] });
     }
     await L["runtime.onMessage"](
@@ -1213,8 +1221,16 @@ describe("detection wiring", () => {
       ] },
       { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
     );
-    assert.deepEqual(await bg.resolvedVideoUrlsForFrame(tabId, 0), []);
-    assert.deepEqual(await bg.resolvedVideoUrls(tabId), []);
+    assert.deepEqual(
+      await bg.resolvedVideoUrlsForFrame(tabId, 0),
+      [],
+      "element-specific resolution remains conservative with multiple players",
+    );
+    assert.deepEqual(
+      await bg.resolvedVideoUrls(tabId),
+      manifests,
+      "the detection menu exposes the separate network-observed playlist candidates",
+    );
   });
 
   test("one blob player with unrelated manifests is not guessed", async () => {

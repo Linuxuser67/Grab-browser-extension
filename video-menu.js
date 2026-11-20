@@ -100,7 +100,9 @@ function classifyStream(url, contentType) {
   if (
     ct === "application/vnd.apple.mpegurl" ||
     ct === "application/x-mpegurl" ||
+    ct === "application/mpegurl" ||
     ct === "audio/x-mpegurl" ||
+    ct === "audio/mpegurl" ||
     ct === "application/dash+xml"
   ) {
     return "manifest";
@@ -531,7 +533,7 @@ async function preferMasterPlaylists(
   });
 }
 
-/// Merge user-played DOM sources with sniffed requests. Ignore rotating auth
+/// Merge DOM-reported video sources with sniffed requests. Ignore rotating auth
 /// query strings and group a direct rendition with its manifest directory only
 /// when that directory holds a single stream family. Distinct manifests keep
 /// distinct entries, so a second video in the same directory is not dropped.
@@ -1097,11 +1099,47 @@ async function resolvedVideoUrlsForFrame(tabId, frameId) {
   return video && video.src ? urls : [];
 }
 
+/// Build menu candidates independently from element-specific context-menu
+/// resolution. Network-observed playlists remain useful when a player is
+/// hidden in an iframe, uses a custom renderer, or shares a frame with another
+/// video element. With no qualifying DOM video, expose manifests only; this
+/// avoids turning unrelated sniffed MP4 requests into menu entries.
+function menuVideoCandidatesForFrame(finds, frameId) {
+  const videos = finds.frames.get(frameId) || [];
+  const sniffed = sniffedUrlsForFrame(finds, frameId);
+  const kinds = kindsForFrame(finds, frameId);
+  if (videos.length > 0) return mergeVideoFinds(videos, sniffed, kinds);
+
+  const manifests = sniffed.filter((url) => {
+    const kind = manifestKind(url) || kinds.get(urlPathKey(url));
+    return isManifestKind(kind);
+  });
+  return mergeVideoFinds([], manifests, kinds);
+}
+
 async function resolvedVideoUrls(tabId) {
   const finds = videoFinds.get(tabId);
   if (!finds) return [];
+  const frameIds = new Set(finds.frames.keys());
+  if (finds.sniffedByFrame instanceof Map) {
+    for (const frameId of finds.sniffedByFrame.keys()) frameIds.add(frameId);
+  } else if (Array.isArray(finds.sniffed) && finds.sniffed.length > 0) {
+    frameIds.add(0);
+  }
+
   const urls = [];
-  for (const frameId of finds.frames.keys()) urls.push(...await resolvedVideoUrlsForFrame(tabId, frameId));
+  for (const frameId of frameIds) {
+    let candidates = menuVideoCandidatesForFrame(finds, frameId);
+    if (candidates.length > 1) {
+      candidates = await preferMasterPlaylists(
+        candidates,
+        await tabOriginForHlsFetch(tabId),
+        sniffedUrlsForFrame(finds, frameId),
+      );
+    }
+    urls.push(...candidates);
+    if (urls.length >= MAX_VIDEO_ITEMS) break;
+  }
   return [...new Set(urls)].slice(0, MAX_VIDEO_ITEMS);
 }
 
@@ -1214,9 +1252,9 @@ async function doRefreshVideoMenu(tabId) {
       }
       return;
     }
-    // Played-only menu: the content script reports just videos the user started,
-    // and sniffed manifests ride along only then — without a played video
-    // the tab shows no video menu at all.
+    // Combine active DOM video sources with network-observed manifests.
+    // Playlist candidates do not require a unique or even discoverable
+    // <video> element; individual element clicks remain frame-scoped below.
     let urls = tabId === videoUi.activeTabId ? await resolvedVideoUrls(tabId) : [];
     // Backstop: collection already filters excluded hosts, but a tab may
     // have navigated there after its videos were recorded.
