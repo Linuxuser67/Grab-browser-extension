@@ -174,7 +174,7 @@ async function fetchJsonWithTimeout(url, ms) {
 async function verifyGrab(secret) {
   const nonce = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
   const { ok, body } = await fetchJsonWithTimeout(
-    \`\${GRAB_BASE_URL}/hello?n=\${nonce}\`,
+    GRAB_BASE_URL + "/hello?n=" + nonce,
     HELLO_TIMEOUT_MS,
   );
   if (!ok) return false;
