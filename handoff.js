@@ -206,8 +206,8 @@ function cookieRetentionPriority(cookie) {
   return 4;
 }
 
-/// Accept only absolute HTTP(S) referrers that can safely be used as a Referer header.
-/// Keep the browser-provided path/query, but omit fragments and credentials.
+/// Accept only absolute HTTP(S) source pages and retain just their origin.
+/// Page paths and query strings can contain private identifiers or credentials.
 function normalizeReferer(value) {
   if (typeof value !== "string" || value.trim() === "") return undefined;
   const raw = value.trim();
@@ -220,6 +220,8 @@ function normalizeReferer(value) {
       url.username ||
       url.password
     ) return undefined;
+    url.pathname = "/";
+    url.search = "";
     url.hash = "";
     return url.toString();
   } catch {

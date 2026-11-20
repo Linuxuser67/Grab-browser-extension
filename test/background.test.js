@@ -327,7 +327,7 @@ describe("size-wait interception", () => {
 
     const handoff = chrome._calls.find(([name]) => name === "handoff");
     assert.ok(handoff, "the browser download was handed to Grab");
-    assert.equal(handoff[2].referer, referer);
+    assert.equal(handoff[2].referer, "https://example.com/");
     assert.equal(cancelled(download.id), true);
   });
 
@@ -1403,9 +1403,13 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(tabsCreated().length, 0);
   });
 
-  test("normalizeReferer accepts HTTP(S), strips fragments, and rejects unsafe values", () => {
-    assert.equal(bg.normalizeReferer("https://example.com/watch?id=1#player"), "https://example.com/watch?id=1");
+  test("normalizeReferer retains only an HTTP(S) origin and rejects unsafe values", () => {
+    assert.equal(
+      bg.normalizeReferer("https://example.com/watch?id=1#player"),
+      "https://example.com/",
+    );
     assert.equal(bg.normalizeReferer("http://example.com"), "http://example.com/");
+    assert.equal(bg.normalizeReferer("http://example.com/watch?a=1"), "http://example.com/");
     assert.equal(bg.normalizeReferer("file:///etc/passwd"), undefined);
     assert.equal(bg.normalizeReferer("javascript:alert(1)"), undefined);
     assert.equal(bg.normalizeReferer("https://user:pass@example.com/"), undefined);
@@ -1935,7 +1939,11 @@ describe("HTTP handoff to Grab", () => {
     assert.ok(post, "context-menu action retries over HTTP after Grab is ready");
     const sent = JSON.parse(post.opts.body);
     assert.equal(sent.url, targetUrl);
-    assert.equal(sent.referer, referer, "the originating page survives the cold-start wake");
+    assert.equal(
+      sent.referer,
+      "https://example.com/",
+      "only the source origin survives the cold-start wake",
+    );
     assert.deepEqual(
       sent.cookies.map((cookie) => cookie.name),
       ["session"],
@@ -2075,7 +2083,7 @@ describe("HTTP handoff to Grab", () => {
     const post = posts().find((call) => call.opts.method === "POST");
     assert.ok(post);
     const sent = JSON.parse(post.opts.body);
-    assert.equal(sent.referer, referer);
+    assert.equal(sent.referer, "https://example.com/");
     assert.deepEqual(sent.cookies, []);
     assert.equal(reads, 0, "the cookie store is not read while forwarding is disabled");
   });
@@ -2100,7 +2108,7 @@ describe("HTTP handoff to Grab", () => {
     const post = posts().find((call) => call.opts.method === "POST");
     assert.ok(post, "the HTTP retry occurs after the local server is ready");
     const sent = JSON.parse(post.opts.body);
-    assert.equal(sent.referer, referer);
+    assert.equal(sent.referer, "https://example.com/");
     assert.deepEqual(sent.cookies, []);
     assert.equal(reads, 0, "the cookie store is not touched");
     assert.ok(
@@ -2152,7 +2160,7 @@ describe("HTTP handoff to Grab", () => {
     const post = posts().find((call) => call.opts.method === "POST");
     assert.ok(post);
     const sent = JSON.parse(post.opts.body);
-    assert.equal(sent.referer, referer);
+    assert.equal(sent.referer, "https://example.com/");
     assert.deepEqual(sent.cookies, []);
     assert.equal(
       reads,
@@ -2191,7 +2199,7 @@ describe("HTTP handoff to Grab", () => {
     const post = posts().find((call) => call.opts.method === "POST");
     assert.ok(post);
     const sent = JSON.parse(post.opts.body);
-    assert.equal(sent.referer, referer);
+    assert.equal(sent.referer, "https://example.com/");
     assert.deepEqual(sent.cookies, []);
     assert.equal(reads, 0);
   });
@@ -2216,7 +2224,7 @@ describe("HTTP handoff to Grab", () => {
     const post = posts().find((call) => call.opts.method === "POST");
     assert.ok(post);
     const sent = JSON.parse(post.opts.body);
-    assert.equal(sent.referer, referer);
+    assert.equal(sent.referer, "https://example.com/");
     assert.deepEqual(sent.cookies, []);
     assert.equal(reads, 1, "an empty snapshot is reused instead of querying after navigation");
   });
