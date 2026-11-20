@@ -1846,21 +1846,17 @@ describe("HLS master playlist filtering", () => {
   const MEDIA = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nsegment.ts\n";
 
   async function filterWithPlaylists(urls, playlists) {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = async (url, options) => {
-      assert.equal(options.credentials, "omit");
-      assert.equal(options.redirect, "error");
+    const bg = loadBackground(makeChrome());
+    const inspect = async (url) => {
       const body = playlists.get(String(url));
-      return body === undefined
-        ? { ok: false, status: 404, text: async () => "" }
-        : { ok: true, status: 200, text: async () => body };
+      if (body === undefined) return null;
+      const isMaster = body.slice(0, 4096).includes("#EXT-X-STREAM-INF:");
+      return {
+        is_master: isMaster,
+        child_keys: isMaster ? [...bg.hlsChildPlaylistKeys(body, url)] : [],
+      };
     };
-    try {
-      const bg = loadBackground(makeChrome());
-      return await bg.preferMasterPlaylists(urls, null, urls);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    return bg.preferMasterPlaylists(urls, null, urls, inspect);
   }
 
   test("drops only explicit variant and audio playlist references", async () => {
@@ -1913,24 +1909,19 @@ describe("HLS master playlist filtering", () => {
     );
   });
 
-  test("does not forward cookies or follow redirects to inspect a master", async () => {
-    const originalFetch = globalThis.fetch;
+  test("preserves candidates when the paired Grab inspector rejects a master", async () => {
     const master = "https://cdn.example.com/v/42/master.m3u8";
     const child = "https://cdn.example.com/v/42/chunklist.m3u8";
-    globalThis.fetch = async (_url, options) => {
-      assert.equal(options.credentials, "omit");
-      assert.equal(options.redirect, "error");
-      throw new TypeError("authenticated playlist cannot be inspected");
-    };
-    try {
-      const bg = loadBackground(makeChrome());
-      assert.deepEqual(
-        await bg.preferMasterPlaylists([master, child], null, [master, child]),
+    const bg = loadBackground(makeChrome());
+    assert.deepEqual(
+      await bg.preferMasterPlaylists(
         [master, child],
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+        null,
+        [master, child],
+        async () => null,
+      ),
+      [master, child],
+    );
   });
 
   test("does not let DASH manifests suppress HLS playlists", async () => {
