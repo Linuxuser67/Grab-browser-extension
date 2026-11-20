@@ -533,7 +533,7 @@ async function preferMasterPlaylists(
   });
 }
 
-/// Merge user-played DOM sources with sniffed requests. Ignore rotating auth
+/// Merge DOM-reported video sources with sniffed requests. Ignore rotating auth
 /// query strings and group a direct rendition with its manifest directory only
 /// when that directory holds a single stream family. Distinct manifests keep
 /// distinct entries, so a second video in the same directory is not dropped.
@@ -1252,9 +1252,9 @@ async function doRefreshVideoMenu(tabId) {
       }
       return;
     }
-    // Played-only menu: the content script reports just videos the user started,
-    // and sniffed manifests ride along only then — without a played video
-    // the tab shows no video menu at all.
+    // Combine active DOM video sources with network-observed manifests.
+    // Playlist candidates do not require a unique or even discoverable
+    // <video> element; individual element clicks remain frame-scoped below.
     let urls = tabId === videoUi.activeTabId ? await resolvedVideoUrls(tabId) : [];
     // Backstop: collection already filters excluded hosts, but a tab may
     // have navigated there after its videos were recorded.
