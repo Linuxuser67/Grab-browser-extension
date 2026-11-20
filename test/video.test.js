@@ -2052,10 +2052,10 @@ describe("HLS master playlist filtering", () => {
   test("shares the four-request HLS inspection limit across concurrent menu builds", async () => {
     const secret = "1a".repeat(32);
     const firstBatch = Array.from({ length: 4 }, (_, index) =>
-      \`https://cdn.example.com/first/\${index}/master.m3u8\`
+      `https://cdn.example.com/first/${index}/master.m3u8`
     );
     const secondBatch = Array.from({ length: 4 }, (_, index) =>
-      \`https://cdn.example.com/second/\${index}/master.m3u8\`
+      `https://cdn.example.com/second/${index}/master.m3u8`
     );
     const bg = loadBackground(makeChrome({ localSettings: { pairingCode: secret } }));
     const originalFetch = globalThis.fetch;
@@ -2125,7 +2125,7 @@ describe("HLS master playlist filtering", () => {
       assert.equal(activeInspections, 0);
       assert.ok(
         maximumActiveInspections <= 4,
-        \`observed \${maximumActiveInspections} simultaneous HLS inspections\`,
+        `observed ${maximumActiveInspections} simultaneous HLS inspections`,
       );
     } finally {
       globalThis.fetch = originalFetch;
