@@ -57,6 +57,7 @@ function _setSleep(fn) {
 
 const SERVER_CONTEXT = "grab-server\u0000";
 const CLIENT_CONTEXT = "grab-client\u0000";
+const HLS_INSPECTION_CONTEXT = "grab-inspect-hls\u0000";
 // Shared pattern lives in shared.js.
 const STATUS_UNVERIFIED = -1;
 /// The POST was sent but the answer never arrived (timeout or connection
@@ -186,7 +187,23 @@ async function verifyGrab(secret) {
 /// The request contains no cookies or Referer; the response contains no query
 /// strings. Null means the inspection was unavailable and callers must keep
 /// every candidate rather than guessing which rendition is a child.
-async function inspectHlsPlaylistWithGrab(value) {
+/// Prepare one authenticated inspection session for a batch. Each POST
+/// remains individually HMAC-authenticated; the handshake proves the current
+/// loopback listener once before the batch starts.
+async function createHlsInspectionInspectorForBatch() {
+  try {
+    const secret = await getPairingCode();
+    if (!secret || !(await verifyGrab(secret))) return null;
+    return (value) => inspectHlsPlaylistWithGrab(value, secret);
+  } catch {
+    return null;
+  }
+}
+
+/// Ask the paired Grab process to inspect a browser-observed public HLS URL.
+/// Standalone calls verify the listener themselves; a batch may pass the
+/// secret from a just-completed handshake to avoid one /hello round trip per URL.
+async function inspectHlsPlaylistWithGrab(value, verifiedSecret = null) {
   if (typeof value !== "string" || new TextEncoder().encode(value).length > 2048) {
     return null;
   }
@@ -203,12 +220,14 @@ async function inspectHlsPlaylistWithGrab(value) {
     !/\.(?:m3u8|m3u)$/i.test(url.pathname)
   ) return null;
 
-  let secret;
-  try {
-    secret = await getPairingCode();
-    if (!secret || !(await verifyGrab(secret))) return null;
-  } catch {
-    return null;
+  let secret = verifiedSecret;
+  if (secret === null) {
+    try {
+      secret = await getPairingCode();
+      if (!secret || !(await verifyGrab(secret))) return null;
+    } catch {
+      return null;
+    }
   }
 
   const body = JSON.stringify({
@@ -220,7 +239,7 @@ async function inspectHlsPlaylistWithGrab(value) {
 
   let token;
   try {
-    token = await hmacHex(secret, CLIENT_CONTEXT, body);
+    token = await hmacHex(secret, HLS_INSPECTION_CONTEXT, body);
   } catch {
     return null;
   }
