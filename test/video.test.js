@@ -2006,9 +2006,38 @@ describe("HLS master playlist filtering", () => {
       "http://[fc00::1]/master.m3u8",
       "http://[ff02::1]/master.m3u8",
       "http://[fec0::1]/master.m3u8",
+      "http://[fed0::1]/master.m3u8",
+      "http://[fee0::1]/master.m3u8",
+      "http://[fef0::1]/master.m3u8",
     ];
     for (const target of targets) {
       assert.equal(await bg.isMasterPlaylist(target), null, target);
+    }
+  });
+
+  test("allows globally reachable 192.0.0.9/.10 and hosts outside the IETF /24", async () => {
+    const bg = loadBackground(makeChrome());
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async (value) => {
+      requests.push(String(value));
+      return {
+        ok: true,
+        text: async () => "#EXTM3U\\n#EXT-X-STREAM-INF:BANDWIDTH=1\\nrendition.m3u8",
+      };
+    };
+    const targets = [
+      "http://192.0.0.9/master.m3u8",
+      "http://192.0.0.10/master.m3u8",
+      "http://192.0.66.1/master.m3u8",
+    ];
+    try {
+      for (const target of targets) {
+        assert.equal(await bg.isMasterPlaylist(target), true, target);
+      }
+      assert.deepEqual(requests, targets);
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 

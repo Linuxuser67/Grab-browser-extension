@@ -278,7 +278,7 @@ function isPrivateNetworkHost(host) {
       value === "::1" ||
       value.startsWith("::ffff:") ||
       /^fe[89ab]/.test(value) ||
-      /^fec[0-9a-f]/.test(value) ||
+      /^fe[c-f]/.test(value) ||
       /^f[cd]/.test(value) ||
       /^ff/.test(value)
     );
@@ -288,14 +288,16 @@ function isPrivateNetworkHost(host) {
   if (!ipv4) return false;
   const octets = ipv4.slice(1).map(Number);
   if (octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
-  const [a, b] = octets;
+  const [a, b, c, d] = octets;
   return (
     a === 0 ||
     a === 10 ||
     a === 127 ||
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && (b === 0 || b === 168)) ||
+    (a === 192 && b === 168) ||
+    // IANA reserves 192.0.0.0/24, except the globally reachable .9/.10 anycasts.
+    (a === 192 && b === 0 && c === 0 && d !== 9 && d !== 10) ||
     (a === 198 && (b === 18 || b === 19)) ||
     (a === 100 && b >= 64 && b <= 127) ||
     a >= 224
