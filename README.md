@@ -154,7 +154,10 @@ The extension and Grab talk over unencrypted HTTP on the loopback interface.
   `http://127.0.0.1:9412/inspect-hls`. This is loopback traffic; the request
   contains no cookies and suppresses the `Referer` header. Grab fetches the
   playlist through its public-only DNS guard, and its response contains only
-  origin/path keys, not the source query string.
+  origin/path keys, not the source query string. Inspection results are reused
+  for 10 seconds only for an identical full URL. Streams that rotate query
+  parameters are inspected separately; the extension does not strip those
+  parameters because they may change the playlist returned by the server.
 - Unpaired, URLs are still handed off but without cookies, and automatic
   interception stays off.
 - Incognito cookies are never forwarded; partitioned cookies are skipped.
