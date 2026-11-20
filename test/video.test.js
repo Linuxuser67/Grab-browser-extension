@@ -2210,6 +2210,7 @@ describe("HLS master playlist filtering", () => {
       assert.equal(requests.length, 1);
       assert.equal(requests[0].url, "http://127.0.0.1:9412/inspect-hls");
       assert.equal(requests[0].options.credentials, "omit");
+      assert.equal(requests[0].options.referrerPolicy, "no-referrer");
       assert.equal(requests[0].options.redirect, "error");
       assert.equal(
         Object.keys(requests[0].options.headers).some((key) => key.toLowerCase() === "cookie"),
