@@ -50,9 +50,12 @@ Grab must be installed with its desktop entry (it registers as the
 - **Right-click → Download with Grab**: on links, images, video, audio, and pages.
 - **Video detection** (opt-in: turning it on asks for access to web pages, see
   [Permissions](#permissions)): currently playing videos — including site-initiated
-  autoplay and streams behind `blob:` players — appear under right-click →
-  **Videos detected by Grab**, with a count badge on the toolbar button.
-  Picking one opens it in Grab, which probes it like any other link.
+  autoplay and streams behind `blob:` players — plus network-observed HLS/DASH
+  manifests appear under right-click → **Videos detected by Grab**, with a count
+  badge on the toolbar button. Network candidates remain available when a player
+  is embedded, uses a custom renderer, or shares a frame with another video;
+  selecting a specific video element still requires an unambiguous match.
+  Picking a menu entry opens its URL in Grab, which probes it like any other link.
   Skipped on video platforms yt-dlp handles itself (YouTube, TikTok,
   Instagram, Facebook, X, Twitch, Vimeo, …) — a detected media URL can't
   work there, so sending the page goes through yt-dlp the usual way.
