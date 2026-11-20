@@ -1240,10 +1240,11 @@ function safeMenuCreate(props) {
 async function doRefreshVideoMenu(tabId) {
   await restoreVideoFinds(tabId);
   const rebuild = async () => {
-    // Re-read: the finds may have changed while the remove was in flight.
-    // A refresh queued before the user disabled detection must not publish
-    // stale menu rows or a non-empty badge after the setting changes.
+    // Re-read after the awaits above: a refresh queued before the user
+    // disabled detection must not publish stale menu rows or a non-empty
+    // badge after the setting changes.
     if (!videoUi.detectVideosOn) {
+      await removeContextMenu(VIDEO_PARENT_ID);
       videoUi.menuUrls = [];
       chrome.storage.session.set({ menuUrls: [] }).catch(() => {});
       if (Number.isInteger(tabId) && tabId >= 0 && !warnedTabs.has(tabId)) {
@@ -1283,6 +1284,10 @@ async function doRefreshVideoMenu(tabId) {
         videoName(e.url, i, finds && finds.title, e.kind),
       ),
     );
+    // Replace the menu only once the replacement is ready: candidate
+    // resolution can await a playlist check, and removing the old menu first
+    // would leave right-click with nothing while it runs.
+    await removeContextMenu(VIDEO_PARENT_ID);
     videoUi.menuUrls = [];
     if (entries.length === 0) {
       chrome.storage.session.set({ menuUrls: [] }).catch(() => {});
@@ -1330,8 +1335,6 @@ async function doRefreshVideoMenu(tabId) {
     });
     if (badged && typeof badged.catch === "function") badged.catch(() => {});
   };
-  // remove() drops the children too; a missing menu is fine.
-  await removeContextMenu(VIDEO_PARENT_ID);
   await rebuild();
 }
 

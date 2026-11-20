@@ -606,6 +606,56 @@ describe("detection wiring", () => {
     );
   });
 
+  test("the existing menu stays visible while a slow playlist check runs", async () => {
+    const chrome = makeChrome();
+    // Private host: playlist inspection is local (no Grab pairing round trip).
+    chrome.tabs.get = async (id) => ({ id, url: "http://192.168.1.5/" });
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    globalThis.fetch = async (url, opts) => {
+      if (opts && opts.method === "GET") {
+        await gate;
+        return { ok: false, text: async () => "" };
+      }
+      return { ok: false, text: async () => "" };
+    };
+    loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 5;
+    await L["tabs.onActivated"]({ tabId });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [{ src: "http://192.168.1.5/v/clip.mp4", blob: false }] },
+      { tab: { id: tabId, url: "http://192.168.1.5/" } },
+    );
+    await tick();
+    assert.ok(
+      chrome._calls.some(([n, id]) => n === "menus.create" && id === "grabVideo:0"),
+      "initial menu exists",
+    );
+
+    chrome._calls.length = 0;
+    await L["webRequest.onResponseStarted"]({
+      tabId,
+      frameId: 0,
+      url: "http://192.168.1.5/live/master.m3u8",
+      responseHeaders: [],
+    });
+    await tick();
+    assert.equal(
+      chrome._calls.some(([n]) => n === "menus.remove"),
+      false,
+      "the old menu must stay until the replacement is ready",
+    );
+
+    release();
+    await tick();
+    await tick();
+    assert.ok(
+      chrome._calls.some(([n]) => n === "menus.remove"),
+      "the menu is rebuilt once the playlist check completes",
+    );
+  });
+
   test("a click resolves against the list the menu was built from (other window focused)", async () => {
     const chrome = makeChrome();
     loadBackground(chrome);
