@@ -954,7 +954,7 @@ function nextSniffSequence(finds) {
   return finds.sniffSequence;
 }
 
-function removeFrameSniffsAtOrBefore(finds, frameId, sequence) {
+function removeFrameSniffsAtOrBefore(finds, frameId, sequence, preserveKeys = new Set()) {
   const cutoff = Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : 0;
   const sequences = sniffSequenceMapForFrame(finds, frameId);
   const times = sniffTimeMapForFrame(finds, frameId);
@@ -976,7 +976,10 @@ function removeFrameSniffsAtOrBefore(finds, frameId, sequence) {
     for (const url of urls) {
       const key = urlPathKey(url);
       const observedSequence = sequences && sequences.get(key);
-      if (Number.isSafeInteger(observedSequence) && observedSequence > cutoff) {
+      if (
+        (Number.isSafeInteger(observedSequence) && observedSequence > cutoff) ||
+        preserveKeys.has(key)
+      ) {
         kept.push(url);
         keptKeys.add(key);
       } else {
