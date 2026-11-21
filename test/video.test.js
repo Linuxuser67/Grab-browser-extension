@@ -666,9 +666,9 @@ describe("per-video menu candidates", () => {
     );
   });
 
-  test("a pre-load master beats a refreshed nested child when inspection is unavailable", async () => {
-    const master = "http://192.168.1.20/abc/playlist.m3u8";
-    const child = "http://192.168.1.20/abc/720p/stream.m3u8";
+  test("a pre-load master beats a later post-load playlist when inspection is unavailable", async () => {
+    const master = "http://192.168.1.20/master/playlist.m3u8";
+    const child = "http://192.168.1.20/child/720p/stream.m3u8";
     chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
     const findings = makeFinds(
       [{
@@ -3944,6 +3944,7 @@ describe("HLS master playlist filtering", () => {
   });
 
   test("a playlist in a same-origin subfolder is treated as a child without inspection", async () => {
+    const bg = loadBackground(makeChrome());
     const master = "https://cdn.example.com/abc/playlist.m3u8";
     const child = "https://cdn.example.com/abc/720p/stream.m3u8";
     const unrelated = "https://cdn.example.com/other/master.m3u8";
