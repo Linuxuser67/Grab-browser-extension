@@ -423,6 +423,169 @@ describe("mergeVideoFinds", () => {
   });
 });
 
+describe("per-video menu candidates", () => {
+  let bg;
+  let chrome;
+
+  beforeEach(() => {
+    chrome = makeChrome();
+    bg = loadBackground(chrome);
+  });
+
+  const pathKey = (url) => {
+    const parsed = new URL(url);
+    return parsed.origin + parsed.pathname;
+  };
+
+  const makeFinds = (videos, manifests = [], times = new Map(), media = []) => ({
+    frames: new Map([[0, videos]]),
+    sniffedByFrame: new Map([[0, manifests]]),
+    mediaByFrame: new Map([[0, media]]),
+    kindsByFrame: new Map([[0, new Map()]]),
+    sniffTimesByFrame: new Map([[0, times]]),
+    retiredFrames: new Map(),
+  });
+
+  test("a direct video uses its DOM source and ignores sniffed MP4s and unrelated manifests", async () => {
+    const direct = "https://cdn.example.com/watch/main.mp4";
+    const findings = makeFinds(
+      [{ src: direct, blob: false, elementId: 1, loadStartedAt: 1000 }],
+      ["https://ads.example.com/pre-roll/master.m3u8"],
+      new Map([[pathKey("https://ads.example.com/pre-roll/master.m3u8"), 900]]),
+      [
+        "https://cdn.example.com/watch/segment-001.mp4",
+        "https://ads.example.com/pre-roll/ad.mp4",
+      ],
+    );
+
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [direct]);
+  });
+
+  test("a blob video chooses its HLS master and ignores sniffed media files", async () => {
+    const master = "http://192.168.1.20/hls/master.m3u8";
+    const child = "http://192.168.1.20/hls/variant.m3u8";
+    chrome.tabs.get = async (id) => ({ id, url: "http://192.168.1.10/watch" });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => ({
+      ok: true,
+      text: async () => String(url) === master
+        ? "#EXTM3U\\n#EXT-X-STREAM-INF:BANDWIDTH=100000\\nvariant.m3u8\\n"
+        : "#EXTM3U\\n#EXT-X-TARGETDURATION=6\\n",
+    });
+    try {
+      const findings = makeFinds(
+        [{
+          src: null, blob: true, blobUrl: "blob:https://example.com/player",
+          elementId: 1, loadStartedAt: 1000,
+        }],
+        [master, child],
+        new Map([[pathKey(master), 900], [pathKey(child), 950]]),
+        ["http://192.168.1.20/hls/chunk-001.mp4"],
+      );
+
+      assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0, 5), [master]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("HLS outranks DASH for the same element even when the manifests use different folders", async () => {
+    const hls = "http://192.168.1.20/hls/master.m3u8";
+    const dash = "http://192.168.1.20/dash/manifest.mpd";
+    chrome.tabs.get = async (id) => ({ id, url: "http://192.168.1.10/watch" });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      ok: true,
+      text: async () => "#EXTM3U\\n#EXT-X-TARGETDURATION=6\\n",
+    });
+    try {
+      const findings = makeFinds(
+        [{
+          src: null, blob: true, blobUrl: "blob:https://example.com/player",
+          elementId: 1, loadStartedAt: 1000,
+        }],
+        [dash, hls],
+        new Map([[pathKey(hls), 900], [pathKey(dash), 920]]),
+      );
+
+      assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0, 5), [hls]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("multiple active elements receive only manifests nearest to their own load start", async () => {
+    const direct = "https://cdn.example.com/main/direct.mp4";
+    const adManifest = "https://ads.example.com/ad/master.m3u8";
+    const mainManifest = "https://cdn.example.com/main/master.m3u8";
+    const findings = makeFinds(
+      [
+        { src: direct, blob: false, elementId: 1, loadStartedAt: 1000 },
+        {
+          src: null, blob: true, blobUrl: "blob:https://example.com/main",
+          elementId: 2, loadStartedAt: 3000,
+        },
+      ],
+      [adManifest, mainManifest],
+      new Map([[pathKey(adManifest), 950], [pathKey(mainManifest), 2950]]),
+    );
+
+    assert.deepEqual(
+      await bg.menuVideoCandidatesForFrame(findings, 0),
+      [direct, mainManifest],
+    );
+  });
+
+  test("ambiguous multi-video timing produces no blob candidate", async () => {
+    const first = "https://cdn.example.com/first/master.m3u8";
+    const findings = makeFinds(
+      [
+        {
+          src: null, blob: true, blobUrl: "blob:https://example.com/first",
+          elementId: 1, loadStartedAt: 1000,
+        },
+        {
+          src: null, blob: true, blobUrl: "blob:https://example.com/second",
+          elementId: 2, loadStartedAt: 1000,
+        },
+      ],
+      [first],
+      new Map([[pathKey(first), 900]]),
+    );
+
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), []);
+  });
+
+  test("manifests observed after an element load start are not attributed to it", async () => {
+    const ad = "https://ads.example.com/ad/master.m3u8";
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/main",
+        elementId: 1, loadStartedAt: 2000,
+      }],
+      [ad],
+      new Map([[pathKey(ad), 2100]]),
+    );
+
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), []);
+  });
+
+  test("network-only fallback remains manifest-only and collapses sibling HLS/DASH", async () => {
+    const hls = "https://cdn.example.com/one/master.m3u8";
+    const dash = "https://cdn.example.com/one/manifest.mpd";
+    const second = "https://cdn.example.com/two/master.m3u8";
+    const findings = makeFinds(
+      [],
+      [hls, dash, second],
+      new Map(),
+      ["https://cdn.example.com/one/preview.mp4"],
+    );
+
+    const candidates = await bg.menuVideoCandidatesForFrame(findings, 0);
+    assert.deepEqual(candidates, [hls, second]);
+  });
+});
+
 describe("collectVideos (content script)", () => {
   let content;
   beforeEach(() => {
@@ -472,6 +635,24 @@ describe("collectVideos (content script)", () => {
       src: null, blob: true,
       blobUrl: "blob:https://example.com/uuid",
       height: 360,
+    }]);
+  });
+
+  test("includes bounded element identity and load-start metadata when provided", () => {
+    const videos = content.collectVideos(
+      fakeDoc([fakeVideo({ src: "blob:https://example.com/uuid", w: 640, h: 360 })]),
+      () => true,
+      null,
+      null,
+      () => ({ elementId: 7, loadStartedAt: 1234 }),
+    );
+    assert.deepEqual(videos, [{
+      src: null,
+      blob: true,
+      blobUrl: "blob:https://example.com/uuid",
+      height: 360,
+      elementId: 7,
+      loadStartedAt: 1234,
     }]);
   });
 
@@ -606,7 +787,7 @@ describe("detection wiring", () => {
     );
   });
 
-  test("the existing menu stays visible while a slow playlist check runs", async () => {
+  test("a direct video remains the only entry when an unrelated manifest is sniffed", async () => {
     const chrome = makeChrome();
     // Private host: playlist inspection is local (no Grab pairing round trip).
     chrome.tabs.get = async (id) => ({ id, url: "http://192.168.1.5/" });
@@ -640,19 +821,18 @@ describe("detection wiring", () => {
       url: "http://192.168.1.5/live/master.m3u8",
       responseHeaders: [],
     });
-    await tick();
-    assert.equal(
-      chrome._calls.some(([n]) => n === "menus.remove"),
-      false,
-      "the old menu must stay until the replacement is ready",
-    );
-
     release();
     await tick();
     await tick();
+
     assert.ok(
       chrome._calls.some(([n]) => n === "menus.remove"),
-      "the menu is rebuilt once the playlist check completes",
+      "the completed refresh replaces the menu",
+    );
+    await L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, { id: tabId });
+    assert.ok(
+      chrome._calls.some(([n, url]) => n === "handoff" && url === "http://192.168.1.5/v/clip.mp4"),
+      "the direct DOM source remains the sole menu candidate",
     );
   });
 
@@ -678,11 +858,11 @@ describe("detection wiring", () => {
     );
     await tick();
     // Right-click lands in tab 5 (window 1 focused again, no onActivated fired).
-    // The menu was built from tab 6: [v.mp4, b.mp4, c.mp4], so index 2 is c.mp4.
-    await L["menus.onClicked"]({ menuItemId: "grabVideo:2" }, { id: 5 });
+    // The direct DOM source is authoritative; sniffed MP4s are not extra menu rows.
+    await L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, { id: 5 });
     assert.ok(
-      chrome._calls.some(([n, url]) => n === "handoff" && url === "https://b.example.com/c.mp4"),
-      "the labelled item (third entry of the menu) is what gets sent"
+      chrome._calls.some(([n, url]) => n === "handoff" && url === "https://b.example.com/v.mp4"),
+      "the sole direct-video entry is what gets sent"
     );
   });
 
@@ -1949,6 +2129,51 @@ describe("detection wiring", () => {
     assert.equal(legacy.retiredFrames.get(0).retiredAtSeq, 1);
   });
 
+  test("per-element identity and load-start timing survive a session round trip", async () => {
+    const shared = {};
+    const first = makeChrome(shared);
+    const firstBg = loadBackground(first);
+    const tabId = 172;
+    const sniffedAt = Date.now() - 500;
+    const video = {
+      src: null,
+      blob: true,
+      blobUrl: "blob:https://example.com/player",
+      elementId: 12,
+      loadStartedAt: sniffedAt + 100,
+    };
+    await first._listeners["webRequest.onResponseStarted"]({
+      tabId,
+      frameId: 0,
+      url: "https://cdn.example.com/player/master.m3u8",
+      timeStamp: sniffedAt,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await first._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [video],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    await firstBg._persistVideoFinds(tabId);
+
+    const saved = shared.session.get("videoFinds:v2:" + tabId);
+    assert.equal(saved.frames[0][1][0].elementId, 12);
+    assert.equal(saved.frames[0][1][0].loadStartedAt, video.loadStartedAt);
+
+    const restoredChrome = makeChrome(shared);
+    const restoredBg = loadBackground(restoredChrome);
+    await restoredBg._restoreVideoFinds(tabId);
+    const restoredVideo = restoredBg._videoFinds.get(tabId).frames.get(0)[0];
+    assert.equal(restoredVideo.elementId, 12);
+    assert.equal(restoredVideo.loadStartedAt, video.loadStartedAt);
+    assert.equal(
+      await restoredBg.resolvedBlobVideoUrlForFrame(tabId, 0),
+      "https://cdn.example.com/player/master.m3u8",
+    );
+  });
+
   test("multiple players expose separate network candidates without guessing an element match", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);
@@ -1976,12 +2201,12 @@ describe("detection wiring", () => {
     );
     assert.deepEqual(
       await bg.resolvedVideoUrls(tabId),
-      manifests,
-      "the detection menu exposes the separate network-observed playlist candidates",
+      [],
+      "frame-level manifests are not guessed across multiple active elements without timing metadata",
     );
   });
 
-  test("one blob player with unrelated manifests is not guessed", async () => {
+  test("one blob player collapses unrelated manifests to one best candidate", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);
     const L = chrome._listeners;
@@ -1996,7 +2221,10 @@ describe("detection wiring", () => {
       }] },
       { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
     );
-    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), null);
+    assert.equal(
+      await bg.resolvedBlobVideoUrlForFrame(tabId, 0),
+      "https://cdn.example.com/a/master.m3u8",
+    );
   });
 
   test("blob identity and frame-scoped manifests survive worker restart", async () => {
@@ -2499,7 +2727,6 @@ describe("context menu: one flat submenu, one click to Grab", () => {
     assert.ok(ids.has("grabVideos"));
     assert.deepEqual(rowsOf(items).map((i) => i.title), [
       "clip.mp4 • 1080p",
-      "Example …",
     ]);
     assert.ok(items.every((i) => i.enabled !== false));
   });
@@ -2511,11 +2738,10 @@ describe("context menu: one flat submenu, one click to Grab", () => {
       title: "Example …",
     });
     const rows = rowsOf(items);
+    assert.equal(rows.length, 1);
     await click(chrome, rows[0].id);
-    await click(chrome, rows[1].id);
     assert.deepEqual(sent(chrome), [
       "https://cdn.example.com/v/clip.mp4",
-      "https://cdn.example.com/hls/master.m3u8",
     ]);
   });
 

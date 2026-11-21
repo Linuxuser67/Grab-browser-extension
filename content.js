@@ -74,7 +74,7 @@ function allVideos(root, onShadowRoot) {
 /// Pure over a document-like: [{src, blob, height?}] for each qualifying <video>.
 /// `isActive` decides which videos count as active; the live wiring passes
 /// `isActiveVideo`. Tests pass explicit predicates. Pierces shadow roots via allVideos.
-function collectVideos(doc, isActive, onShadowRoot, onVideo) {
+function collectVideos(doc, isActive, onShadowRoot, onVideo, getVideoMetadata) {
   const out = [];
   for (const v of allVideos(doc, onShadowRoot)) {
     if (onVideo) onVideo(v);
@@ -88,6 +88,13 @@ function collectVideos(doc, isActive, onShadowRoot, onVideo) {
     if (isBlobVideo(v)) entry.blobUrl = v.currentSrc || v.src;
     // Decoded height (known after metadata loads): labels direct files.
     if (v.videoHeight > 0) entry.height = v.videoHeight;
+    const metadata = getVideoMetadata ? getVideoMetadata(v) : null;
+    if (metadata && Number.isSafeInteger(metadata.elementId) && metadata.elementId > 0) {
+      entry.elementId = metadata.elementId;
+    }
+    if (metadata && Number.isFinite(metadata.loadStartedAt) && metadata.loadStartedAt >= 0) {
+      entry.loadStartedAt = metadata.loadStartedAt;
+    }
     out.push(entry);
   }
   return out;
@@ -134,6 +141,9 @@ if (
   let pendingFrameLifecycleAt = null;
   let lastSent = "";
   const lastVideoSource = new WeakMap();
+  const videoIds = new WeakMap();
+  const videoLoadStartedAt = new WeakMap();
+  let nextVideoId = 0;
   const frameLifecyclePriority = { pause: 1, ended: 2, reset: 3 };
 
   function currentVideoSource(video) {
@@ -151,6 +161,26 @@ if (
     return current || lastVideoSource.get(video) || null;
   }
 
+  function rememberVideoLoadStart(video, replace = false) {
+    if (!video) return;
+    if (replace || !Number.isFinite(videoLoadStartedAt.get(video))) {
+      videoLoadStartedAt.set(video, Date.now());
+    }
+  }
+
+  function videoReportMetadata(video) {
+    let elementId = videoIds.get(video);
+    if (!Number.isSafeInteger(elementId)) {
+      elementId = ++nextVideoId;
+      videoIds.set(video, elementId);
+    }
+    rememberVideoLoadStart(video);
+    return {
+      elementId,
+      loadStartedAt: videoLoadStartedAt.get(video),
+    };
+  }
+
   function report(lifecycleOverride = null, lifecycleSourceOverride = null, lifecycleAtOverride = null) {
     // Full scans happen on startup, media events, and worker rescan requests,
     // not on every pointer/click interaction.
@@ -159,6 +189,7 @@ if (
       isActiveVideo,
       wireShadowRoot,
       rememberVideoSource,
+      videoReportMetadata,
     );
     const title = pageVideoTitle(document);
     // Keep the strongest lifecycle event when media events coalesce during
@@ -232,6 +263,16 @@ if (
     // live paused/ended state and the existing size threshold filters tiny
     // inline previews and trackers.
     rememberVideoSource(t);
+    rememberVideoLoadStart(t);
+    scheduleReport();
+  }
+
+  function onLoadStart(e) {
+    const t = e && e.target;
+    if (!t || t.tagName !== "VIDEO") return;
+    rememberVideoSource(t);
+    // loadstart begins a new resource timeline for this element.
+    rememberVideoLoadStart(t, true);
     scheduleReport();
   }
 
@@ -252,6 +293,7 @@ if (
     // Use the pre-reset source identity: currentSrc may already be empty.
     const source = lastVideoSource.get(t) || currentVideoSource(t);
     lastVideoSource.delete(t);
+    videoLoadStartedAt.delete(t);
     // Reset immediately so the old manifest is retired before replacement
     // source requests normally arrive. Pause/end remain debounced.
     if (timer) clearTimeout(timer);
@@ -261,7 +303,10 @@ if (
 
   function onLoadedMetadata(e) {
     const t = e && e.target;
-    if (t && t.tagName === "VIDEO") rememberVideoSource(t);
+    if (t && t.tagName === "VIDEO") {
+      rememberVideoSource(t);
+      rememberVideoLoadStart(t);
+    }
     scheduleReport();
   }
 
@@ -272,6 +317,7 @@ if (
   function wireShadowRoot(sr) {
     if (!sr || shadowRootsWired.has(sr)) return;
     shadowRootsWired.add(sr);
+    sr.addEventListener("loadstart", onLoadStart, true);
     sr.addEventListener("play", onPlay, true);
     sr.addEventListener("playing", onPlay, true);
     sr.addEventListener("pause", onStopped, true);
@@ -281,6 +327,7 @@ if (
   }
 
   // play/playing don't bubble; capture at the document.
+  document.addEventListener("loadstart", onLoadStart, true);
   document.addEventListener("play", onPlay, true);
   document.addEventListener("playing", onPlay, true);
   document.addEventListener("pause", onStopped, true);

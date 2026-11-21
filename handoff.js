@@ -1060,7 +1060,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     const matched = findVideoForSource(tab.id, info.srcUrl, info.frameId);
     if (matched && matched.video.blobUrl === info.srcUrl) {
       if (matched.video.blob === true) {
-        const detected = await resolvedBlobVideoUrlForFrame(tab.id, matched.frameId);
+        const detected = await resolvedBlobVideoUrlForFrame(tab.id, matched.frameId, matched.video);
         if (detected && toGrabUrl(detected)) target = detected;
       } else if (toGrabUrl(matched.video.src) && matched.video.src !== pageUrl) {
         const detected = await resolvedVideoUrlsForFrame(tab.id, matched.frameId);
