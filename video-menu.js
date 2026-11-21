@@ -92,7 +92,7 @@ function isAudioOnlyPlaylistUrl(url) {
     const filename = segments.pop() || "";
     const basename = filename.replace(/\.(?:m3u8|m3u|mpd)$/i, "");
     return (
-      segments.some((part) => /^(?:audio|audioonly|audio[-_]only|audio[-_]track)$/.test(part)) ||
+      segments.some((part) => /^(?:audioonly|audio[-_]only|audio[-_]track)$/.test(part)) ||
       /^(?:audio|audioonly|audio[-_]only|audio[-_]playlist|audioplaylist)(?:[._-].*)?$/.test(basename)
     );
   } catch {
@@ -517,9 +517,9 @@ async function isMasterPlaylist(value, tabOrigin = null, inspectPublic = inspect
   return result === null ? null : result.is_master;
 }
 
-/// Resolve playlist references against the master URL. Only explicit
-/// variant and EXT-X-MEDIA playlist references are considered children;
-/// directory ancestry alone is not evidence that two URLs are one stream.
+/// Resolve playlist references against the master URL. Explicit variant and
+/// EXT-X-MEDIA references are authoritative; a playlist in a deeper directory
+/// on the same origin is also treated conservatively as a child.
 function hlsChildPlaylistKeys(text, masterUrl) {
   const children = new Set();
   const add = (reference) => {
@@ -594,6 +594,42 @@ function hlsPlaylistNameHints(urls) {
   return hintedChildren;
 }
 
+function nestedHlsPlaylistChildKeys(urls) {
+  const playlists = [];
+  for (const url of urls || []) {
+    if (!isHlsPlaylistUrl(url)) continue;
+    try {
+      const parsed = new URL(url);
+      const slash = parsed.pathname.lastIndexOf("/");
+      const directory = slash > 0 ? parsed.pathname.slice(0, slash + 1) : "/";
+      playlists.push({
+        origin: parsed.origin,
+        path: parsed.pathname,
+        directory,
+        key: urlPathKey(url),
+      });
+    } catch {
+      // Invalid playlist URLs are not candidates.
+    }
+  }
+
+  const childKeys = new Set();
+  for (const parent of playlists) {
+    if (parent.directory === "/") continue;
+    for (const child of playlists) {
+      if (
+        child.origin === parent.origin &&
+        child.path !== parent.path &&
+        child.directory.length > parent.directory.length &&
+        child.directory.startsWith(parent.directory)
+      ) {
+        childKeys.add(child.key);
+      }
+    }
+  }
+  return childKeys;
+}
+
 async function preferMasterPlaylists(
   urls,
   tabOrigin = null,
@@ -634,6 +670,7 @@ async function preferMasterPlaylists(
 
   const masterKeys = new Set();
   const childKeys = hlsPlaylistNameHints(manifests);
+  for (const key of nestedHlsPlaylistChildKeys(manifests)) childKeys.add(key);
   for (const url of manifests) {
     const inspection = results.get(url);
     if (!inspection || inspection.is_master !== true) continue;
@@ -1987,7 +2024,7 @@ function attributedManifestUrlsForVideo(
 async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVideo = null) {
   if (!candidates || candidates.length === 0) return null;
   const kinds = kindsForFrame(finds, frameId);
-  const sniffTimes = sniffTimesForFrame(finds, frameId);
+  const firstSeenTimes = sniffFirstSeenTimesForFrame(finds, frameId);
   const loadStartedAt = targetVideo && targetVideo.loadStartedAt;
   let resolved = [...candidates];
   if (resolved.length > 1) {
@@ -1998,29 +2035,39 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVid
     );
   }
   const merged = mergeVideoFinds([], resolved, kinds);
-  const gapToLoadStart = (url) => {
-    const observedAt = sniffTimes.get(urlPathKey(url));
-    return Number.isFinite(loadStartedAt) && Number.isFinite(observedAt)
-      ? loadStartedAt - observedAt
-      : Number.POSITIVE_INFINITY;
+  const timingFor = (url) => {
+    const firstSeenAt = firstSeenTimes.get(urlPathKey(url));
+    if (!Number.isFinite(firstSeenAt)) {
+      return { phase: 2, distance: Number.POSITIVE_INFINITY };
+    }
+    if (!Number.isFinite(loadStartedAt)) {
+      return { phase: 0, distance: firstSeenAt };
+    }
+    return firstSeenAt <= loadStartedAt
+      ? { phase: 0, distance: loadStartedAt - firstSeenAt }
+      : { phase: 1, distance: firstSeenAt - loadStartedAt };
   };
   merged.sort((a, b) => {
     const rankDifference = videoManifestPriority(b, kinds) - videoManifestPriority(a, kinds);
     if (rankDifference !== 0) return rankDifference;
-    return gapToLoadStart(a) - gapToLoadStart(b);
+    const aTiming = timingFor(a);
+    const bTiming = timingFor(b);
+    if (aTiming.phase !== bTiming.phase) return aTiming.phase - bTiming.phase;
+    return aTiming.distance - bTiming.distance;
   });
-  const firstGap = merged.length > 1 ? gapToLoadStart(merged[0]) : null;
-  const secondGap = merged.length > 1 ? gapToLoadStart(merged[1]) : null;
+
+  const firstTiming = merged.length > 1 ? timingFor(merged[0]) : null;
+  const secondTiming = merged.length > 1 ? timingFor(merged[1]) : null;
   if (
-    Number.isFinite(firstGap) &&
-    Number.isFinite(secondGap) &&
+    firstTiming &&
+    secondTiming &&
+    firstTiming.phase < 2 &&
+    firstTiming.phase === secondTiming.phase &&
     videoManifestPriority(merged[0], kinds) === videoManifestPriority(merged[1], kinds) &&
-    Math.abs(firstGap - secondGap) <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
+    Math.abs(firstTiming.distance - secondTiming.distance) <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
   ) return null;
   return merged[0] || null;
-}
-
-/// Resolve a blob element to its single best attributed stream URL. Passing the
+}/// Resolve a blob element to its single best attributed stream URL. Passing the
 /// element keeps right-click behavior aligned with the global menu even when
 /// several players share a frame.
 async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) {
@@ -2104,13 +2151,37 @@ function videoUrlCandidatePriority(finds, url) {
     : 10;
 }
 
-/// Deduplicate streams across frames and rotating query tokens. Keep the
-/// highest-ranked URL; ties prefer the most recently observed resource URL.
+const AUTH_QUERY_PARAMETER_NAME =
+  /^(?:access_token|auth|authorization|bearer|exp|expires|expiry|hdnts|hmac|jwt|policy|session_token|sig|signature|token|x-amz-(?:credential|date|expires|security-token|signature)|x-goog-(?:algorithm|credential|date|expires|signature))$/i;
+
+/// Build a stable request identity while ignoring only recognized auth-token
+/// query parameters. Resource selectors such as ?id=1 remain significant.
+function videoUrlIdentityKey(url) {
+  try {
+    const parsed = new URL(url);
+    const entries = [...parsed.searchParams.entries()]
+      .filter(([name]) => !AUTH_QUERY_PARAMETER_NAME.test(name))
+      .sort(([aName, aValue], [bName, bValue]) => {
+        if (aName !== bName) return aName < bName ? -1 : 1;
+        if (aValue === bValue) return 0;
+        return aValue < bValue ? -1 : 1;
+      });
+    const params = new URLSearchParams();
+    for (const [name, value] of entries) params.append(name, value);
+    const query = params.toString();
+    return parsed.origin + parsed.pathname + (query ? `?${query}` : "");
+  } catch {
+    return url;
+  }
+}
+
+/// Deduplicate streams across frames while retaining non-auth query parameters.
+/// Keep the highest-ranked URL; ties prefer the most recently observed resource.
 function dedupeVideoUrlsByPath(urls, finds) {
   const selected = new Map();
   for (const url of urls || []) {
     if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
-    const key = urlPathKey(url);
+    const key = videoUrlIdentityKey(url);
     const priority = videoUrlCandidatePriority(finds, url);
     const observedAt = videoUrlCandidateObservedAt(finds, url);
     const previous = selected.get(key);
@@ -2124,7 +2195,6 @@ function dedupeVideoUrlsByPath(urls, finds) {
   }
   return [...selected.values()].map((candidate) => candidate.url);
 }
-
 async function resolvedVideoUrlsForFrame(tabId, frameId) {
   const finds = videoFinds.get(tabId);
   if (!finds) return [];
@@ -2258,20 +2328,17 @@ function isSegmentLikeVideoUrl(url) {
   try {
     const path = new URL(url).pathname.toLowerCase();
     const basename = path.split("/").filter(Boolean).pop() || "";
-    if (/(?:^|\/)(?:segments?|chunks?|fragments?|previews?|pre[-_]rolls?|prerolls?|mid[-_]rolls?|midrolls?|post[-_]rolls?|postrolls?|ads?|thumbnails?|storyboards?|sprites?|subtitles?|captions?|audio(?:[-_]only)?|prefetch(?:es)?)(?:\/|$)/.test(path)) {
+    if (/(?:^|\/)(?:segments?|chunks?|fragments?|previews?|pre[-_]rolls?|prerolls?|mid[-_]rolls?|midrolls?|post[-_]rolls?|postrolls?|ads|thumbnails?|storyboards?|sprites?|subtitles?|captions?|audio[-_]only|audioonly|prefetch(?:es)?)(?:\/|$)/.test(path)) {
       return true;
     }
     if (/^(?:preview|trailer|teaser|ad|advert|advertisement|promo|thumbnail|thumb|storyboard|sprite|preroll|midroll|postroll|prefetch)(?:[._-]|$)/.test(basename)) {
       return true;
     }
-    return /(?:^|[._-])(?:seg(?:ment)?|chunk|part|frag(?:ment)?)[._-]?\d+(?:[._-]|$)/.test(basename);
+    return /^(?:seg(?:ment)?|chunk|frag(?:ment)?)[._-]+\d+(?:[._-]|$)/.test(basename);
   } catch {
     return true;
   }
 }
-
-/// Return Content-Length only for a whole-object response suitable for a
-/// conservative blob-player fallback. Partial responses are never candidates.
 function wholeVideoMediaSize(details) {
   if (
     !details ||
