@@ -656,9 +656,11 @@ function nestedHlsPlaylistChildKeys(urls, firstSeenTimes) {
         .slice(parent.directory.length)
         .split("/")
         .filter(Boolean);
+      const childFilename = child.path.slice(child.path.lastIndexOf("/") + 1);
+      const renditionPath = [...nestedDirectoryParts, childFilename].join("/");
       if (
         nestedDirectoryParts.length === 1 &&
-        isHlsRenditionPlaylistPath(child.path)
+        isHlsRenditionPlaylistPath(renditionPath)
       ) {
         childKeys.add(child.key);
       }
