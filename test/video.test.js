@@ -252,8 +252,6 @@ describe("classifyStream", () => {
       "application/vnd.apple.mpegurl",
       "application/x-mpegurl",
       "application/mpegurl",
-      "audio/x-mpegurl",
-      "audio/mpegurl",
     ]) {
       assert.equal(
         bg.classifyStream("https://cdn.example.com/s/playlist", contentType),
@@ -265,6 +263,22 @@ describe("classifyStream", () => {
       bg.classifyStream("https://cdn.example.com/s/playlist", "application/dash+xml"),
       "manifest"
     );
+  });
+
+  test("audio-typed HLS responses and non-video thumbnails are ignored", () => {
+    assert.equal(
+      bg.classifyStream("https://cdn.example.com/audio/playlist.m3u8", "audio/x-mpegurl"),
+      null,
+    );
+    assert.equal(
+      bg.classifyStream("https://cdn.example.com/audio/playlist", "audio/mpegurl"),
+      null,
+    );
+    for (const url of [
+      "https://cdn.example.com/subtitles/captions.vtt",
+      "https://cdn.example.com/thumbnails/storyboard.jpg",
+      "https://cdn.example.com/thumbnails/poster.webp",
+    ]) assert.equal(bg.classifyStream(url, ""), null, url);
   });
 
   test("direct video extensions classify as media", () => {
@@ -583,6 +597,80 @@ describe("per-video menu candidates", () => {
 
     const candidates = await bg.menuVideoCandidatesForFrame(findings, 0);
     assert.deepEqual(candidates, [hls, second]);
+  });
+
+  test("a blob video falls back only to one complete large MP4 response", async () => {
+    const media = "https://cdn.example.com/video/full-file.mp4?token=ok";
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/full",
+        elementId: 1, loadStartedAt: 2000,
+      }],
+      [],
+      new Map([[pathKey(media), 1900]]),
+      [media],
+    );
+    findings.wholeMediaByFrame = new Map([[0, [media]]]);
+    findings.mediaSizesByFrame = new Map([[0, new Map([[pathKey(media), 8 * 1024 * 1024]])]]);
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [media]);
+  });
+
+  test("whole-file fallback rejects small, partial and segment-like responses", () => {
+    const base = "https://cdn.example.com/video/";
+    const details = (url, statusCode, responseHeaders) => ({ url, statusCode, responseHeaders });
+    const full = [{ name: "content-length", value: "8388608" }];
+    assert.equal(bg.wholeVideoMediaSize(details(base + "clip.mp4", 200, full)), 8388608);
+    assert.equal(bg.wholeVideoMediaSize(details(base + "preview.mp4", 200, [
+      { name: "content-length", value: "120000" },
+    ])), null);
+    assert.equal(bg.wholeVideoMediaSize(details(base + "clip.mp4", 206, full)), null);
+    assert.equal(bg.wholeVideoMediaSize(details(base + "clip.mp4", 200, [
+      ...full, { name: "content-range", value: "bytes 0-999/8388608" },
+    ])), null);
+    for (const url of [
+      base + "segment-12.mp4",
+      base + "chunk_001.mp4",
+      "https://cdn.example.com/segments/0001.mp4",
+      "https://cdn.example.com/previews/preview.mp4",
+    ]) assert.equal(bg.wholeVideoMediaSize(details(url, 200, full)), null, url);
+  });
+
+  test("a whole-file fallback survives session restore", async () => {
+    const shared = {};
+    const first = makeChrome(shared);
+    const bg = loadBackground(first);
+    const tabId = 175;
+    const url = "https://cdn.example.com/video/full.mp4";
+    await first._listeners["webRequest.onResponseStarted"]({
+      tabId,
+      frameId: 0,
+      url,
+      timeStamp: 1000,
+      statusCode: 200,
+      responseHeaders: [
+        { name: "content-type", value: "video/mp4" },
+        { name: "content-length", value: "8388608" },
+      ],
+    });
+    await first._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{
+          src: null, blob: true, blobUrl: "blob:https://example.com/full",
+          elementId: 4, loadStartedAt: 1100,
+        }],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    await bg._persistVideoFinds(tabId);
+    const saved = shared.session.get("videoFinds:v2:" + tabId);
+    assert.deepEqual(saved.wholeMediaFrames, [[0, [url]]]);
+    assert.deepEqual(saved.mediaSizesFrames, [[0, [[pathKey(url), 8388608]]]]);
+
+    const restarted = makeChrome(shared);
+    const restoredBg = loadBackground(restarted);
+    await restoredBg._restoreVideoFinds(tabId);
+    assert.deepEqual(await restoredBg.resolvedVideoUrls(tabId), [url]);
   });
 });
 
@@ -2943,6 +3031,19 @@ describe("HLS master playlist filtering", () => {
       await filterWithPlaylists([master, variant, audio, unrelated], playlists),
       [master, unrelated],
     );
+  });
+
+  test("uses chunklist and prog_index filenames as child hints beside one master", async () => {
+    const master = "https://cdn.example.com/hls/master.m3u8";
+    const chunklist = "https://cdn.example.com/hls/chunklist_b123.m3u8";
+    const progIndex = "https://cdn.example.com/hls/prog_index_123.m3u8";
+    const result = await bg.preferMasterPlaylists(
+      [master, chunklist, progIndex],
+      "https://page.example/watch",
+      [master, chunklist, progIndex],
+      async () => null,
+    );
+    assert.deepEqual(result, [master]);
   });
 
   test("does not classify an ordinary non-standard media playlist as a master", async () => {
