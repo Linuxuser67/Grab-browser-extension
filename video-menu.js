@@ -136,12 +136,32 @@ function classifyStream(url, contentType) {
   return null;
 }
 
-const NAME_MAX = 16;
-const TITLE_MAX = 16;
-const shorten = (text) =>
-  text.length > NAME_MAX ? text.slice(0, NAME_MAX) + "…" : text;
-const shortenTitle = (text) =>
-  text.length > TITLE_MAX ? text.slice(0, TITLE_MAX) + "…" : text;
+// Menu labels use separate limits for file/folder names and page titles.
+const NAME_MAX = 50;
+const TITLE_MAX = 50;
+const LABEL_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+function labelCharacters(text) {
+  return Array.from(LABEL_SEGMENTER.segment(text), ({ segment }) => segment);
+}
+
+/// Cut `text` to `max` grapheme clusters plus an ellipsis. Titles may back up
+/// to the last word boundary in the final 40%; file and folder names are cut
+/// at the exact limit.
+function clipLabel(text, max, { wordBoundary = false } = {}) {
+  const chars = labelCharacters(text);
+  if (chars.length <= max) return text;
+  let head = chars.slice(0, max);
+  if (wordBoundary) {
+    const space = head.lastIndexOf(" ");
+    if (space >= Math.floor(max * 0.6)) head = head.slice(0, space);
+    while (head.length > 0 && head[head.length - 1] === " ") head.pop();
+  }
+  return head.join("") + "…";
+}
+
+const shorten = (text) => clipLabel(text, NAME_MAX);
+const shortenTitle = (text) => clipLabel(text, TITLE_MAX, { wordBoundary: true });
 
 /// Last path segment of a URL, decoded ("my%20clip.mp4" -> "my clip.mp4").
 /// Empty when there is none.
@@ -159,17 +179,69 @@ function fileNameOf(url) {
   }
 }
 
-/// Name shown for a detected video. A direct file is named by its file name
-/// ("clip.mp4"): that is what the person is about to download, and a page
-/// title would name the page, not the file. A stream (HLS/DASH, whose URL is
-/// usually "master.m3u8") is named by the page's video title when the content
-/// script found one, else by its file name. "Video N" is the last resort.
+// File or folder names that say nothing about the video: stream entry points
+// ("master.m3u8", "index.mp4") and generic folders ("hls", "videos", "cdn").
+const GENERIC_NAME_BASE = /^(?:master|index|playlist|manifest|main|stream|video|videos|media|movie|output|source|default|hls|dash|vod|file|files|content|play|chunklist|prog_index|cdn|static|assets?)(?:[._-]?\d+p?)?$/i;
+// Machine-generated names: UUIDs, long hex ids and long digit strings.
+const OPAQUE_NAME_BASE = [
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  /^[0-9a-f]{12,}$/i,
+  /^\d{5,}$/,
+];
+
+function withoutExtension(name) {
+  return String(name || "").replace(/\.[a-z0-9]{2,5}$/i, "");
+}
+
+/// True when a file or folder name is generic or machine-generated and so
+/// would be a poor label.
+function isUninformativeName(name) {
+  const base = withoutExtension(name);
+  return !base || GENERIC_NAME_BASE.test(base) || OPAQUE_NAME_BASE.some((re) => re.test(base));
+}
+
+/// Nearest folder above the file whose name is descriptive, decoded
+/// ("/hls/Big%20Buck/720p/index.m3u8" -> "Big Buck"); empty when none is.
+function descriptiveFolderOf(url) {
+  try {
+    const segments = new URL(url).pathname.split("/").filter(Boolean);
+    segments.pop();
+    for (let i = segments.length - 1; i >= 0; i--) {
+      let segment;
+      try {
+        segment = decodeURIComponent(segments[i]);
+      } catch {
+        segment = segments[i];
+      }
+      if (!isUninformativeName(segment) && !isHlsRenditionPlaylistPath(segment)) return segment;
+    }
+  } catch {
+    // Not a URL: no folder name.
+  }
+  return "";
+}
+
+/// Name shown for a detected video, preferring useful labels over generic
+/// stream entry points and machine-generated file names.
+///
+/// Direct file: descriptive file name; otherwise page title; otherwise the
+/// original file name. Streams: page title; descriptive file name; nearest
+/// descriptive folder; original file name. "Video N" is the last resort.
 function videoName(url, index, pageTitle, kind) {
   const file = fileNameOf(url);
+  const title = String(pageTitle || "").replace(/\s+/g, " ").trim();
+  const informativeFile = file && !isUninformativeName(file);
+
   if (kind) {
-    const title = String(pageTitle || "").replace(/\s+/g, " ").trim();
     if (title) return shortenTitle(title);
+    if (informativeFile) return shorten(file);
+    const folder = descriptiveFolderOf(url);
+    if (folder) return shorten(folder);
+    return file ? shorten(file) : `Video ${index + 1}`;
   }
+
+  if (informativeFile) return shorten(file);
+  if (title) return shortenTitle(title);
   return file ? shorten(file) : `Video ${index + 1}`;
 }
 
