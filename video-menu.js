@@ -696,6 +696,10 @@ const MAX_VIDEO_TITLE_LENGTH = 512;
 const MAX_MANIFESTS_PER_FRAME = 20;
 const MAX_MEDIA_SNIFFS_PER_FRAME = 8;
 const RETIRED_FRAME_TTL_MS = 5 * 60 * 1000;
+// A manifest must precede an element's resource start and be close enough to
+// that event to be a plausible request for the same playback session.
+const VIDEO_MANIFEST_ATTRIBUTION_WINDOW_MS = 30_000;
+const VIDEO_MANIFEST_ATTRIBUTION_TIE_MS = 250;
 const videoFinds = new Map();
 
 function createVideoFinds() {
@@ -1042,6 +1046,14 @@ function normalizeVideoReport(rawVideos, maximum) {
     const item = { src, blob: video.blob === true };
     if (blobUrl) item.blobUrl = blobUrl;
     if (Number.isFinite(video.height) && video.height > 0) item.height = video.height;
+    if (Number.isSafeInteger(video.elementId) && video.elementId > 0 && video.elementId <= 1_000_000_000) {
+      item.elementId = video.elementId;
+    }
+    if (
+      Number.isFinite(video.loadStartedAt) &&
+      video.loadStartedAt >= 0 &&
+      video.loadStartedAt <= Date.now() + 60_000
+    ) item.loadStartedAt = video.loadStartedAt;
     out.push(item);
   }
   return out;
@@ -1066,6 +1078,14 @@ function snapshotVideoFinds(finds) {
       const saved = { src, blob: video.blob === true };
       if (blobUrl) saved.blobUrl = blobUrl;
       if (Number.isFinite(video.height) && video.height > 0) saved.height = video.height;
+      if (Number.isSafeInteger(video.elementId) && video.elementId > 0 && video.elementId <= 1_000_000_000) {
+        saved.elementId = video.elementId;
+      }
+      if (
+        Number.isFinite(video.loadStartedAt) &&
+        video.loadStartedAt >= 0 &&
+        video.loadStartedAt <= Date.now() + 60_000
+      ) saved.loadStartedAt = video.loadStartedAt;
       out.push(saved);
       remainingVideos -= 1;
     }
@@ -1244,6 +1264,14 @@ async function restoreVideoFinds(tabId) {
             const item = { src, blob: video.blob === true };
             if (blobUrl) item.blobUrl = blobUrl;
             if (Number.isFinite(video.height) && video.height > 0) item.height = video.height;
+            if (Number.isSafeInteger(video.elementId) && video.elementId > 0 && video.elementId <= 1_000_000_000) {
+              item.elementId = video.elementId;
+            }
+            if (
+              Number.isFinite(video.loadStartedAt) &&
+              video.loadStartedAt >= 0 &&
+              video.loadStartedAt <= Date.now() + 60_000
+            ) item.loadStartedAt = video.loadStartedAt;
             videos.push(item);
             remaining -= 1;
           }
@@ -1574,24 +1602,105 @@ function findVideoForSource(tabId, srcUrl, frameId) {
   return null;
 }
 
-/// A blob may resolve to a manifest only if it is the sole active video in
-/// that frame and its candidates collapse to one stream after HLS master checks.
-async function resolvedBlobVideoUrlForFrame(tabId, frameId) {
+function sniffTimesForFrame(finds, frameId) {
+  return finds.sniffTimesByFrame instanceof Map
+    ? finds.sniffTimesByFrame.get(frameId) || new Map()
+    : new Map();
+}
+
+function sniffedManifestsForFrame(finds, frameId) {
+  const kinds = kindsForFrame(finds, frameId);
+  return sniffedUrlsForFrame(finds, frameId).filter((url) => {
+    const kind = manifestKind(url) || kinds.get(urlPathKey(url));
+    return isManifestKind(kind);
+  });
+}
+
+function videoManifestPriority(url, kinds) {
+  const kind = manifestKind(url) || (kinds && kinds.get(urlPathKey(url)));
+  return kind === "hls" ? 30 : kind === "manifest" ? 25 : kind === "dash" ? 20 : 0;
+}
+
+/// Attribute each manifest to the nearest element resource start that follows
+/// the request. When several active videos cannot be distinguished in time,
+/// the manifest is deliberately dropped instead of being guessed.
+function attributedManifestUrlsForVideo(videos, targetVideo, manifests, sniffTimes) {
+  if (!Array.isArray(videos) || !videos.includes(targetVideo)) return [];
+  if (videos.length === 1) return [...manifests];
+
+  const elementIds = new Set();
+  for (const video of videos) {
+    if (
+      !video ||
+      !Number.isSafeInteger(video.elementId) ||
+      video.elementId <= 0 ||
+      !Number.isFinite(video.loadStartedAt) ||
+      video.loadStartedAt < 0 ||
+      elementIds.has(video.elementId)
+    ) return [];
+    elementIds.add(video.elementId);
+  }
+
+  const attributed = [];
+  for (const url of manifests) {
+    const observedAt = sniffTimes.get(urlPathKey(url));
+    if (!Number.isFinite(observedAt) || observedAt < 0) continue;
+    const possibleOwners = videos
+      .map((video) => ({
+        video,
+        gap: video.loadStartedAt - observedAt,
+      }))
+      .filter(({ gap }) =>
+        gap >= 0 && gap <= VIDEO_MANIFEST_ATTRIBUTION_WINDOW_MS
+      )
+      .sort((a, b) => a.gap - b.gap);
+    if (possibleOwners.length === 0) continue;
+    if (
+      possibleOwners.length > 1 &&
+      possibleOwners[1].gap - possibleOwners[0].gap <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
+    ) continue;
+    if (possibleOwners[0].video === targetVideo) attributed.push(url);
+  }
+  return attributed;
+}
+
+async function bestManifestForVideo(tabId, finds, frameId, candidates) {
+  if (!candidates || candidates.length === 0) return null;
+  const kinds = kindsForFrame(finds, frameId);
+  let resolved = [...candidates];
+  if (resolved.length > 1) {
+    resolved = await preferMasterPlaylists(
+      resolved,
+      await tabOriginForHlsFetch(tabId),
+      resolved,
+    );
+  }
+  const merged = mergeVideoFinds([], resolved, kinds);
+  merged.sort((a, b) =>
+    videoManifestPriority(b, kinds) - videoManifestPriority(a, kinds)
+  );
+  return merged[0] || null;
+}
+
+/// Resolve a blob element to its single best attributed stream URL. Passing the
+/// element keeps right-click behavior aligned with the global menu even when
+/// several players share a frame.
+async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) {
   const finds = videoFinds.get(tabId);
   if (!finds) return null;
   if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
   if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return null;
   const videos = finds.frames.get(frameId) || [];
-  if (videos.length !== 1 || videos[0].blob !== true) return null;
-  let urls = mergedVideoUrlsForFrame(tabId, frameId);
-  if (urls.length > 1) {
-    urls = await preferMasterPlaylists(
-      urls,
-      await tabOriginForHlsFetch(tabId),
-      sniffedUrlsForFrame(finds, frameId),
-    );
-  }
-  return urls.length === 1 ? urls[0] : null;
+  const video = targetVideo || (videos.length === 1 ? videos[0] : null);
+  if (!video || video.blob !== true || !videos.includes(video)) return null;
+  const manifests = sniffedManifestsForFrame(finds, frameId);
+  const attributed = attributedManifestUrlsForVideo(
+    videos,
+    video,
+    manifests,
+    sniffTimesForFrame(finds, frameId),
+  );
+  return bestManifestForVideo(tabId, finds, frameId, attributed);
 }
 
 async function resolvedVideoUrlsForFrame(tabId, frameId) {
@@ -1599,61 +1708,48 @@ async function resolvedVideoUrlsForFrame(tabId, frameId) {
   if (!finds) return [];
   if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
   if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return [];
-  const videos = finds.frames.get(frameId) || [];
-  if (videos.length === 0) return [];
-  if (videos.length > 1) {
-    return [...new Set(videos
-      .filter((video) => video && typeof video.src === "string" && video.src && fitsGrabUrl(video.src))
-      .map((video) => video.src))];
-  }
-  const video = videos[0];
-  if (video && video.blob === true) {
-    let urls = mergedVideoUrlsForFrame(tabId, frameId);
-    if (urls.length > 1) {
-      urls = await preferMasterPlaylists(
-        urls,
-        await tabOriginForHlsFetch(tabId),
-        sniffedUrlsForFrame(finds, frameId),
-      );
-    }
-    return urls;
-  }
-  let urls = mergedVideoUrlsForFrame(tabId, frameId);
-  if (urls.length > 1) {
-    urls = await preferMasterPlaylists(
-      urls,
-      await tabOriginForHlsFetch(tabId),
-      sniffedUrlsForFrame(finds, frameId),
-    );
-  }
-  return video && video.src ? urls : [];
+  return menuVideoCandidatesForFrame(finds, frameId, tabId);
 }
 
-/// Build menu candidates independently from element-specific context-menu
-/// resolution. Network-observed playlists remain useful when a player is
-/// hidden in an iframe, uses a custom renderer, or shares a frame with another
-/// video element. With no qualifying DOM video, expose manifests only; this
-/// avoids turning unrelated sniffed MP4 requests into menu entries.
-function menuVideoCandidatesForFrame(finds, frameId) {
-  // A paused frame keeps its stream observations for resume, but must not
-  // expose them as downloadable candidates until an active video is reported.
+/// Build one candidate per active DOM video. Direct sources are authoritative;
+/// sniffed MP4 requests are never added as sibling entries. Blob players receive
+/// only manifests attributed to their element. With no DOM video, preserve the
+/// existing conservative manifest-only fallback for embedded/custom players.
+async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
   if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return [];
   const videos = finds.frames.get(frameId) || [];
-  const sniffed = sniffedUrlsForFrame(finds, frameId);
+  const manifests = sniffedManifestsForFrame(finds, frameId);
   const kinds = kindsForFrame(finds, frameId);
-  if (videos.length > 0) {
-    // Task A separates media storage so it cannot evict manifests, while
-    // preserving the pre-Task-B candidate behavior. Task B applies the
-    // per-element relevance rules to this bounded media ring.
-    const media = mediaUrlsForFrame(finds, frameId);
-    return mergeVideoFinds(videos, [...sniffed, ...media], kinds);
+  if (videos.length === 0) {
+    let fallback = mergeVideoFinds([], manifests, kinds);
+    if (fallback.length > 1) {
+      fallback = await preferMasterPlaylists(
+        fallback,
+        await tabOriginForHlsFetch(tabId),
+        manifests,
+      );
+    }
+    return fallback;
   }
 
-  const manifests = sniffed.filter((url) => {
-    const kind = manifestKind(url) || kinds.get(urlPathKey(url));
-    return isManifestKind(kind);
-  });
-  return mergeVideoFinds([], manifests, kinds);
+  const urls = [];
+  const sniffTimes = sniffTimesForFrame(finds, frameId);
+  for (const video of videos) {
+    if (video && typeof video.src === "string" && fitsGrabUrl(video.src)) {
+      urls.push(video.src);
+      continue;
+    }
+    if (!video || video.blob !== true) continue;
+    const attributed = attributedManifestUrlsForVideo(
+      videos,
+      video,
+      manifests,
+      sniffTimes,
+    );
+    const best = await bestManifestForVideo(tabId, finds, frameId, attributed);
+    if (best) urls.push(best);
+  }
+  return urls;
 }
 
 async function resolvedVideoUrls(tabId) {
@@ -1672,14 +1768,7 @@ async function resolvedVideoUrls(tabId) {
 
   const urls = [];
   for (const frameId of frameIds) {
-    let candidates = menuVideoCandidatesForFrame(finds, frameId);
-    if (candidates.length > 1) {
-      candidates = await preferMasterPlaylists(
-        candidates,
-        await tabOriginForHlsFetch(tabId),
-        sniffedUrlsForFrame(finds, frameId),
-      );
-    }
+    const candidates = await menuVideoCandidatesForFrame(finds, frameId, tabId);
     urls.push(...candidates);
     if (urls.length >= MAX_VIDEO_ITEMS) break;
   }
