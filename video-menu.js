@@ -690,9 +690,9 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
     candidates.push({ url, fromDom: false, kind });
   }
 
-  // Discover manifest families per directory. One HLS and one DASH manifest
-  // in the same directory are protocol alternates of one stream; any other
-  // combination stays separate.
+  // Discover same-directory protocol families first. A separate, narrow
+  // rule below links one HLS/DASH pair in explicitly named sibling protocol
+  // directories; other combinations remain separate.
   const byFolder = new Map();
   for (const item of candidates) {
     const kind = manifestKind(item.url) || item.kind;
