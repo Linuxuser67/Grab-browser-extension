@@ -136,25 +136,27 @@ function classifyStream(url, contentType) {
   return null;
 }
 
-// Menu labels use separate limits for file/folder names and page titles.
-const NAME_MAX = 50;
-const TITLE_MAX = 50;
+// Keep the complete context-menu name, including a truncation ellipsis,
+// within 32 grapheme clusters. File/folder names and page titles share the cap.
+const NAME_MAX = 32;
+const TITLE_MAX = 32;
 const LABEL_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 function labelCharacters(text) {
   return Array.from(LABEL_SEGMENTER.segment(text), ({ segment }) => segment);
 }
 
-/// Cut `text` to `max` grapheme clusters plus an ellipsis. Titles may back up
-/// to the last word boundary in the final 40%; file and folder names are cut
-/// at the exact limit.
+/// Cut `text` to at most `max` grapheme clusters, counting the ellipsis.
+/// Titles may back up to the last word boundary in the final 40%; file and
+/// folder names use the full available prefix.
 function clipLabel(text, max, { wordBoundary = false } = {}) {
   const chars = labelCharacters(text);
   if (chars.length <= max) return text;
-  let head = chars.slice(0, max);
+  const prefixLimit = Math.max(0, max - 1);
+  let head = chars.slice(0, prefixLimit);
   if (wordBoundary) {
     const space = head.lastIndexOf(" ");
-    if (space >= Math.floor(max * 0.6)) head = head.slice(0, space);
+    if (space >= Math.floor(prefixLimit * 0.6)) head = head.slice(0, space);
     while (head.length > 0 && head[head.length - 1] === " ") head.pop();
   }
   return head.join("") + "…";

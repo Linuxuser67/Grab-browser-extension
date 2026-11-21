@@ -3585,25 +3585,37 @@ describe("videoName", () => {
     );
   });
 
-  test("long titles are cut at a word boundary with an ellipsis, short ones are left alone", () => {
+  test("long titles stay within 32 grapheme clusters including the ellipsis", () => {
     const long = "The Complete History of Mechanical Watches From the First Pocket Clocks to Modern Tourbillons";
     const name = bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, long, "hls");
+    const count = (value) =>
+      Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value)).length;
     assert.ok(name.endsWith("…"));
-    assert.ok(Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(name)).length <= 51, name);
+    assert.ok(count(name) <= 32, name);
     assert.ok(long.startsWith(name.slice(0, -1)), name);
     assert.ok(/[a-z]…$/i.test(name) && long.charAt(name.length - 1) === " ", name);
-    const exactly50 = "x".repeat(50);
-    assert.equal(bg.videoName("https://c.example.com/hls/master.m3u8", 0, exactly50, "hls"), exactly50);
+    const exactly32 = "x".repeat(32);
+    assert.equal(bg.videoName("https://c.example.com/hls/master.m3u8", 0, exactly32, "hls"), exactly32);
+    const overLimit = "x".repeat(33);
+    assert.equal(bg.videoName("https://c.example.com/hls/master.m3u8", 0, overLimit, "hls"), `${"x".repeat(31)}…`);
   });
 
-  test("file names are cut exactly at the limit and never split a character", () => {
+  test("file names stay within 32 grapheme clusters and never split a character", () => {
     const longFile = `${"a".repeat(60)}.mp4`;
-    assert.equal(bg.videoName(`https://c.example.com/${longFile}`, 0, "", null), `${"a".repeat(50)}…`);
+    assert.equal(bg.videoName(`https://c.example.com/${longFile}`, 0, "", null), `${"a".repeat(31)}…`);
+    const exactly32File = `${"x".repeat(28)}.mp4`;
+    assert.equal(bg.videoName(`https://c.example.com/${exactly32File}`, 0, "", null), exactly32File);
+    const overLimitFile = `${"x".repeat(29)}.mp4`;
+    assert.equal(bg.videoName(`https://c.example.com/${overLimitFile}`, 0, "", null), `${"x".repeat(29)}.m…`);
     const spacedFile = `${"a ".repeat(30)}file.mp4`;
-    assert.equal(bg.videoName(`https://c.example.com/${encodeURIComponent(spacedFile)}`, 0, "", null), `${"a ".repeat(25)}…`);
+    assert.equal(bg.videoName(`https://c.example.com/${encodeURIComponent(spacedFile)}`, 0, "", null), `${"a ".repeat(15)}a…`);
     const emoji = "👨‍👩‍👧‍👦".repeat(60);
     const cut = bg.videoName("https://c.example.com/hls/master.m3u8", 0, emoji, "hls");
-    assert.equal(cut, `${"👨‍👩‍👧‍👦".repeat(50)}…`);
+    assert.equal(cut, `${"👨‍👩‍👧‍👦".repeat(31)}…`);
+    assert.equal(
+      Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(cut)).length,
+      32,
+    );
   });
 
   test("a generic stream file name falls back to the nearest descriptive folder", () => {
@@ -3620,7 +3632,9 @@ describe("videoName", () => {
   test("a generic or machine-generated direct file name yields to the page title", () => {
     for (const file of ["video.mp4", "index.mp4", "3f2a9c1e7b4d5a60.mp4", "123456789.mp4", "9b1d6f0e-3c1a-4e57-8b2f-0c6d9a1e4f7b.mp4"]) {
       assert.equal(bg.videoName(`https://cdn.example.com/v/${file}`, 0, "Great Talk", null), "Great Talk", file);
-      assert.equal(bg.videoName(`https://cdn.example.com/v/${file}`, 0, "", null), file, file);
+      const withoutTitle = bg.videoName(`https://cdn.example.com/v/${file}`, 0, "", null);
+      const expectedWithoutTitle = file.length <= 32 ? file : `${file.slice(0, 31)}…`;
+      assert.equal(withoutTitle, expectedWithoutTitle, file);
     }
     assert.equal(bg.videoName("https://cdn.example.com/v/lecture-2024.mp4", 0, "Great Talk", null), "lecture-2024.mp4");
   });
