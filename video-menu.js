@@ -958,6 +958,9 @@ function removeFrameSniffsAtOrBefore(finds, frameId, sequence) {
   const cutoff = Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : 0;
   const sequences = sniffSequenceMapForFrame(finds, frameId);
   const times = sniffTimeMapForFrame(finds, frameId);
+  const firstSeen = finds.sniffFirstSeenByFrame instanceof Map
+    ? finds.sniffFirstSeenByFrame.get(frameId)
+    : null;
   const lists = [
     finds.sniffedByFrame,
     finds.mediaByFrame,
@@ -990,10 +993,12 @@ function removeFrameSniffsAtOrBefore(finds, frameId, sequence) {
     for (const key of removedKeys) {
       sequences.delete(key);
       if (times) times.delete(key);
+      if (firstSeen) firstSeen.delete(key);
     }
     if (sequences.size === 0) finds.sniffSequencesByFrame.delete(frameId);
   }
   if (times && times.size === 0) finds.sniffTimesByFrame.delete(frameId);
+  if (firstSeen && firstSeen.size === 0) finds.sniffFirstSeenByFrame.delete(frameId);
   const kinds = finds.kindsByFrame.get(frameId);
   if (kinds) {
     for (const key of removedKeys) {
@@ -1280,6 +1285,23 @@ function snapshotVideoFinds(finds) {
     if (out.length) sniffTimes.push([frameId, out]);
   }
 
+  const sniffFirstSeen = [];
+  for (const [frameId, times] of finds.sniffFirstSeenByFrame || []) {
+    if (sniffFirstSeen.length >= MAX_VIDEO_FRAMES) break;
+    const out = [];
+    for (const [key, observedAt] of times || []) {
+      if (
+        out.length >= MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME ||
+        typeof key !== "string" ||
+        key.length > MAX_GRAB_URL_BYTES ||
+        !Number.isFinite(observedAt) ||
+        observedAt < 0
+      ) continue;
+      out.push([key, observedAt]);
+    }
+    if (out.length) sniffFirstSeen.push([frameId, out]);
+  }
+
   const retiredFrames = [];
   for (const [frameId, retired] of finds.retiredFrames || []) {
     if (retiredFrames.length >= MAX_VIDEO_FRAMES) break;
@@ -1311,6 +1333,7 @@ function snapshotVideoFinds(finds) {
     kindsFrames,
     sniffSequences,
     sniffTimes,
+    sniffFirstSeen,
     sniffSequence: Number.isSafeInteger(finds.sniffSequence) && finds.sniffSequence >= 0
       ? finds.sniffSequence
       : 0,
@@ -1609,6 +1632,36 @@ async function restoreVideoFinds(tabId) {
           }
         }
 
+        const sniffFirstSeenByFrame = new Map();
+        for (const pair of Array.isArray(saved.sniffFirstSeen) ? saved.sniffFirstSeen : []) {
+          if (
+            !Array.isArray(pair) ||
+            pair.length !== 2 ||
+            !Number.isInteger(pair[0]) ||
+            pair[0] < 0 ||
+            !Array.isArray(pair[1]) ||
+            sniffFirstSeenByFrame.size >= MAX_VIDEO_FRAMES
+          ) continue;
+          const available = new Set([
+            ...(sniffedByFrame.get(pair[0]) || []),
+            ...(mediaByFrame.get(pair[0]) || []),
+          ].map(urlPathKey));
+          const times = new Map();
+          for (const entry of pair[1].slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME)) {
+            if (
+              !Array.isArray(entry) ||
+              entry.length !== 2 ||
+              typeof entry[0] !== "string" ||
+              entry[0].length > MAX_GRAB_URL_BYTES ||
+              !available.has(entry[0]) ||
+              !Number.isFinite(entry[1]) ||
+              entry[1] < 0
+            ) continue;
+            times.set(entry[0], entry[1]);
+          }
+          if (times.size) sniffFirstSeenByFrame.set(pair[0], times);
+        }
+
         const retiredFrames = new Map();
         for (const pair of Array.isArray(saved.retiredFrames) ? saved.retiredFrames : []) {
           if (
@@ -1660,6 +1713,7 @@ async function restoreVideoFinds(tabId) {
           kindsByFrame,
           sniffSequencesByFrame,
           sniffTimesByFrame,
+          sniffFirstSeenByFrame,
           retiredFrames,
           sniffSequence,
           title: typeof saved.title === "string" ? saved.title.slice(0, MAX_VIDEO_TITLE_LENGTH) : "",
@@ -2202,6 +2256,11 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
   }
   const key = urlPathKey(url);
   kinds.set(key, kind);
+  const sequences = sniffSequenceMapForFrame(f, sourceFrame, true);
+  const hadPriorObservation =
+    sequences.has(key) ||
+    (f.sniffedByFrame.get(sourceFrame) || []).some((candidate) => urlPathKey(candidate) === key) ||
+    (f.mediaByFrame.get(sourceFrame) || []).some((candidate) => urlPathKey(candidate) === key);
 
   const listMap = kind === "manifest" ? f.sniffedByFrame : f.mediaByFrame;
   let urls = listMap.get(sourceFrame);
@@ -2247,10 +2306,21 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
     if (sizes.size === 0) f.mediaSizesByFrame.delete(sourceFrame);
   }
 
-  const sequences = sniffSequenceMapForFrame(f, sourceFrame, true);
-  sequences.set(key, nextSniffSequence(f));
+  // Sequence numbers and first-seen times describe the first request for a
+  // path; refreshes update only the exact URL variant and last-observed time.
+  if (!hadPriorObservation) sequences.set(key, nextSniffSequence(f));
   const times = sniffTimeMapForFrame(f, sourceFrame, true);
   times.set(key, validLifecycleTime(observedAt));
+  if (!(f.sniffFirstSeenByFrame instanceof Map)) f.sniffFirstSeenByFrame = new Map();
+  let firstSeen = f.sniffFirstSeenByFrame.get(sourceFrame);
+  if (!firstSeen) {
+    firstSeen = new Map();
+    f.sniffFirstSeenByFrame.set(sourceFrame, firstSeen);
+  }
+  // Do not reconstruct first-seen times for older v2 entries on refresh.
+  if (!hadPriorObservation && !firstSeen.has(key)) {
+    firstSeen.set(key, validLifecycleTime(observedAt));
+  }
 
   const limit = kind === "manifest"
     ? MAX_MANIFESTS_PER_FRAME
@@ -2276,12 +2346,14 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
     if (!stillPresent) {
       sequences.delete(removedKey);
       times.delete(removedKey);
+      firstSeen.delete(removedKey);
       kinds.delete(removedKey);
     }
   }
   if (urls.length === 0) listMap.delete(sourceFrame);
   if (sequences.size === 0) f.sniffSequencesByFrame.delete(sourceFrame);
   if (times.size === 0) f.sniffTimesByFrame.delete(sourceFrame);
+  if (firstSeen.size === 0) f.sniffFirstSeenByFrame.delete(sourceFrame);
   if (kinds.size === 0) f.kindsByFrame.delete(sourceFrame);
 }
 
