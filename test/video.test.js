@@ -678,9 +678,9 @@ describe("per-video menu candidates", () => {
     );
   });
 
-  test("a pre-load master beats a later post-load playlist when inspection is unavailable", async () => {
-    const master = "http://192.168.1.20/master/playlist.m3u8";
-    const child = "http://192.168.1.20/child/720p/stream.m3u8";
+  test("a pre-load master beats its nested post-load child when inspection is unavailable", async () => {
+    const master = "http://192.168.1.20/abc/playlist.m3u8";
+    const child = "http://192.168.1.20/abc/720p/stream.m3u8";
     chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
     const findings = makeFinds(
       [{
@@ -696,6 +696,26 @@ describe("per-video menu candidates", () => {
     ]));
 
     assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [master]);
+  });
+
+  test("a pre-load manifest outranks a sibling post-load manifest", async () => {
+    const earlier = "http://192.168.1.20/first/master.m3u8";
+    const later = "http://192.168.1.20/second/master.m3u8";
+    chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://page.example/player",
+        elementId: 1, loadStartedAt: 10_000,
+      }],
+      [earlier, later],
+      new Map([[pathKey(earlier), 20_000], [pathKey(later), 30_000]]),
+    );
+    findings.sniffFirstSeenByFrame.set(0, new Map([
+      [pathKey(earlier), 9_000],
+      [pathKey(later), 10_100],
+    ]));
+
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [earlier]);
   });
 
   test("among post-load manifests, the earliest first-seen request wins over a later refresh", async () => {
@@ -3953,23 +3973,6 @@ describe("HLS master playlist filtering", () => {
       Date.now = originalNow;
       globalThis.fetch = originalFetch;
     }
-  });
-
-  test("a playlist in a same-origin subfolder is treated as a child without inspection", async () => {
-    const bg = loadBackground(makeChrome());
-    const master = "https://cdn.example.com/abc/playlist.m3u8";
-    const child = "https://cdn.example.com/abc/720p/stream.m3u8";
-    const unrelated = "https://cdn.example.com/other/master.m3u8";
-
-    assert.deepEqual(
-      await bg.preferMasterPlaylists(
-        [master, child, unrelated],
-        "https://page.example/watch",
-        [master, child, unrelated],
-        async () => null,
-      ),
-      [master, unrelated],
-    );
   });
 
   test("unknown Grab inspection preserves every candidate", async () => {
