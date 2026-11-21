@@ -1203,7 +1203,13 @@ function snapshotVideoFinds(finds) {
     const out = [];
     for (const url of urls || []) {
       if (out.length >= MAX_MEDIA_SNIFFS_PER_FRAME) break;
-      if (typeof url === "string" && fitsGrabUrl(url) && available.includes(url)) {
+      if (
+        typeof url === "string" &&
+        fitsGrabUrl(url) &&
+        available.includes(url) &&
+        classifyStream(url, "") === "media" &&
+        !isSegmentLikeVideoUrl(url)
+      ) {
         out.push(url);
       }
     }
@@ -1462,7 +1468,9 @@ async function restoreVideoFinds(tabId) {
               remainingWholeMedia <= 0 ||
               typeof url !== "string" ||
               !fitsGrabUrl(url) ||
-              !available.includes(url)
+              !available.includes(url) ||
+              classifyStream(url, "") !== "media" ||
+              isSegmentLikeVideoUrl(url)
             ) continue;
             const key = urlPathKey(url);
             if (seen.has(key)) continue;
@@ -2121,6 +2129,10 @@ function wholeVideoMediaSize(details) {
   if (
     !details ||
     details.statusCode !== 200 ||
+    classifyStream(
+      details.url,
+      sniffedHeader(details.responseHeaders, "content-type"),
+    ) !== "media" ||
     sniffedHeader(details.responseHeaders, "content-range") ||
     isSegmentLikeVideoUrl(details.url)
   ) return null;
@@ -2142,6 +2154,8 @@ function wholeMediaUrlsForFrame(finds, frameId) {
     : null;
   return urls.filter((url) =>
     media.includes(url) &&
+    classifyStream(url, "") === "media" &&
+    !isSegmentLikeVideoUrl(url) &&
     sizes instanceof Map &&
     Number.isSafeInteger(sizes.get(urlPathKey(url))) &&
     sizes.get(urlPathKey(url)) >= MIN_WHOLE_VIDEO_MEDIA_BYTES
