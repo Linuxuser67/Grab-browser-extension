@@ -555,6 +555,23 @@ describe("per-video menu candidates", () => {
     assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [main]);
   });
 
+  test("a blob video prefers the manifest observed closest before its load start", async () => {
+    const older = "https://cdn.example.com/prefetched/master.m3u8";
+    const current = "https://cdn.example.com/current/master.m3u8";
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/player",
+        elementId: 1, loadStartedAt: 2000,
+      }],
+      [older, current],
+      new Map([[pathKey(older), 1000], [pathKey(current), 1980]]),
+    );
+    assert.deepEqual(
+      await bg.menuVideoCandidatesForFrame(findings, 0),
+      [current],
+    );
+  });
+
   test("multiple active elements receive only manifests nearest to their own load start", async () => {
     const direct = "https://cdn.example.com/main/direct.mp4";
     const adManifest = "https://ads.example.com/ad/master.m3u8";
