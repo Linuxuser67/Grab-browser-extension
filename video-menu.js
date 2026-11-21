@@ -746,9 +746,6 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
     const family = hls[0];
     protocolFamilies.set(hls[0], family);
     protocolFamilies.set(dash[0], family);
-    const rootFamilies = familiesByFolder.get(root) || new Set();
-    rootFamilies.add(family);
-    familiesByFolder.set(root, rootFamilies);
   }
 
   const groups = new Map();
