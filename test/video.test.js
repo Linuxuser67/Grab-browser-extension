@@ -338,6 +338,10 @@ describe("classifyStream", () => {
 
 describe("mergeVideoFinds", () => {
   let bg;
+  const pathKey = (url) => {
+    const parsed = new URL(url);
+    return parsed.origin + parsed.pathname;
+  };
   beforeEach(() => {
     bg = loadBackground(makeChrome());
   });
