@@ -645,6 +645,33 @@ async function preferMasterPlaylists(
   });
 }
 
+const AUTH_QUERY_PARAMETER_NAMES = new Set([
+  "token", "access_token", "auth", "authorization", "sig", "signature",
+  "expires", "expiry", "exp", "jwt", "hmac", "hdnea", "hdnts",
+  "x-amz-signature", "x-amz-credential", "x-amz-date", "x-amz-expires",
+  "x-amz-security-token", "x-goog-signature", "x-goog-credential",
+  "x-goog-date", "x-goog-expires",
+]);
+
+/// Preserve meaningful query parameters for direct media identities while
+/// ignoring the common query fields that rotate only for authentication.
+function directVideoUrlIdentityKey(url) {
+  try {
+    const parsed = new URL(url);
+    const identityParams = [...parsed.searchParams.entries()]
+      .filter(([name]) => !AUTH_QUERY_PARAMETER_NAMES.has(name.toLowerCase()))
+      .sort(([aName, aValue], [bName, bValue]) =>
+        aName.localeCompare(bName) || aValue.localeCompare(bValue)
+      );
+    const path = parsed.origin + parsed.pathname;
+    return identityParams.length > 0
+      ? `${path}?${new URLSearchParams(identityParams).toString()}`
+      : path;
+  } catch {
+    return String(url);
+  }
+}
+
 /// Merge DOM-reported video sources with sniffed requests. Ignore rotating auth
 /// query strings and group a direct rendition with its manifest directory only
 /// when that directory holds a single stream family. Distinct manifests keep
@@ -662,11 +689,31 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
     candidates.push({ url, fromDom: false, kind });
   }
 
+  // Meaningful query parameters distinguish direct media resources such as
+  // get_video.php?id=1 and get_video.php?id=2. Auth-only variants still rotate.
+  const directSourceKeysByPath = new Map();
+  for (const item of candidates) {
+    if (!item.fromDom) continue;
+    const path = urlPathKey(item.url);
+    let keys = directSourceKeysByPath.get(path);
+    if (!keys) {
+      keys = new Set();
+      directSourceKeysByPath.set(path, keys);
+    }
+    keys.add(directVideoUrlIdentityKey(item.url));
+  }
+  const groupingCandidates = candidates.filter((item) => {
+    if (item.fromDom) return true;
+    const directKeys = directSourceKeysByPath.get(urlPathKey(item.url));
+    return !(directKeys instanceof Set && directKeys.size > 1) ||
+      directKeys.has(directVideoUrlIdentityKey(item.url));
+  });
+
   // Discover manifest families per directory. One HLS and one DASH manifest
   // in the same directory are protocol alternates of one stream; any other
   // combination stays separate.
   const byFolder = new Map();
-  for (const item of candidates) {
+  for (const item of groupingCandidates) {
     const kind = manifestKind(item.url) || item.kind;
     if (!isManifestKind(kind)) continue;
     const folder = manifestFolderKey(item.url, kind);
@@ -697,14 +744,20 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
   }
 
   const groups = new Map();
-  candidates.forEach((item, order) => {
+  groupingCandidates.forEach((item, order) => {
     const kind = manifestKind(item.url) || item.kind;
+    let key;
+    const path = urlPathKey(item.url);
+    const directKeys = directSourceKeysByPath.get(path);
+    const hasMultipleDirectSources = directKeys instanceof Set && directKeys.size > 1;
     let key;
     if (isManifestKind(kind)) {
       const folder = manifestFolderKey(item.url, kind);
-      key =
-        (folder && familyFor.get(`${folder}\u0000${urlPathKey(item.url)}`)) ||
-        urlPathKey(item.url);
+      key = hasMultipleDirectSources
+        ? directVideoUrlIdentityKey(item.url)
+        : (folder && familyFor.get(`${folder}\\u0000${path}`)) || path;
+    } else if (hasMultipleDirectSources) {
+      key = directVideoUrlIdentityKey(item.url);
     } else {
       try {
         const p = new URL(item.url);
@@ -714,9 +767,9 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
         const families = familiesByFolder.get(siblingFolder);
         key = families && families.size === 1
           ? [...families][0]
-          : urlPathKey(item.url);
+          : path;
       } catch {
-        key = urlPathKey(item.url);
+        key = path;
       }
     }
 
