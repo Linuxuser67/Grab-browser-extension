@@ -520,9 +520,9 @@ async function isMasterPlaylist(value, tabOrigin = null, inspectPublic = inspect
   return result === null ? null : result.is_master;
 }
 
-/// Resolve playlist references against the master URL. Explicit variant and
-/// EXT-X-MEDIA references are authoritative; a playlist in a deeper directory
-/// on the same origin is also treated conservatively as a child.
+/// Resolve playlist references against the master URL. Only explicit
+/// variant and EXT-X-MEDIA references belong to this content-based helper;
+/// the timing-aware nested-directory heuristic is applied during attribution.
 function hlsChildPlaylistKeys(text, masterUrl) {
   const children = new Set();
   const add = (reference) => {
