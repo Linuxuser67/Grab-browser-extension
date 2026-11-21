@@ -3581,8 +3581,48 @@ describe("videoName", () => {
   test("a stream is named by the whole page video title", () => {
     assert.equal(
       bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, "  Example   Video Title ", "hls"),
-      "Example Video Ti…"
+      "Example Video Title"
     );
+  });
+
+  test("long titles are cut at a word boundary with an ellipsis, short ones are left alone", () => {
+    const long = "The Complete History of Mechanical Watches From the First Pocket Clocks to Modern Tourbillons";
+    const name = bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, long, "hls");
+    assert.ok(name.endsWith("…"));
+    assert.ok(Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(name)).length <= 51, name);
+    assert.ok(long.startsWith(name.slice(0, -1)), name);
+    assert.ok(/[a-z]…$/i.test(name) && long.charAt(name.length - 1) === " ", name);
+    const exactly50 = "x".repeat(50);
+    assert.equal(bg.videoName("https://c.example.com/hls/master.m3u8", 0, exactly50, "hls"), exactly50);
+  });
+
+  test("file names are cut exactly at the limit and never split a character", () => {
+    const longFile = `${"a".repeat(60)}.mp4`;
+    assert.equal(bg.videoName(`https://c.example.com/${longFile}`, 0, "", null), `${"a".repeat(50)}…`);
+    const spacedFile = `${"a ".repeat(30)}file.mp4`;
+    assert.equal(bg.videoName(`https://c.example.com/${encodeURIComponent(spacedFile)}`, 0, "", null), `${"a ".repeat(25)}…`);
+    const emoji = "👨‍👩‍👧‍👦".repeat(60);
+    const cut = bg.videoName("https://c.example.com/hls/master.m3u8", 0, emoji, "hls");
+    assert.equal(cut, `${"👨‍👩‍👧‍👦".repeat(50)}…`);
+  });
+
+  test("a generic stream file name falls back to the nearest descriptive folder", () => {
+    assert.equal(bg.videoName("https://cdn.example.com/hls/my-show-ep1/master.m3u8", 0, "", "hls"), "my-show-ep1");
+    assert.equal(bg.videoName("https://cdn.example.com/videos/Big%20Buck/720p/index.m3u8", 0, "", "hls"), "Big Buck");
+    assert.equal(bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, "", "hls"), "master.m3u8");
+  });
+
+  test("a descriptive stream file name is used only when no page title exists", () => {
+    assert.equal(bg.videoName("https://cdn.example.com/hls/my-talk.m3u8", 0, "", "hls"), "my-talk.m3u8");
+    assert.equal(bg.videoName("https://cdn.example.com/hls/my-talk.m3u8", 0, "Page Title", "hls"), "Page Title");
+  });
+
+  test("a generic or machine-generated direct file name yields to the page title", () => {
+    for (const file of ["video.mp4", "index.mp4", "3f2a9c1e7b4d5a60.mp4", "123456789.mp4", "9b1d6f0e-3c1a-4e57-8b2f-0c6d9a1e4f7b.mp4"]) {
+      assert.equal(bg.videoName(`https://cdn.example.com/v/${file}`, 0, "Great Talk", null), "Great Talk", file);
+      assert.equal(bg.videoName(`https://cdn.example.com/v/${file}`, 0, "", null), file, file);
+    }
+    assert.equal(bg.videoName("https://cdn.example.com/v/lecture-2024.mp4", 0, "Great Talk", null), "lecture-2024.mp4");
   });
 
   test("Video N is the last resort", () => {
