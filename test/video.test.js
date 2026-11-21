@@ -268,11 +268,15 @@ describe("classifyStream", () => {
   test("audio-typed HLS responses and non-video thumbnails are ignored", () => {
     assert.equal(
       bg.classifyStream("https://cdn.example.com/audio/playlist.m3u8", "audio/x-mpegurl"),
-      null,
+      "manifest",
     );
     assert.equal(
       bg.classifyStream("https://cdn.example.com/audio/playlist", "audio/mpegurl"),
-      null,
+      "manifest",
+    );
+    assert.equal(
+      bg.classifyStream("https://cdn.example.com/audio/master.m3u8", "application/vnd.apple.mpegurl"),
+      "manifest",
     );
     for (const mime of ["audio/x-mpegurl", "audio/mpegurl"]) {
       assert.equal(
@@ -410,6 +414,30 @@ describe("mergeVideoFinds", () => {
     ]);
   });
 
+  test("direct sources with the same path but different id queries remain separate", () => {
+    const first = "https://cdn.example.com/get_video.php?id=1";
+    const second = "https://cdn.example.com/get_video.php?id=2";
+    assert.deepEqual(
+      bg.mergeVideoFinds([
+        { src: first, blob: false },
+        { src: second, blob: false },
+      ], []),
+      [first, second],
+    );
+  });
+
+  test("direct sources with only rotating auth query values deduplicate", () => {
+    const first = "https://cdn.example.com/get_video.php?token=first";
+    const second = "https://cdn.example.com/get_video.php?token=rotated";
+    assert.deepEqual(
+      bg.mergeVideoFinds([
+        { src: first, blob: false },
+        { src: second, blob: false },
+      ], []),
+      [first],
+    );
+  });
+
   test("query-string variants of one manifest stay one entry", () => {
     const merged = bg.mergeVideoFinds([], [
       "https://site.example/hls/playlist.m3u8?v=alpha",
@@ -494,6 +522,23 @@ describe("per-video menu candidates", () => {
     );
 
     assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [direct]);
+  });
+
+  test("manifest collection ignores media-only ad and segment path heuristics", () => {
+    const audioFolder = "https://cdn.example.com/audio/master.m3u8";
+    const adFolder = "https://cdn.example.com/ad/episode.m3u8";
+    const findings = makeFinds(
+      [{
+        src: null,
+        blob: true,
+        blobUrl: "blob:https://example.com/manifest-collection",
+      }],
+      [audioFolder, adFolder],
+    );
+    assert.deepEqual(
+      bg.sniffedManifestsForFrame(findings, 0),
+      [audioFolder, adFolder],
+    );
   });
 
   test("a blob video chooses its HLS master and ignores sniffed media files", async () => {
@@ -826,6 +871,12 @@ describe("per-video menu candidates", () => {
       "https://cdn.example.com/segments/0001.mp4",
       "https://cdn.example.com/previews/preview.mp4",
     ]) assert.equal(bg.wholeVideoMediaSize(details(url, 200, full)), null, url);
+
+    for (const url of [
+      "https://cdn.example.com/lectures/lecture-part-2.mp4",
+      "https://cdn.example.com/movies/chunk1.mp4",
+      "https://cdn.example.com/shows/ad/episode.mp4",
+    ]) assert.equal(bg.wholeVideoMediaSize(details(url, 200, full)), 8388608, url);
   });
 
   test("a whole-file fallback survives session restore", async () => {
@@ -1106,6 +1157,53 @@ describe("isActiveVideo (content script)", () => {
 
 describe("detection wiring", () => {
   const tick = () => new Promise((r) => setTimeout(r, 30));
+
+  test("a video manifest under an audio-named directory remains detectable", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const tabId = 191;
+    const manifest = "https://cdn.example.com/audio/master.m3u8";
+    const video = {
+      src: null,
+      blob: true,
+      blobUrl: "blob:https://example.com/audio-folder-video",
+    };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await chrome._listeners["webRequest.onResponseStarted"]({
+      tabId,
+      frameId: 0,
+      url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await chrome._listeners["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [video] },
+      sender,
+    );
+
+    assert.deepEqual(await bg.resolvedVideoUrls(tabId), [manifest]);
+  });
+
+  test("two direct video elements with distinct id queries remain two resolved entries", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const tabId = 190;
+    const first = "https://cdn.example.com/get_video.php?id=1";
+    const second = "https://cdn.example.com/get_video.php?id=2";
+
+    await chrome._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [
+          { src: first, blob: false, elementId: 101 },
+          { src: second, blob: false, elementId: 102 },
+        ],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+
+    assert.deepEqual(await bg.resolvedVideoUrls(tabId), [first, second]);
+  });
 
   test("a network-observed HLS manifest appears without a DOM video and can be handed off", async () => {
     const chrome = makeChrome();

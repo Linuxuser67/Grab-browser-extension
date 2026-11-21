@@ -53,16 +53,20 @@ Grab must be installed with its desktop entry (it registers as the
   autoplay and streams behind `blob:` players — appear under right-click →
   **Videos detected by Grab**, with one best URL per active video and a matching
   toolbar badge count. Direct `<video>` sources take priority over network-sniffed
-  media requests. Blob players use the best attributable HLS/DASH manifest; when
-  no manifest is available, a fallback is allowed only for a complete, large
-  media response (HTTP 200, known Content-Length, no byte range, and no obvious
-  segment, ad, preview, or thumbnail URL). A single active player uses its
-  frame's manifests without requiring request/load-start ordering. When multiple
-  players share a frame, first-request timing and element identity disambiguate
-  streams; ambiguous candidates are omitted rather than guessed. Paused stream
-  evidence is retained until a subsequent report can confirm the resumed source.
-  A manifest-only fallback remains for embedded or custom players with no
-  discoverable active `<video>` element; it groups known playlist variants
+  media requests. Direct sources with distinct meaningful query parameters (such
+  as `id=1` and `id=2`) remain separate; rotating authentication parameters are
+  normalized for deduplication. Blob players use the best attributable HLS/DASH
+  manifest; when no manifest is available, a fallback is allowed only for a
+  complete, large media response (HTTP 200, known Content-Length, no byte range,
+  and no explicit segment, ad, preview, or thumbnail marker). Segment heuristics
+  apply to media files, not playlist paths; a video playlist is not rejected
+  merely because its parent directory is named `audio`. A single active player
+  uses its frame's manifests without requiring request/load-start ordering. When
+  multiple players share a frame, first-request timing and element identity
+  disambiguate streams; ambiguous candidates are omitted rather than guessed.
+  Paused stream evidence is retained until a subsequent report can confirm the
+  resumed source. A manifest-only fallback remains for embedded or custom players
+  with no discoverable active `<video>` element; it groups known playlist variants
   conservatively.
   Picking a menu entry opens its URL in Grab, which probes it like any other link.
   Skipped on video platforms yt-dlp handles itself (YouTube, TikTok,
