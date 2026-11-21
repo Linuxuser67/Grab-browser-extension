@@ -423,6 +423,169 @@ describe("mergeVideoFinds", () => {
   });
 });
 
+describe("per-video menu candidates", () => {
+  let bg;
+  let chrome;
+
+  beforeEach(() => {
+    chrome = makeChrome();
+    bg = loadBackground(chrome);
+  });
+
+  const pathKey = (url) => {
+    const parsed = new URL(url);
+    return parsed.origin + parsed.pathname;
+  };
+
+  const makeFinds = (videos, manifests = [], times = new Map(), media = []) => ({
+    frames: new Map([[0, videos]]),
+    sniffedByFrame: new Map([[0, manifests]]),
+    mediaByFrame: new Map([[0, media]]),
+    kindsByFrame: new Map([[0, new Map()]]),
+    sniffTimesByFrame: new Map([[0, times]]),
+    retiredFrames: new Map(),
+  });
+
+  test("a direct video uses its DOM source and ignores sniffed MP4s and unrelated manifests", async () => {
+    const direct = "https://cdn.example.com/watch/main.mp4";
+    const findings = makeFinds(
+      [{ src: direct, blob: false, elementId: 1, loadStartedAt: 1000 }],
+      ["https://ads.example.com/pre-roll/master.m3u8"],
+      new Map([[pathKey("https://ads.example.com/pre-roll/master.m3u8"), 900]]),
+      [
+        "https://cdn.example.com/watch/segment-001.mp4",
+        "https://ads.example.com/pre-roll/ad.mp4",
+      ],
+    );
+
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [direct]);
+  });
+
+  test("a blob video chooses its HLS master and ignores sniffed media files", async () => {
+    const master = "http://192.168.1.20/hls/master.m3u8";
+    const child = "http://192.168.1.20/hls/variant.m3u8";
+    chrome.tabs.get = async (id) => ({ id, url: "http://192.168.1.10/watch" });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => ({
+      ok: true,
+      text: async () => String(url) === master
+        ? "#EXTM3U\\n#EXT-X-STREAM-INF:BANDWIDTH=100000\\nvariant.m3u8\\n"
+        : "#EXTM3U\\n#EXT-X-TARGETDURATION=6\\n",
+    });
+    try {
+      const findings = makeFinds(
+        [{
+          src: null, blob: true, blobUrl: "blob:https://example.com/player",
+          elementId: 1, loadStartedAt: 1000,
+        }],
+        [master, child],
+        new Map([[pathKey(master), 900], [pathKey(child), 950]]),
+        ["http://192.168.1.20/hls/chunk-001.mp4"],
+      );
+
+      assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0, 5), [master]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("HLS outranks DASH for the same element even when the manifests use different folders", async () => {
+    const hls = "http://192.168.1.20/hls/master.m3u8";
+    const dash = "http://192.168.1.20/dash/manifest.mpd";
+    chrome.tabs.get = async (id) => ({ id, url: "http://192.168.1.10/watch" });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      ok: true,
+      text: async () => "#EXTM3U\\n#EXT-X-TARGETDURATION=6\\n",
+    });
+    try {
+      const findings = makeFinds(
+        [{
+          src: null, blob: true, blobUrl: "blob:https://example.com/player",
+          elementId: 1, loadStartedAt: 1000,
+        }],
+        [dash, hls],
+        new Map([[pathKey(hls), 900], [pathKey(dash), 920]]),
+      );
+
+      assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0, 5), [hls]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("multiple active elements receive only manifests nearest to their own load start", async () => {
+    const direct = "https://cdn.example.com/main/direct.mp4";
+    const adManifest = "https://ads.example.com/ad/master.m3u8";
+    const mainManifest = "https://cdn.example.com/main/master.m3u8";
+    const findings = makeFinds(
+      [
+        { src: direct, blob: false, elementId: 1, loadStartedAt: 1000 },
+        {
+          src: null, blob: true, blobUrl: "blob:https://example.com/main",
+          elementId: 2, loadStartedAt: 3000,
+        },
+      ],
+      [adManifest, mainManifest],
+      new Map([[pathKey(adManifest), 950], [pathKey(mainManifest), 2950]]),
+    );
+
+    assert.deepEqual(
+      await bg.menuVideoCandidatesForFrame(findings, 0),
+      [direct, mainManifest],
+    );
+  });
+
+  test("ambiguous multi-video timing produces no blob candidate", async () => {
+    const first = "https://cdn.example.com/first/master.m3u8";
+    const findings = makeFinds(
+      [
+        {
+          src: null, blob: true, blobUrl: "blob:https://example.com/first",
+          elementId: 1, loadStartedAt: 1000,
+        },
+        {
+          src: null, blob: true, blobUrl: "blob:https://example.com/second",
+          elementId: 2, loadStartedAt: 1000,
+        },
+      ],
+      [first],
+      new Map([[pathKey(first), 900]]),
+    );
+
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), []);
+  });
+
+  test("manifests observed after an element load start are not attributed to it", async () => {
+    const ad = "https://ads.example.com/ad/master.m3u8";
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/main",
+        elementId: 1, loadStartedAt: 2000,
+      }],
+      [ad],
+      new Map([[pathKey(ad), 2100]]),
+    );
+
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), []);
+  });
+
+  test("network-only fallback remains manifest-only and collapses sibling HLS/DASH", async () => {
+    const hls = "https://cdn.example.com/one/master.m3u8";
+    const dash = "https://cdn.example.com/one/manifest.mpd";
+    const second = "https://cdn.example.com/two/master.m3u8";
+    const findings = makeFinds(
+      [],
+      [hls, dash, second],
+      new Map(),
+      ["https://cdn.example.com/one/preview.mp4"],
+    );
+
+    const candidates = await bg.menuVideoCandidatesForFrame(findings, 0);
+    assert.deepEqual(candidates, [hls, second]);
+  });
+});
+
 describe("collectVideos (content script)", () => {
   let content;
   beforeEach(() => {
@@ -472,6 +635,24 @@ describe("collectVideos (content script)", () => {
       src: null, blob: true,
       blobUrl: "blob:https://example.com/uuid",
       height: 360,
+    }]);
+  });
+
+  test("includes bounded element identity and load-start metadata when provided", () => {
+    const videos = content.collectVideos(
+      fakeDoc([fakeVideo({ src: "blob:https://example.com/uuid", w: 640, h: 360 })]),
+      () => true,
+      null,
+      null,
+      () => ({ elementId: 7, loadStartedAt: 1234 }),
+    );
+    assert.deepEqual(videos, [{
+      src: null,
+      blob: true,
+      blobUrl: "blob:https://example.com/uuid",
+      height: 360,
+      elementId: 7,
+      loadStartedAt: 1234,
     }]);
   });
 
