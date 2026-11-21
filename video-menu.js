@@ -693,14 +693,21 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
 // frame: a manifest fetched by an iframe must not be paired with another frame.
 const MAX_VIDEO_FRAMES = 32;
 const MAX_VIDEO_TITLE_LENGTH = 512;
+const MAX_MANIFESTS_PER_FRAME = 20;
+const MAX_MEDIA_SNIFFS_PER_FRAME = 8;
+const RETIRED_FRAME_TTL_MS = 5 * 60 * 1000;
 const videoFinds = new Map();
 
 function createVideoFinds() {
   return {
     frames: new Map(),
     sniffedByFrame: new Map(),
+    mediaByFrame: new Map(),
     kindsByFrame: new Map(),
-    pausedFrames: new Map(),
+    sniffSequencesByFrame: new Map(),
+    sniffTimesByFrame: new Map(),
+    retiredFrames: new Map(),
+    sniffSequence: 0,
     title: "",
   };
 }
@@ -711,10 +718,11 @@ function trackedFrameIds(f) {
   const ids = new Set();
   for (const id of f.frames.keys()) ids.add(id);
   for (const id of f.sniffedByFrame.keys()) ids.add(id);
+  for (const id of f.mediaByFrame.keys()) ids.add(id);
   for (const id of f.kindsByFrame.keys()) ids.add(id);
-  if (f.pausedFrames instanceof Map) {
-    for (const id of f.pausedFrames.keys()) ids.add(id);
-  }
+  for (const id of f.sniffSequencesByFrame.keys()) ids.add(id);
+  for (const id of f.sniffTimesByFrame.keys()) ids.add(id);
+  for (const id of f.retiredFrames.keys()) ids.add(id);
   return ids;
 }
 
@@ -723,8 +731,11 @@ function trackedFrameIds(f) {
 function dropFrame(f, frameId) {
   f.frames.delete(frameId);
   f.sniffedByFrame.delete(frameId);
+  f.mediaByFrame.delete(frameId);
   f.kindsByFrame.delete(frameId);
-  if (f.pausedFrames instanceof Map) f.pausedFrames.delete(frameId);
+  f.sniffSequencesByFrame.delete(frameId);
+  f.sniffTimesByFrame.delete(frameId);
+  f.retiredFrames.delete(frameId);
 }
 
 /// Evict the oldest tracked frame to free a slot. The top frame is kept
@@ -808,6 +819,211 @@ function validBlobUrl(value) {
     ? value : null;
 }
 
+function validLifecycleSource(value) {
+  if (typeof value !== "string" || value.length > 4096) return null;
+  return fitsGrabUrl(value) || validBlobUrl(value) ? value : null;
+}
+
+function sniffSequenceMapForFrame(finds, frameId, create = false) {
+  if (!(finds.sniffSequencesByFrame instanceof Map)) {
+    if (!create) return null;
+    finds.sniffSequencesByFrame = new Map();
+  }
+  let sequences = finds.sniffSequencesByFrame.get(frameId);
+  if (!sequences && create) {
+    sequences = new Map();
+    finds.sniffSequencesByFrame.set(frameId, sequences);
+  }
+  return sequences || null;
+}
+
+function sniffTimeMapForFrame(finds, frameId, create = false) {
+  if (!(finds.sniffTimesByFrame instanceof Map)) {
+    if (!create) return null;
+    finds.sniffTimesByFrame = new Map();
+  }
+  let times = finds.sniffTimesByFrame.get(frameId);
+  if (!times && create) {
+    times = new Map();
+    finds.sniffTimesByFrame.set(frameId, times);
+  }
+  return times || null;
+}
+
+function validLifecycleTime(value, fallback = Date.now()) {
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function retiredSequenceAt(finds, frameId, lifecycleAt) {
+  const cutoffTime = validLifecycleTime(lifecycleAt);
+  const sequences = sniffSequenceMapForFrame(finds, frameId);
+  const times = sniffTimeMapForFrame(finds, frameId);
+  if (!sequences || !times) return 0;
+  let retiredAtSeq = 0;
+  for (const [key, sequence] of sequences) {
+    const observedAt = times.get(key);
+    if (
+      Number.isSafeInteger(sequence) &&
+      sequence >= 0 &&
+      Number.isFinite(observedAt) &&
+      observedAt <= cutoffTime
+    ) {
+      retiredAtSeq = Math.max(retiredAtSeq, sequence);
+    }
+  }
+  return retiredAtSeq;
+}
+
+function nextSniffSequence(finds) {
+  const current = Number.isSafeInteger(finds.sniffSequence) && finds.sniffSequence >= 0
+    ? finds.sniffSequence
+    : 0;
+  finds.sniffSequence = current >= Number.MAX_SAFE_INTEGER - 1 ? 1 : current + 1;
+  return finds.sniffSequence;
+}
+
+function removeFrameSniffsAtOrBefore(finds, frameId, sequence) {
+  const cutoff = Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : 0;
+  const sequences = sniffSequenceMapForFrame(finds, frameId);
+  const times = sniffTimeMapForFrame(finds, frameId);
+  const lists = [
+    finds.sniffedByFrame,
+    finds.mediaByFrame,
+  ];
+  let changed = false;
+  const removedKeys = new Set();
+  const keptKeys = new Set();
+
+  for (const listMap of lists) {
+    const urls = listMap instanceof Map ? listMap.get(frameId) : null;
+    if (!Array.isArray(urls)) continue;
+    const kept = [];
+    for (const url of urls) {
+      const key = urlPathKey(url);
+      const observedSequence = sequences && sequences.get(key);
+      if (Number.isSafeInteger(observedSequence) && observedSequence > cutoff) {
+        kept.push(url);
+        keptKeys.add(key);
+      } else {
+        removedKeys.add(key);
+        changed = true;
+      }
+    }
+    if (kept.length) listMap.set(frameId, kept);
+    else listMap.delete(frameId);
+  }
+
+  for (const key of keptKeys) removedKeys.delete(key);
+  if (sequences) {
+    for (const key of removedKeys) {
+      sequences.delete(key);
+      if (times) times.delete(key);
+    }
+    if (sequences.size === 0) finds.sniffSequencesByFrame.delete(frameId);
+  }
+  if (times && times.size === 0) finds.sniffTimesByFrame.delete(frameId);
+  const kinds = finds.kindsByFrame.get(frameId);
+  if (kinds) {
+    for (const key of removedKeys) {
+      const stillPresent =
+        (finds.sniffedByFrame.get(frameId) || []).some((url) => urlPathKey(url) === key) ||
+        (finds.mediaByFrame.get(frameId) || []).some((url) => urlPathKey(url) === key);
+      if (!stillPresent) kinds.delete(key);
+    }
+    if (kinds.size === 0) finds.kindsByFrame.delete(frameId);
+  }
+  return changed;
+}
+
+function hasManifestSniffedAfter(finds, frameId, sequence) {
+  const urls = finds.sniffedByFrame.get(frameId) || [];
+  const sequences = sniffSequenceMapForFrame(finds, frameId);
+  if (!sequences) return false;
+  return urls.some((url) => (sequences.get(urlPathKey(url)) || 0) > sequence);
+}
+
+function pruneExpiredRetiredFrames(finds, now = Date.now()) {
+  if (!(finds.retiredFrames instanceof Map)) return false;
+  let changed = false;
+  for (const [frameId, retired] of finds.retiredFrames) {
+    if (
+      !retired ||
+      !Number.isFinite(retired.retiredAt) ||
+      retired.retiredAt > now + 60_000 ||
+      now - retired.retiredAt < RETIRED_FRAME_TTL_MS
+    ) continue;
+    // Once the grace period expires, the stream can no longer be safely
+    // attributed. Drop the entire retired frame rather than resurfacing any
+    // post-retirement observations as no-DOM fallback candidates.
+    dropFrame(finds, frameId);
+    changed = true;
+  }
+  return changed;
+}
+
+function recordRetiredFrame(
+  finds,
+  frameId,
+  source,
+  previousVideoCount,
+  lifecycleAt = Date.now(),
+) {
+  if (!(finds.retiredFrames instanceof Map)) finds.retiredFrames = new Map();
+  const validSource = validLifecycleSource(source);
+  const existing = finds.retiredFrames.get(frameId);
+  // Repeated pause/end reports must not move the sequence boundary forward:
+  // manifests observed after the first retirement belong to the next stream.
+  if (existing) {
+    existing.source = existing.source || validSource;
+    existing.videoCount = Math.max(
+      Number.isInteger(existing.videoCount) ? existing.videoCount : 0,
+      Number.isInteger(previousVideoCount) ? previousVideoCount : 0,
+    );
+    return false;
+  }
+  const eventTime = validLifecycleTime(lifecycleAt);
+  finds.retiredFrames.set(frameId, {
+    source: validSource,
+    retiredAtSeq: retiredSequenceAt(finds, frameId, eventTime),
+    retiredAt: Date.now(),
+    videoCount: Number.isInteger(previousVideoCount) ? previousVideoCount : 0,
+  });
+  return true;
+}
+
+function resumeRetiredFrame(finds, frameId, videos) {
+  const retired = finds.retiredFrames instanceof Map
+    ? finds.retiredFrames.get(frameId)
+    : null;
+  if (!retired) return false;
+
+  const sameBlobResumed =
+    videos.length === 1 &&
+    videos[0] &&
+    videos[0].blob === true &&
+    validBlobUrl(videos[0].blobUrl) !== null &&
+    validBlobUrl(videos[0].blobUrl) === retired.source;
+  const multiplePlayers =
+    videos.length > 1 ||
+    (Number.isInteger(retired.videoCount) && retired.videoCount > 1);
+  const hasNewManifest = hasManifestSniffedAfter(
+    finds,
+    frameId,
+    retired.retiredAtSeq,
+  );
+
+  // A same-blob resume keeps its observations. Otherwise, a newly observed
+  // manifest proves that a new stream started: discard only pre-retirement
+  // URLs. Multiple players remain conservative because frame-wide sniffing
+  // cannot prove which element owns a retained manifest.
+  if (!sameBlobResumed && (hasNewManifest || multiplePlayers)) {
+    removeFrameSniffsAtOrBefore(finds, frameId, retired.retiredAtSeq);
+  }
+  finds.retiredFrames.delete(frameId);
+  return true;
+}
+
+
 /// A blob URL is retained only as a short-lived element identity for matching
 /// context-menu clicks. It is never included in a handoff to Grab.
 function normalizeVideoReport(rawVideos, maximum) {
@@ -888,20 +1104,84 @@ function snapshotVideoFinds(finds) {
     if (out.length) kindsFrames.push([frameId, out]);
   }
 
-  const pausedFrames = [...(finds.pausedFrames instanceof Map ? finds.pausedFrames : [])]
-    .filter(([frameId, source]) =>
-      Number.isInteger(frameId) &&
-      frameId >= 0 &&
-      validBlobUrl(source) !== null
-    )
-    .slice(0, MAX_VIDEO_FRAMES);
+  const mediaFrames = [];
+  for (const [frameId, urls] of finds.mediaByFrame || []) {
+    if (mediaFrames.length >= MAX_VIDEO_FRAMES) break;
+    const out = [];
+    for (const url of urls || []) {
+      if (out.length >= MAX_MEDIA_SNIFFS_PER_FRAME) break;
+      if (typeof url === "string" && fitsGrabUrl(url)) out.push(url);
+    }
+    if (out.length) mediaFrames.push([frameId, out]);
+  }
+
+  const sniffSequences = [];
+  for (const [frameId, sequences] of finds.sniffSequencesByFrame || []) {
+    if (sniffSequences.length >= MAX_VIDEO_FRAMES) break;
+    const out = [];
+    for (const [key, sequence] of sequences || []) {
+      if (
+        out.length >= MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME ||
+        typeof key !== "string" ||
+        key.length > MAX_GRAB_URL_BYTES ||
+        !Number.isSafeInteger(sequence) ||
+        sequence < 0
+      ) continue;
+      out.push([key, sequence]);
+    }
+    if (out.length) sniffSequences.push([frameId, out]);
+  }
+
+  const sniffTimes = [];
+  for (const [frameId, times] of finds.sniffTimesByFrame || []) {
+    if (sniffTimes.length >= MAX_VIDEO_FRAMES) break;
+    const out = [];
+    for (const [key, observedAt] of times || []) {
+      if (
+        out.length >= MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME ||
+        typeof key !== "string" ||
+        key.length > MAX_GRAB_URL_BYTES ||
+        !Number.isFinite(observedAt) ||
+        observedAt < 0
+      ) continue;
+      out.push([key, observedAt]);
+    }
+    if (out.length) sniffTimes.push([frameId, out]);
+  }
+
+  const retiredFrames = [];
+  for (const [frameId, retired] of finds.retiredFrames || []) {
+    if (retiredFrames.length >= MAX_VIDEO_FRAMES) break;
+    if (
+      !Number.isInteger(frameId) ||
+      frameId < 0 ||
+      !retired ||
+      !Number.isSafeInteger(retired.retiredAtSeq) ||
+      retired.retiredAtSeq < 0 ||
+      !Number.isFinite(retired.retiredAt)
+    ) continue;
+    retiredFrames.push([frameId, {
+      source: validLifecycleSource(retired.source),
+      retiredAtSeq: retired.retiredAtSeq,
+      retiredAt: retired.retiredAt,
+      videoCount: Number.isInteger(retired.videoCount) && retired.videoCount >= 0
+        ? Math.min(retired.videoCount, MAX_VIDEO_ITEMS)
+        : 0,
+    }]);
+  }
 
   return {
     version: 2,
     frames,
     sniffedFrames,
+    mediaFrames,
     kindsFrames,
-    pausedFrames,
+    sniffSequences,
+    sniffTimes,
+    sniffSequence: Number.isSafeInteger(finds.sniffSequence) && finds.sniffSequence >= 0
+      ? finds.sniffSequence
+      : 0,
+    retiredFrames,
     title: typeof finds.title === "string" ? finds.title.slice(0, MAX_VIDEO_TITLE_LENGTH) : "",
   };
 }
@@ -1009,25 +1289,174 @@ async function restoreVideoFinds(tabId) {
           if (kinds.size) kindsByFrame.set(pair[0], kinds);
         }
 
-        const pausedFrames = new Map();
+        const mediaByFrame = new Map();
+        let remainingMedia = MAX_VIDEO_FRAMES * MAX_MEDIA_SNIFFS_PER_FRAME;
+        for (const pair of Array.isArray(saved.mediaFrames) ? saved.mediaFrames : []) {
+          if (
+            !Array.isArray(pair) ||
+            pair.length !== 2 ||
+            !Number.isInteger(pair[0]) ||
+            pair[0] < 0 ||
+            !Array.isArray(pair[1]) ||
+            mediaByFrame.has(pair[0]) ||
+            mediaByFrame.size >= MAX_VIDEO_FRAMES ||
+            remainingMedia <= 0
+          ) continue;
+          const urls = [];
+          const seen = new Set();
+          for (const url of pair[1].slice(0, MAX_MEDIA_SNIFFS_PER_FRAME)) {
+            if (remainingMedia <= 0 || typeof url !== "string" || !fitsGrabUrl(url)) continue;
+            const identity = urlPathKey(url);
+            if (seen.has(identity)) continue;
+            seen.add(identity);
+            urls.push(url);
+            remainingMedia -= 1;
+          }
+          if (urls.length) mediaByFrame.set(pair[0], urls);
+        }
+
+        let sniffSequence =
+          Number.isSafeInteger(saved.sniffSequence) && saved.sniffSequence >= 0
+            ? saved.sniffSequence
+            : 0;
+        const sniffSequencesByFrame = new Map();
+        for (const pair of Array.isArray(saved.sniffSequences) ? saved.sniffSequences : []) {
+          if (
+            !Array.isArray(pair) ||
+            pair.length !== 2 ||
+            !Number.isInteger(pair[0]) ||
+            pair[0] < 0 ||
+            !Array.isArray(pair[1]) ||
+            sniffSequencesByFrame.size >= MAX_VIDEO_FRAMES
+          ) continue;
+          const sequences = new Map();
+          for (const entry of pair[1].slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME)) {
+            if (
+              !Array.isArray(entry) ||
+              entry.length !== 2 ||
+              typeof entry[0] !== "string" ||
+              entry[0].length > MAX_GRAB_URL_BYTES ||
+              !Number.isSafeInteger(entry[1]) ||
+              entry[1] < 0
+            ) continue;
+            sequences.set(entry[0], entry[1]);
+            sniffSequence = Math.max(sniffSequence, entry[1]);
+          }
+          if (sequences.size) sniffSequencesByFrame.set(pair[0], sequences);
+        }
+        // Older v2 snapshots only stored URL arrays. Give those observations
+        // stable sequence numbers so subsequent sniffs always compare newer.
+        for (const [frameId, urls] of sniffedByFrame) {
+          let sequences = sniffSequencesByFrame.get(frameId);
+          if (!sequences) {
+            sequences = new Map();
+            sniffSequencesByFrame.set(frameId, sequences);
+          }
+          for (const url of urls) {
+            const key = urlPathKey(url);
+            if (!sequences.has(key)) sequences.set(key, ++sniffSequence);
+          }
+        }
+        for (const [frameId, urls] of mediaByFrame) {
+          let sequences = sniffSequencesByFrame.get(frameId);
+          if (!sequences) {
+            sequences = new Map();
+            sniffSequencesByFrame.set(frameId, sequences);
+          }
+          for (const url of urls) {
+            const key = urlPathKey(url);
+            if (!sequences.has(key)) sequences.set(key, ++sniffSequence);
+          }
+        }
+
+        const sniffTimesByFrame = new Map();
+        for (const pair of Array.isArray(saved.sniffTimes) ? saved.sniffTimes : []) {
+          if (
+            !Array.isArray(pair) ||
+            pair.length !== 2 ||
+            !Number.isInteger(pair[0]) ||
+            pair[0] < 0 ||
+            !Array.isArray(pair[1]) ||
+            sniffTimesByFrame.size >= MAX_VIDEO_FRAMES
+          ) continue;
+          const times = new Map();
+          for (const entry of pair[1].slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME)) {
+            if (
+              !Array.isArray(entry) ||
+              entry.length !== 2 ||
+              typeof entry[0] !== "string" ||
+              entry[0].length > MAX_GRAB_URL_BYTES ||
+              !Number.isFinite(entry[1]) ||
+              entry[1] < 0
+            ) continue;
+            times.set(entry[0], entry[1]);
+          }
+          if (times.size) sniffTimesByFrame.set(pair[0], times);
+        }
+        // Older v2 snapshots have no observation times. Treat those sniffed
+        // entries as older than future lifecycle events.
+        for (const [frameId, sequences] of sniffSequencesByFrame) {
+          let times = sniffTimesByFrame.get(frameId);
+          if (!times) {
+            times = new Map();
+            sniffTimesByFrame.set(frameId, times);
+          }
+          for (const key of sequences.keys()) {
+            if (!times.has(key)) times.set(key, 0);
+          }
+        }
+
+        const retiredFrames = new Map();
+        for (const pair of Array.isArray(saved.retiredFrames) ? saved.retiredFrames : []) {
+          if (
+            !Array.isArray(pair) ||
+            pair.length !== 2 ||
+            !Number.isInteger(pair[0]) ||
+            pair[0] < 0 ||
+            !pair[1] ||
+            !Number.isSafeInteger(pair[1].retiredAtSeq) ||
+            pair[1].retiredAtSeq < 0 ||
+            !Number.isFinite(pair[1].retiredAt) ||
+            retiredFrames.size >= MAX_VIDEO_FRAMES
+          ) continue;
+          retiredFrames.set(pair[0], {
+            source: validLifecycleSource(pair[1].source),
+            retiredAtSeq: Math.min(pair[1].retiredAtSeq, sniffSequence),
+            retiredAt: pair[1].retiredAt,
+            videoCount: Number.isInteger(pair[1].videoCount) && pair[1].videoCount >= 0
+              ? Math.min(pair[1].videoCount, MAX_VIDEO_ITEMS)
+              : 0,
+          });
+        }
+        // PR #86 snapshots stored pausedFrames as [frameId, blobUrl]. Convert
+        // them to a retirement marker at the newest restored observation.
         for (const pair of Array.isArray(saved.pausedFrames) ? saved.pausedFrames : []) {
           if (
-            Array.isArray(pair) &&
-            pair.length === 2 &&
-            Number.isInteger(pair[0]) &&
-            pair[0] >= 0 &&
-            validBlobUrl(pair[1]) !== null &&
-            pausedFrames.size < MAX_VIDEO_FRAMES
-          ) {
-            pausedFrames.set(pair[0], pair[1]);
-          }
+            !Array.isArray(pair) ||
+            pair.length !== 2 ||
+            !Number.isInteger(pair[0]) ||
+            pair[0] < 0 ||
+            validBlobUrl(pair[1]) === null ||
+            retiredFrames.size >= MAX_VIDEO_FRAMES ||
+            retiredFrames.has(pair[0])
+          ) continue;
+          retiredFrames.set(pair[0], {
+            source: pair[1],
+            retiredAtSeq: sniffSequence,
+            retiredAt: Date.now(),
+            videoCount: 1,
+          });
         }
 
         const restored = {
           frames,
           sniffedByFrame,
+          mediaByFrame,
           kindsByFrame,
-          pausedFrames,
+          sniffSequencesByFrame,
+          sniffTimesByFrame,
+          retiredFrames,
+          sniffSequence,
           title: typeof saved.title === "string" ? saved.title.slice(0, MAX_VIDEO_TITLE_LENGTH) : "",
         };
         videoFinds.set(tabId, restored);
@@ -1079,6 +1508,10 @@ function domVideosFor(tabId) {
 function sniffedUrlsForFrame(finds, frameId) {
   if (finds.sniffedByFrame instanceof Map) return finds.sniffedByFrame.get(frameId) || [];
   return frameId === 0 && Array.isArray(finds.sniffed) ? finds.sniffed : [];
+}
+
+function mediaUrlsForFrame(finds, frameId) {
+  return finds.mediaByFrame instanceof Map ? finds.mediaByFrame.get(frameId) || [] : [];
 }
 
 function kindsForFrame(finds, frameId) {
@@ -1146,6 +1579,8 @@ function findVideoForSource(tabId, srcUrl, frameId) {
 async function resolvedBlobVideoUrlForFrame(tabId, frameId) {
   const finds = videoFinds.get(tabId);
   if (!finds) return null;
+  if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
+  if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return null;
   const videos = finds.frames.get(frameId) || [];
   if (videos.length !== 1 || videos[0].blob !== true) return null;
   let urls = mergedVideoUrlsForFrame(tabId, frameId);
@@ -1162,6 +1597,8 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId) {
 async function resolvedVideoUrlsForFrame(tabId, frameId) {
   const finds = videoFinds.get(tabId);
   if (!finds) return [];
+  if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
+  if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return [];
   const videos = finds.frames.get(frameId) || [];
   if (videos.length === 0) return [];
   if (videos.length > 1) {
@@ -1200,11 +1637,17 @@ async function resolvedVideoUrlsForFrame(tabId, frameId) {
 function menuVideoCandidatesForFrame(finds, frameId) {
   // A paused frame keeps its stream observations for resume, but must not
   // expose them as downloadable candidates until an active video is reported.
-  if (finds.pausedFrames instanceof Map && finds.pausedFrames.has(frameId)) return [];
+  if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return [];
   const videos = finds.frames.get(frameId) || [];
   const sniffed = sniffedUrlsForFrame(finds, frameId);
   const kinds = kindsForFrame(finds, frameId);
-  if (videos.length > 0) return mergeVideoFinds(videos, sniffed, kinds);
+  if (videos.length > 0) {
+    // Task A separates media storage so it cannot evict manifests, while
+    // preserving the pre-Task-B candidate behavior. Task B applies the
+    // per-element relevance rules to this bounded media ring.
+    const media = mediaUrlsForFrame(finds, frameId);
+    return mergeVideoFinds(videos, [...sniffed, ...media], kinds);
+  }
 
   const manifests = sniffed.filter((url) => {
     const kind = manifestKind(url) || kinds.get(urlPathKey(url));
@@ -1216,9 +1659,13 @@ function menuVideoCandidatesForFrame(finds, frameId) {
 async function resolvedVideoUrls(tabId) {
   const finds = videoFinds.get(tabId);
   if (!finds) return [];
+  if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
   const frameIds = new Set(finds.frames.keys());
   if (finds.sniffedByFrame instanceof Map) {
     for (const frameId of finds.sniffedByFrame.keys()) frameIds.add(frameId);
+  }
+  if (finds.mediaByFrame instanceof Map) {
+    for (const frameId of finds.mediaByFrame.keys()) frameIds.add(frameId);
   } else if (Array.isArray(finds.sniffed) && finds.sniffed.length > 0) {
     frameIds.add(0);
   }
@@ -1278,40 +1725,62 @@ function urlPathKey(u) {
   }
 }
 
-function noteSniffed(tabId, frameId, url, kind) {
-  if (!fitsGrabUrl(url)) return;
+function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now()) {
+  if (!fitsGrabUrl(url) || (kind !== "manifest" && kind !== "media")) return;
   let f = videoFinds.get(tabId);
   if (!f) {
     f = createVideoFinds();
     videoFinds.set(tabId, f);
   }
+  pruneExpiredRetiredFrames(f);
   const sourceFrame = Number.isInteger(frameId) && frameId >= 0 ? frameId : 0;
-  // A frame needs a slot before its manifest can be recorded: evict the
-  // oldest one instead of dropping the manifest, or a blob player that
-  // reports its video later can never be resolved.
   const tracked = trackedFrameIds(f);
   if (!tracked.has(sourceFrame) && tracked.size >= MAX_VIDEO_FRAMES) {
     if (!evictOldestFrame(f, sourceFrame)) return;
   }
+
   let kinds = f.kindsByFrame.get(sourceFrame);
   if (!kinds) {
     kinds = new Map();
     f.kindsByFrame.set(sourceFrame, kinds);
   }
-  kinds.set(urlPathKey(url), kind);
-  if (kinds.size > 200) kinds.delete(kinds.keys().next().value);
-  let urls = f.sniffedByFrame.get(sourceFrame);
+  const key = urlPathKey(url);
+  kinds.set(key, kind);
+
+  const listMap = kind === "manifest" ? f.sniffedByFrame : f.mediaByFrame;
+  let urls = listMap.get(sourceFrame);
   if (!urls) {
     urls = [];
-    f.sniffedByFrame.set(sourceFrame, urls);
+    listMap.set(sourceFrame, urls);
   }
-  const key = urlPathKey(url);
   const idx = urls.findIndex((candidate) => urlPathKey(candidate) === key);
   if (idx >= 0) urls[idx] = url;
-  else {
-    urls.push(url);
-    if (urls.length > MAX_VIDEO_ITEMS) urls.splice(0, urls.length - MAX_VIDEO_ITEMS);
+  else urls.push(url);
+
+  const sequences = sniffSequenceMapForFrame(f, sourceFrame, true);
+  sequences.set(key, nextSniffSequence(f));
+  const times = sniffTimeMapForFrame(f, sourceFrame, true);
+  times.set(key, validLifecycleTime(observedAt));
+
+  const limit = kind === "manifest"
+    ? MAX_MANIFESTS_PER_FRAME
+    : MAX_MEDIA_SNIFFS_PER_FRAME;
+  while (urls.length > limit) {
+    const removed = urls.shift();
+    const removedKey = urlPathKey(removed);
+    const otherList = kind === "manifest" ? f.mediaByFrame.get(sourceFrame) : f.sniffedByFrame.get(sourceFrame);
+    const stillPresent = Array.isArray(otherList) &&
+      otherList.some((candidate) => urlPathKey(candidate) === removedKey);
+    if (!stillPresent) {
+      sequences.delete(removedKey);
+      times.delete(removedKey);
+      kinds.delete(removedKey);
+    }
   }
+  if (urls.length === 0) listMap.delete(sourceFrame);
+  if (sequences.size === 0) f.sniffSequencesByFrame.delete(sourceFrame);
+  if (times.size === 0) f.sniffTimesByFrame.delete(sourceFrame);
+  if (kinds.size === 0) f.kindsByFrame.delete(sourceFrame);
 }
 
 // Refreshes are serialized through a promise chain: burst manifest traffic
@@ -1521,7 +1990,13 @@ async function onSniffedResponse(details) {
   // here (not just at menu-build) keeps videoFinds clean.
   if (await isExcludedTab(details.tabId)) return;
   await restoreVideoFinds(details.tabId);
-  noteSniffed(details.tabId, details.frameId, details.url, kind);
+  noteSniffed(
+    details.tabId,
+    details.frameId,
+    details.url,
+    kind,
+    Number.isFinite(details.timeStamp) ? details.timeStamp : Date.now(),
+  );
   await persistVideoFinds(details.tabId);
   onVideoEvent(details.tabId);
   // A sniffed manifest may belong to a shadow-root player whose play
@@ -1648,26 +2123,12 @@ async function onVideoReport(msg, sender) {
     f = createVideoFinds();
     videoFinds.set(tabId, f);
   }
-  if (!(f.pausedFrames instanceof Map)) f.pausedFrames = new Map();
-  // Bound frame state before accepting reports. Preserve the top frame when
-  // replacing an older entry because its title tracks SPA navigation; evict
-  // the oldest other frame instead, so a page that keeps adding frames keeps
-  // detecting videos instead of hitting a permanent wall.
-  let changed = false;
-  // Validate the report before touching any state: an empty report from a
-  // frame without a video must not evict a live detection.
+  let changed = pruneExpiredRetiredFrames(f);
   const candidates = normalizeVideoReport(msg.videos, MAX_VIDEO_ITEMS);
-  // Capture the prior snapshot and pause identity before mutating either.
   const previousVideos = f.frames.get(frameId) || [];
-  const pausedSource = f.pausedFrames.get(frameId) || null;
+  const retiredBeforeReport = f.retiredFrames.get(frameId) || null;
   const lifecycle = msg.lifecycle;
-  const preservesManifest = lifecycle === "pause" || lifecycle === "ended";
-  const lifecycleSource =
-    typeof msg.lifecycleSource === "string" &&
-    msg.lifecycleSource.length <= 4096 &&
-    (fitsGrabUrl(msg.lifecycleSource) || validBlobUrl(msg.lifecycleSource))
-      ? msg.lifecycleSource
-      : null;
+  const lifecycleSource = validLifecycleSource(msg.lifecycleSource);
   const previousVideoSources = previousVideos.map((video) => {
     if (!video || typeof video !== "object") return null;
     return video.blob === true
@@ -1675,20 +2136,34 @@ async function onVideoReport(msg, sender) {
       : (typeof video.src === "string" && fitsGrabUrl(video.src) ? video.src : null);
   }).filter(Boolean);
   const lifecycleMatchesKnownSource =
-    lifecycleSource !== null &&
-    (previousVideoSources.includes(lifecycleSource) || pausedSource === lifecycleSource);
+    lifecycleSource === null ||
+    previousVideoSources.includes(lifecycleSource) ||
+    Boolean(retiredBeforeReport && retiredBeforeReport.source === lifecycleSource);
   const unrelatedLifecycle =
     msg.replaceFrame === true &&
     lifecycleSource !== null &&
-    (previousVideos.length > 0 || pausedSource !== null) &&
+    (previousVideos.length > 0 || Boolean(retiredBeforeReport && retiredBeforeReport.source)) &&
     !lifecycleMatchesKnownSource;
   const replaceFrame = msg.replaceFrame === true && !unrelatedLifecycle;
+  const previousSoleBlobSource =
+    previousVideos.length === 1 && previousVideos[0].blob === true
+      ? validBlobUrl(previousVideos[0].blobUrl)
+      : null;
+  const coalescedSameBlobResume =
+    replaceFrame &&
+    lifecycle !== "reset" &&
+    lifecycleSource !== null &&
+    (
+      previousSoleBlobSource === lifecycleSource ||
+      (retiredBeforeReport && retiredBeforeReport.source === lifecycleSource)
+    ) &&
+    candidates.length === 1 &&
+    candidates[0].blob === true &&
+    validBlobUrl(candidates[0].blobUrl) === lifecycleSource;
 
   if (candidates.length > 0) {
     // Bound frame state before accepting reports. Preserve the top frame when
-    // replacing an older entry because its title tracks SPA navigation; evict
-    // the oldest other frame instead, so a page that keeps adding frames keeps
-    // detecting videos instead of hitting a permanent wall.
+    // replacing an older entry because its title tracks SPA navigation.
     const tracked = trackedFrameIds(f);
     if (!tracked.has(frameId) && tracked.size >= MAX_VIDEO_FRAMES) {
       if (evictOldestFrame(f, frameId)) changed = true;
@@ -1704,66 +2179,57 @@ async function onVideoReport(msg, sender) {
     const videos = candidates.slice(0, allowance);
 
     if (videos.length > 0) {
+      if (retiredBeforeReport && (!replaceFrame || coalescedSameBlobResume)) {
+        if (resumeRetiredFrame(f, frameId, videos)) changed = true;
+      }
       f.frames.set(frameId, videos);
       changed = true;
-      if (pausedSource !== null) {
-        const resumedSameBlob =
-          videos.length === 1 &&
-          videos[0].blob === true &&
-          validBlobUrl(videos[0].blobUrl) === pausedSource;
-        f.pausedFrames.delete(frameId);
-        if (!resumedSameBlob) {
-          // A different player/source resumed in this frame. Its relationship
-          // to the retained frame-level manifest is unknown, so discard it.
-          f.sniffedByFrame.delete(frameId);
-          f.kindsByFrame.delete(frameId);
-        }
-      }
     }
   } else if (replaceFrame) {
-    // Empty pause/end/reset report retires the active DOM snapshot.
     f.frames.delete(frameId);
     changed = true;
   }
 
-  const previousSoleBlobSource =
-    previousVideos.length === 1 && previousVideos[0].blob === true
-      ? validBlobUrl(previousVideos[0].blobUrl)
-      : null;
-  const sameSingleActiveBlob =
-    candidates.length === 1 &&
-    candidates[0].blob === true &&
-    validBlobUrl(candidates[0].blobUrl) === lifecycleSource;
-  const canRetainPausedBlobManifest =
-    preservesManifest &&
-    lifecycleMatchesKnownSource &&
-    lifecycleSource !== null &&
-    (
-      pausedSource === lifecycleSource ||
-      (
-        previousSoleBlobSource === lifecycleSource &&
-        (candidates.length === 0 || sameSingleActiveBlob)
-      )
+  if (replaceFrame && !coalescedSameBlobResume) {
+    const retirementSource =
+      lifecycleSource ||
+      previousSoleBlobSource ||
+      (retiredBeforeReport && retiredBeforeReport.source) ||
+      null;
+    const retiredChanged = recordRetiredFrame(
+      f,
+      frameId,
+      retirementSource,
+      previousVideos.length,
+      msg.lifecycleAt,
     );
+    if (retiredChanged) changed = true;
 
-  if (replaceFrame && canRetainPausedBlobManifest && candidates.length === 0) {
-    // Only the pause/end of the sole identified blob player retains manifests.
-    if (!f.pausedFrames.has(frameId)) {
-      const tracked = trackedFrameIds(f);
-      if (!tracked.has(frameId) && tracked.size >= MAX_VIDEO_FRAMES) {
-        evictOldestFrame(f, frameId);
-      }
-      f.pausedFrames.set(frameId, lifecycleSource);
-      changed = true;
+    // A pause/end report can be coalesced with another player's active report.
+    // Apply the marker to that new snapshot immediately; reset reports stay
+    // retired until a later non-lifecycle active report arrives.
+    if (
+      candidates.length > 0 &&
+      lifecycle !== "reset" &&
+      lifecycleSource !== null &&
+      !candidates.some((video) =>
+        video && video.blob === true &&
+        validBlobUrl(video.blobUrl) === lifecycleSource
+      )
+    ) {
+      if (resumeRetiredFrame(f, frameId, candidates)) changed = true;
     }
-  } else if (replaceFrame && !canRetainPausedBlobManifest) {
-    // Reset, unknown lifecycle, or ambiguous multi-player transition keeps the
-    // established conservative behavior: discard frame-wide observations.
-    f.pausedFrames.delete(frameId);
-    f.sniffedByFrame.delete(frameId);
-    f.kindsByFrame.delete(frameId);
+  }
+
+  if (
+    candidates.length > 0 &&
+    !replaceFrame &&
+    retiredBeforeReport &&
+    resumeRetiredFrame(f, frameId, candidates)
+  ) {
     changed = true;
   }
+
   // The video's own title for menu labels.
   // The top frame's title follows the page (SPAs change it without a
   // navigation); a subframe only fills a gap.

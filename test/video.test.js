@@ -1252,7 +1252,7 @@ describe("detection wiring", () => {
     );
     const finds = bg._videoFinds.get(tabId);
     assert.equal(finds.frames.has(0), false, "paused DOM snapshot is retired");
-    assert.ok(finds.pausedFrames.has(0), "frame is marked paused");
+    assert.ok(finds.retiredFrames.has(0), "frame is marked retired");
     assert.deepEqual(finds.sniffedByFrame.get(0), [manifest], "manifest is retained");
     assert.deepEqual(await bg.resolvedVideoUrls(tabId), [], "paused stream is hidden from the menu");
 
@@ -1260,9 +1260,70 @@ describe("detection wiring", () => {
       { type: "grab-videos-detected", videos: [video] },
       sender,
     );
-    assert.equal(finds.pausedFrames.has(0), false, "resume clears the paused marker");
+    assert.equal(finds.retiredFrames.has(0), false, "resume clears the paused marker");
     assert.deepEqual(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), manifest);
     assert.deepEqual(await bg.resolvedVideoUrls(tabId), [manifest]);
+  });
+
+  test("pause and resume of the same blob before the debounced report keeps the manifest", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 168;
+    const manifest = "https://cdn.example.com/session/master.m3u8";
+    const video = { src: null, blob: true, blobUrl: "blob:https://example.com/debounce" };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"]({ type: "grab-videos-detected", videos: [video] }, sender);
+    // pause then play within the 400 ms content-script debounce is represented
+    // by one active report carrying the coalesced pause lifecycle.
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [video],
+        replaceFrame: true,
+        lifecycle: "pause",
+        lifecycleSource: video.blobUrl,
+        lifecycleAt: Date.now(),
+      },
+      sender,
+    );
+    assert.deepEqual(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), manifest);
+    assert.equal(bg._videoFinds.get(tabId).retiredFrames.has(0), false);
+  });
+
+  test("pause and resume of the same blob after the debounced report keeps the manifest", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 169;
+    const manifest = "https://cdn.example.com/session/master.m3u8";
+    const video = { src: null, blob: true, blobUrl: "blob:https://example.com/delayed" };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"]({ type: "grab-videos-detected", videos: [video] }, sender);
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [],
+        replaceFrame: true,
+        lifecycle: "pause",
+        lifecycleSource: video.blobUrl,
+        lifecycleAt: Date.now(),
+      },
+      sender,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 425));
+    await L["runtime.onMessage"]({ type: "grab-videos-detected", videos: [video] }, sender);
+    assert.deepEqual(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), manifest);
   });
 
   test("a repeated pause report preserves the already-paused blob manifest", async () => {
@@ -1292,7 +1353,7 @@ describe("detection wiring", () => {
     await L["runtime.onMessage"](pause, sender);
 
     const finds = bg._videoFinds.get(tabId);
-    assert.equal(finds.pausedFrames.get(0), video.blobUrl);
+    assert.equal(finds.retiredFrames.get(0).source, video.blobUrl);
     assert.deepEqual(finds.sniffedByFrame.get(0), [manifest]);
     assert.deepEqual(await bg.resolvedVideoUrls(tabId), []);
   });
@@ -1322,7 +1383,7 @@ describe("detection wiring", () => {
     );
     const finds = bg._videoFinds.get(tabId);
     assert.deepEqual(finds.sniffedByFrame.get(0), [manifest]);
-    assert.equal(finds.pausedFrames.has(0), false, "the same active player is not left hidden");
+    assert.equal(finds.retiredFrames.has(0), false, "the same active player is not left hidden");
     assert.deepEqual(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), manifest);
   });
 
@@ -1364,7 +1425,7 @@ describe("detection wiring", () => {
     const finds = bg._videoFinds.get(tabId);
     assert.deepEqual(finds.frames.get(0), [activeVideo]);
     assert.equal(finds.sniffedByFrame.has(0), false, "ambiguous frame manifests are discarded");
-    assert.equal(finds.pausedFrames.has(0), false);
+    assert.equal(finds.retiredFrames.has(0), false);
   });
 
   test("an unrelated video reset does not clear the sole active blob player's manifest", async () => {
@@ -1429,9 +1490,9 @@ describe("detection wiring", () => {
       sender,
     );
     const finds = bg._videoFinds.get(tabId);
-    assert.equal(finds.sniffedByFrame.has(0), false);
-    assert.equal(finds.kindsByFrame.has(0), false);
-    assert.equal(finds.pausedFrames.has(0), false);
+    assert.deepEqual(finds.sniffedByFrame.get(0), [manifest]);
+    assert.ok(finds.retiredFrames.has(0), "reset retains observations but retires the frame");
+    assert.deepEqual(await bg.resolvedVideoUrls(tabId), []);
   });
 
   test("paused frame markers remain within the shared frame budget", async () => {
@@ -1464,13 +1525,13 @@ describe("detection wiring", () => {
     }
 
     const finds = bg._videoFinds.get(tabId);
-    assert.equal(finds.pausedFrames.size, bg.MAX_VIDEO_FRAMES);
-    assert.ok(finds.pausedFrames.has(0), "the top frame remains tracked");
-    assert.ok(finds.pausedFrames.has(bg.MAX_VIDEO_FRAMES + 2), "the newest frame is retained");
-    assert.ok(!finds.pausedFrames.has(1), "the oldest non-top frame is evicted");
+    assert.equal(finds.retiredFrames.size, bg.MAX_VIDEO_FRAMES);
+    assert.ok(finds.retiredFrames.has(0), "the top frame remains tracked");
+    assert.ok(finds.retiredFrames.has(bg.MAX_VIDEO_FRAMES + 2), "the newest frame is retained");
+    assert.ok(!finds.retiredFrames.has(1), "the oldest non-top frame is evicted");
   });
 
-  test("resuming a different blob source discards the paused source manifest", async () => {
+  test("a different blob URL without a new manifest retains the previous stream candidate", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);
     const L = chrome._listeners;
@@ -1507,9 +1568,9 @@ describe("detection wiring", () => {
       { type: "grab-videos-detected", videos: [newVideo] }, sender,
     );
     const finds = bg._videoFinds.get(tabId);
-    assert.equal(finds.pausedFrames.has(0), false);
-    assert.equal(finds.sniffedByFrame.has(0), false);
-    assert.deepEqual(await bg.resolvedVideoUrls(tabId), []);
+    assert.equal(finds.retiredFrames.has(0), false);
+    assert.deepEqual(finds.sniffedByFrame.get(0), [manifest]);
+    assert.deepEqual(await bg.resolvedVideoUrls(tabId), [manifest]);
   });
 
   test("paused blob manifest state survives a worker restart and resumes cleanly", async () => {
@@ -1536,19 +1597,356 @@ describe("detection wiring", () => {
     );
     await tick();
     const saved = shared.session.get("videoFinds:v2:" + tabId);
-    assert.deepEqual(saved.pausedFrames, [[0, video.blobUrl]]);
+    assert.deepEqual(saved.retiredFrames.map(([frameId, retired]) => [
+      frameId, retired.source, retired.retiredAtSeq,
+    ]), [[0, video.blobUrl, saved.sniffSequence]]);
     assert.deepEqual(saved.sniffedFrames, [[0, [manifest]]]);
 
     const restarted = makeChrome(shared);
     const restartedBg = loadBackground(restarted);
     await restartedBg._restoreVideoFinds(tabId);
-    assert.equal(restartedBg._videoFinds.get(tabId).pausedFrames.get(0), video.blobUrl);
+    assert.equal(restartedBg._videoFinds.get(tabId).retiredFrames.get(0).source, video.blobUrl);
     assert.deepEqual(await restartedBg.resolvedVideoUrls(tabId), []);
 
     await restarted._listeners["runtime.onMessage"](
       { type: "grab-videos-detected", videos: [video] }, sender,
     );
     assert.deepEqual(await restartedBg.resolvedVideoUrls(tabId), [manifest]);
+  });
+
+  test("reset with no new manifest keeps the previous manifest for a reattached blob", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 160;
+    const manifest = "https://cdn.example.com/old/master.m3u8";
+    const oldVideo = {
+      src: null, blob: true, blobUrl: "blob:https://example.com/old"
+    };
+    const newVideo = {
+      src: null, blob: true, blobUrl: "blob:https://example.com/reattached"
+    };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+    const resetAt = Date.now();
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifest, timeStamp: resetAt - 100,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"]({ type: "grab-videos-detected", videos: [oldVideo] }, sender);
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [],
+        replaceFrame: true,
+        lifecycle: "reset",
+        lifecycleSource: oldVideo.blobUrl,
+        lifecycleAt: resetAt,
+      },
+      sender,
+    );
+
+    assert.deepEqual(await bg.resolvedVideoUrls(tabId), []);
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [newVideo] }, sender,
+    );
+    assert.equal(bg._videoFinds.get(tabId).retiredFrames.has(0), false);
+    assert.deepEqual(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), manifest);
+  });
+
+  test("reset drops pre-reset manifest but keeps a manifest sniffed before the new blob reports", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 161;
+    const oldManifest = "https://cdn.example.com/old/master.m3u8";
+    const newManifest = "https://cdn.example.com/new/master.m3u8";
+    const oldVideo = {
+      src: null, blob: true, blobUrl: "blob:https://example.com/old"
+    };
+    const newVideo = {
+      src: null, blob: true, blobUrl: "blob:https://example.com/new"
+    };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: oldManifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"]({ type: "grab-videos-detected", videos: [oldVideo] }, sender);
+    const resetAt = Date.now();
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [],
+        replaceFrame: true,
+        lifecycle: "reset",
+        lifecycleSource: oldVideo.blobUrl,
+        lifecycleAt: resetAt,
+      },
+      sender,
+    );
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: newManifest, timeStamp: resetAt + 25,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [newVideo] }, sender,
+    );
+    assert.deepEqual(bg._videoFinds.get(tabId).sniffedByFrame.get(0), [newManifest]);
+    assert.deepEqual(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), newManifest);
+  });
+
+  test("pause A, sniff B, then play B keeps B and drops A", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 162;
+    const manifestA = "https://cdn.example.com/a/master.m3u8";
+    const manifestB = "https://cdn.example.com/b/master.m3u8";
+    const videoA = { src: null, blob: true, blobUrl: "blob:https://example.com/player-a" };
+    const videoB = { src: null, blob: true, blobUrl: "blob:https://example.com/player-b" };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifestA, timeStamp: Date.now() - 100,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"]({ type: "grab-videos-detected", videos: [videoA] }, sender);
+
+    const pauseAt = Date.now();
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifestB, timeStamp: pauseAt + 25,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [],
+        replaceFrame: true,
+        lifecycle: "pause",
+        lifecycleSource: videoA.blobUrl,
+        lifecycleAt: pauseAt,
+      },
+      sender,
+    );
+    await L["runtime.onMessage"]({ type: "grab-videos-detected", videos: [videoB] }, sender);
+
+    assert.deepEqual(bg._videoFinds.get(tabId).sniffedByFrame.get(0), [manifestB]);
+    assert.deepEqual(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), manifestB);
+  });
+
+  test("60 mp4 media sniffs cannot evict the manifest and remain in a bounded ring", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 163;
+    const manifest = "https://cdn.example.com/live/master.m3u8";
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    for (let i = 0; i < 60; i += 1) {
+      await L["webRequest.onResponseStarted"]({
+        tabId,
+        frameId: 0,
+        url: `https://cdn.example.com/live/segment-${i}.mp4`,
+        responseHeaders: [{ name: "content-type", value: "video/mp4" }],
+      });
+    }
+
+    const finds = bg._videoFinds.get(tabId);
+    assert.deepEqual(finds.sniffedByFrame.get(0), [manifest]);
+    assert.equal(finds.mediaByFrame.get(0).length, 8);
+    assert.equal(finds.sniffSequence, 61);
+  });
+
+  test("retired frame markers expire and remove only pre-retirement observations", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 164;
+    const oldManifest = "https://cdn.example.com/old/master.m3u8";
+    const newManifest = "https://cdn.example.com/new/master.m3u8";
+    const video = {
+      src: null, blob: true, blobUrl: "blob:https://example.com/old"
+    };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: oldManifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"]({ type: "grab-videos-detected", videos: [video] }, sender);
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [],
+        replaceFrame: true,
+        lifecycle: "reset",
+        lifecycleSource: video.blobUrl,
+        lifecycleAt: Date.now(),
+      },
+      sender,
+    );
+    const finds = bg._videoFinds.get(tabId);
+    const retired = finds.retiredFrames.get(0);
+    finds.retiredFrames.set(0, { ...retired, retiredAt: Date.now() - 6 * 60 * 1000 });
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: newManifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    assert.equal(finds.retiredFrames.has(0), false);
+    assert.deepEqual(finds.sniffedByFrame.get(0), [newManifest]);
+  });
+
+  test("expired retired state is cleared by frame-specific URL resolution", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 170;
+    const manifest = "https://cdn.example.com/live/master.m3u8";
+    const video = { src: null, blob: true, blobUrl: "blob:https://example.com/expired" };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [video] }, sender,
+    );
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [],
+        replaceFrame: true,
+        lifecycle: "reset",
+        lifecycleSource: video.blobUrl,
+        lifecycleAt: Date.now(),
+      },
+      sender,
+    );
+
+    const finds = bg._videoFinds.get(tabId);
+    finds.retiredFrames.get(0).retiredAt = Date.now() - 6 * 60 * 1000;
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), null);
+    assert.equal(finds.retiredFrames.has(0), false);
+    assert.equal(finds.sniffedByFrame.has(0), false);
+    assert.equal(finds.frames.has(0), false);
+  });
+
+  test("pause with multiple active videos deliberately drops ambiguous retained manifests", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 165;
+    const manifest = "https://cdn.example.com/ambiguous/master.m3u8";
+    const videoA = { src: null, blob: true, blobUrl: "blob:https://example.com/a" };
+    const videoB = { src: null, blob: true, blobUrl: "blob:https://example.com/b" };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [videoA, videoB] }, sender,
+    );
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [],
+        replaceFrame: true,
+        lifecycle: "pause",
+        lifecycleSource: videoA.blobUrl,
+      },
+      sender,
+    );
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [videoB] }, sender,
+    );
+
+    assert.equal(bg._videoFinds.get(tabId).sniffedByFrame.has(0), false);
+    assert.deepEqual(await bg.resolvedVideoUrls(tabId), []);
+  });
+
+  test("retirement marker and sequence/time maps survive restore; legacy v2 restores", async () => {
+    const shared = {};
+    const chrome = makeChrome(shared);
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 166;
+    const manifest = "https://cdn.example.com/old/master.m3u8";
+    const video = { src: null, blob: true, blobUrl: "blob:https://example.com/old" };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+    const sniffAt = Date.now() - 100;
+    const pauseAt = Date.now();
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifest, timeStamp: sniffAt,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"]({ type: "grab-videos-detected", videos: [video] }, sender);
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [],
+        replaceFrame: true,
+        lifecycle: "reset",
+        lifecycleSource: video.blobUrl,
+        lifecycleAt: pauseAt,
+      },
+      sender,
+    );
+    await bg._persistVideoFinds(tabId);
+
+    const saved = shared.session.get("videoFinds:v2:" + tabId);
+    assert.equal(saved.sniffSequence, 1);
+    assert.deepEqual(saved.retiredFrames.map(([frameId, retired]) => [
+      frameId, retired.source, retired.retiredAtSeq,
+    ]), [[0, video.blobUrl, 1]]);
+    assert.deepEqual(saved.sniffSequences, [[0, [[
+      "https://cdn.example.com/old/master.m3u8", 1,
+    ]]]]);
+    assert.deepEqual(saved.sniffTimes, [[0, [[
+      "https://cdn.example.com/old/master.m3u8", sniffAt,
+    ]]]]);
+
+    const restoredChrome = makeChrome(shared);
+    const restoredBg = loadBackground(restoredChrome);
+    await restoredBg._restoreVideoFinds(tabId);
+    const restored = restoredBg._videoFinds.get(tabId);
+    assert.equal(restored.sniffSequence, 1);
+    assert.equal(restored.retiredFrames.get(0).retiredAtSeq, 1);
+    assert.equal(restored.sniffTimesByFrame.get(0).get("https://cdn.example.com/old/master.m3u8"), sniffAt);
+    assert.deepEqual(await restoredBg.resolvedVideoUrls(tabId), []);
+    await restoredChrome._listeners["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [video] }, sender,
+    );
+    assert.equal(restored.retiredFrames.has(0), false);
+    assert.deepEqual(await restoredBg.resolvedBlobVideoUrlForFrame(tabId, 0), manifest);
+
+    const legacyShared = {
+      session: new Map([["videoFinds:v2:167", {
+        version: 2,
+        frames: [[0, [video]]],
+        sniffedFrames: [[0, [manifest]]],
+        kindsFrames: [[0, [[manifest, "manifest"]]]],
+        pausedFrames: [[0, video.blobUrl]],
+        title: "Legacy",
+      }]]),
+    };
+    const legacyBg = loadBackground(makeChrome(legacyShared));
+    await legacyBg._restoreVideoFinds(167);
+    const legacy = legacyBg._videoFinds.get(167);
+    assert.deepEqual(legacy.sniffedByFrame.get(0), [manifest]);
+    assert.equal(legacy.sniffSequence, 1);
+    assert.equal(legacy.retiredFrames.get(0).source, video.blobUrl);
+    assert.equal(legacy.retiredFrames.get(0).retiredAtSeq, 1);
   });
 
   test("multiple players expose separate network candidates without guessing an element match", async () => {

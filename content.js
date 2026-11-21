@@ -131,6 +131,7 @@ if (
 ) {
   let pendingFrameLifecycle = null;
   let pendingFrameLifecycleSource = null;
+  let pendingFrameLifecycleAt = null;
   let lastSent = "";
   const lastVideoSource = new WeakMap();
   const frameLifecyclePriority = { pause: 1, ended: 2, reset: 3 };
@@ -150,7 +151,7 @@ if (
     return current || lastVideoSource.get(video) || null;
   }
 
-  function report(lifecycleOverride = null, lifecycleSourceOverride = null) {
+  function report(lifecycleOverride = null, lifecycleSourceOverride = null, lifecycleAtOverride = null) {
     // Full scans happen on startup, media events, and worker rescan requests,
     // not on every pointer/click interaction.
     const videos = collectVideos(
@@ -164,14 +165,22 @@ if (
     // the debounce window (a reset must not be downgraded to a pause).
     const pendingPriority = frameLifecyclePriority[pendingFrameLifecycle] || 0;
     const overridePriority = frameLifecyclePriority[lifecycleOverride] || 0;
-    const lifecycle = overridePriority > pendingPriority
+    const samePriorityLifecycle = overridePriority > 0 && overridePriority === pendingPriority;
+    const lifecycle = overridePriority > pendingPriority || samePriorityLifecycle
       ? lifecycleOverride
       : pendingFrameLifecycle;
-    const lifecycleSource = overridePriority > pendingPriority
-      ? lifecycleSourceOverride
-      : pendingFrameLifecycleSource;
+    const lifecycleSource = samePriorityLifecycle
+      ? (lifecycleSourceOverride === pendingFrameLifecycleSource
+        ? lifecycleSourceOverride
+        : null)
+      : (overridePriority > pendingPriority
+        ? lifecycleSourceOverride
+        : pendingFrameLifecycleSource);
+    const lifecycleTimes = [lifecycleAtOverride, pendingFrameLifecycleAt].filter(Number.isFinite);
+    const lifecycleAt = lifecycleTimes.length ? Math.min(...lifecycleTimes) : null;
     pendingFrameLifecycle = null;
     pendingFrameLifecycleSource = null;
+    pendingFrameLifecycleAt = null;
     const replaceFrame = lifecycle !== null;
     // The title is part of the snapshot: an SPA can change it with no new
     // video, and the menu labels must follow.
@@ -186,6 +195,7 @@ if (
     };
     if (lifecycle) message.lifecycle = lifecycle;
     if (typeof lifecycleSource === "string") message.lifecycleSource = lifecycleSource;
+    if (Number.isFinite(lifecycleAt)) message.lifecycleAt = lifecycleAt;
     const sent = chrome.runtime.sendMessage(message);
     // Rejects when no receiver is listening (worker restarting, or a stale
     // script after an extension update). Nothing to recover.
@@ -193,20 +203,23 @@ if (
   }
 
   let timer = null;
-  function scheduleReport(lifecycle = null, lifecycleSource = null) {
+  function scheduleReport(lifecycle = null, lifecycleSource = null, lifecycleAt = null) {
     const incomingPriority = frameLifecyclePriority[lifecycle] || 0;
     const pendingPriority = frameLifecyclePriority[pendingFrameLifecycle] || 0;
     if (lifecycle && incomingPriority > pendingPriority) {
       pendingFrameLifecycle = lifecycle;
       pendingFrameLifecycleSource = lifecycleSource;
-    } else if (
-      lifecycle &&
-      incomingPriority === pendingPriority &&
-      lifecycleSource !== pendingFrameLifecycleSource
-    ) {
-      // Coalesced events from different elements are ambiguous. Do not attribute
-      // a frame-level manifest to whichever element happened to fire last.
-      pendingFrameLifecycleSource = null;
+      pendingFrameLifecycleAt = lifecycleAt;
+    } else if (lifecycle && incomingPriority === pendingPriority) {
+      pendingFrameLifecycleAt =
+        Number.isFinite(lifecycleAt) && Number.isFinite(pendingFrameLifecycleAt)
+          ? Math.min(lifecycleAt, pendingFrameLifecycleAt)
+          : (Number.isFinite(lifecycleAt) ? lifecycleAt : pendingFrameLifecycleAt);
+      if (lifecycleSource !== pendingFrameLifecycleSource) {
+        // Coalesced events from different elements are ambiguous. Do not attribute
+        // the frame-level manifest to whichever element happened to fire last.
+        pendingFrameLifecycleSource = null;
+      }
     }
     if (timer) clearTimeout(timer);
     timer = setTimeout(report, 400);
@@ -228,6 +241,7 @@ if (
       scheduleReport(
         e.type === "ended" ? "ended" : "pause",
         rememberVideoSource(t),
+        Date.now(),
       );
     }
   }
@@ -242,7 +256,7 @@ if (
     // source requests normally arrive. Pause/end remain debounced.
     if (timer) clearTimeout(timer);
     timer = null;
-    report("reset", source);
+    report("reset", source, Date.now());
   }
 
   function onLoadedMetadata(e) {
