@@ -2367,7 +2367,7 @@ function isSegmentLikeVideoUrl(url) {
     if (/^(?:preview|trailer|teaser|ad|advert|advertisement|promo|thumbnail|thumb|storyboard|sprite|preroll|midroll|postroll|prefetch)(?:[._-]|$)/.test(basename)) {
       return true;
     }
-    return /^(?:seg(?:ment)?\d+|(?:chunk|frag(?:ment)?)[._-]+\d+)(?:[._-]|$)/.test(basename);
+    return /^(?:seg(?:ment)?[._-]?\d+|(?:chunk|frag(?:ment)?)[._-]+\d+)(?:[._-]|$)/.test(basename);
   } catch {
     return true;
   }
