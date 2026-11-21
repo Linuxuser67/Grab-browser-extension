@@ -738,24 +738,93 @@ describe("per-video menu candidates", () => {
     assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [contentMaster]);
   });
 
-  test("a rendition more than one directory below a master is not collapsed by ancestry", async () => {
-    const master = "http://192.168.1.20/vod/playlist.m3u8";
-    const deepRendition = "http://192.168.1.20/vod/hls/720p/stream.m3u8";
+  // Picks the single menu link for one blob player whose playlists were first
+  // requested at the given times (ms) relative to loadstart at 20_000.
+  async function pickedPlaylist(requests) {
     chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
+    const urls = requests.map(([path]) => `http://192.168.1.20${path}`);
+    const firstSeen = new Map(requests.map(([path, at]) => [pathKey(`http://192.168.1.20${path}`), at]));
     const findings = makeFinds(
       [{
         src: null, blob: true, blobUrl: "blob:https://page.example/player",
-        elementId: 1, loadStartedAt: 10_000,
+        elementId: 1, loadStartedAt: 20_000,
       }],
-      [master, deepRendition],
-      new Map([[pathKey(master), 9_200], [pathKey(deepRendition), 9_700]]),
+      urls,
+      new Map(firstSeen),
     );
-    findings.sniffFirstSeenByFrame.set(0, new Map([
-      [pathKey(master), 9_200],
-      [pathKey(deepRendition), 9_700],
-    ]));
+    findings.sniffFirstSeenByFrame.set(0, firstSeen);
+    return bg.menuVideoCandidatesForFrame(findings, 0);
+  }
 
-    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [deepRendition]);
+  test("a rendition up to three directories below a master collapses into it", async () => {
+    assert.deepEqual(
+      await pickedPlaylist([["/vod/playlist.m3u8", 19_200], ["/vod/hls/720p/stream.m3u8", 19_700]]),
+      ["http://192.168.1.20/vod/playlist.m3u8"],
+    );
+    assert.deepEqual(
+      await pickedPlaylist([["/v/abc/master.m3u8", 19_200], ["/v/abc/hls/720p/index.m3u8", 19_700]]),
+      ["http://192.168.1.20/v/abc/master.m3u8"],
+    );
+  });
+
+  test("renditions deeper than the depth limit are not collapsed by ancestry", async () => {
+    assert.deepEqual(
+      await pickedPlaylist([["/vod/playlist.m3u8", 19_200], ["/vod/a/b/c/d/720p/stream.m3u8", 19_700]]),
+      ["http://192.168.1.20/vod/a/b/c/d/720p/stream.m3u8"],
+    );
+  });
+
+  test("a same-directory rendition collapses into a master-named playlist before loadstart", async () => {
+    assert.deepEqual(
+      await pickedPlaylist([["/v/master.m3u8", 19_200], ["/v/720p.m3u8", 19_700]]),
+      ["http://192.168.1.20/v/master.m3u8"],
+    );
+  });
+
+  test("a same-directory rendition collapses into a name-prefix parent", async () => {
+    assert.deepEqual(
+      await pickedPlaylist([["/vod/movie.m3u8", 19_200], ["/vod/movie_1080p.m3u8", 19_700]]),
+      ["http://192.168.1.20/vod/movie.m3u8"],
+    );
+  });
+
+  test("a single-rendition content file is not hidden by an unrelated same-directory playlist", async () => {
+    assert.deepEqual(
+      await pickedPlaylist([["/vod/promo.m3u8", 1_000], ["/vod/movie_1080p.m3u8", 19_800]]),
+      ["http://192.168.1.20/vod/movie_1080p.m3u8"],
+    );
+  });
+
+  test("a rendition-named playlist never acts as the parent of another rendition", () => {
+    const low = "http://192.168.1.20/v/720p.m3u8";
+    const high = "http://192.168.1.20/v/1080p.m3u8";
+    const keys = bg.nestedHlsPlaylistChildKeys(
+      [low, high],
+      new Map([[pathKey(low), 1_000], [pathKey(high), 2_000]]),
+    );
+    assert.equal(keys.size, 0);
+  });
+
+  test("ids, years and video-prefixed directories do not look like renditions", async () => {
+    for (const dir of ["1234", "2024", "video-abc", "video_12345", "title-42"]) {
+      assert.deepEqual(
+        await pickedPlaylist([["/vod/a.m3u8", 1_000], [`/vod/${dir}/master.m3u8`, 19_800]]),
+        [`http://192.168.1.20/vod/${dir}/master.m3u8`],
+        dir,
+      );
+    }
+  });
+
+  test("rendition markers are standard heights, p-suffixed heights, bitrates and level names", () => {
+    for (const path of [
+      "720p/stream.m3u8", "1080/index.m3u8", "video_720p/index.m3u8", "variant2/x.m3u8",
+      "level3/x.m3u8", "800k/index.m3u8", "1500kbps/index.m3u8", "chunklist_w1.m3u8",
+      "prog_index.m3u8", "stream_480p.m3u8",
+    ]) assert.equal(bg.isHlsRenditionPlaylistPath(path), true, path);
+    for (const path of [
+      "1234/master.m3u8", "2024/master.m3u8", "video-abc/master.m3u8", "title-42/master.m3u8",
+      "master.m3u8", "playlist.m3u8", "abc/index.m3u8",
+    ]) assert.equal(bg.isHlsRenditionPlaylistPath(path), false, path);
   });
 
   test("a rendition marker in the parent directory does not classify a nested master as a child", async () => {

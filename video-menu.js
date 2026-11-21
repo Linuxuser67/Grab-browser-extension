@@ -597,25 +597,45 @@ function hlsPlaylistNameHints(urls) {
   return hintedChildren;
 }
 
-/// A rendition playlist must carry a recognizable quality/variant marker.
-/// Checking path components (including the filename) avoids treating an
-/// unrelated nested content master as a rendition merely because it is newer.
+const HLS_RENDITION_HEIGHTS = new Set([
+  144, 240, 360, 426, 480, 540, 576, 720, 1080, 1440, 2160, 4320,
+]);
+// Same-directory renditions are collapsed only beneath a master-looking name
+// (or a parent whose name prefixes the child's), never beneath any earlier
+// playlist: a single-rendition content file may legitimately sit next to one.
+const HLS_MASTER_NAME = /^(?:master|playlist|index|manifest|main|stream|hls|abr|all)(?:[._-].*)?$/i;
+const MAX_NESTED_RENDITION_DEPTH = 3;
+
+/// One path token that identifies a quality level. Bare numbers count only
+/// when they are standard video heights, so ids and years (1234, 2024) and
+/// ordinary words never look like renditions.
+function isHlsRenditionToken(token) {
+  const value = String(token || "").toLowerCase();
+  if (/^(?:variant|level)\d*$/.test(value)) return true;
+  if (/^\d{3,4}p$/.test(value)) return true;
+  if (/^\d{2,5}k(?:bps)?$/.test(value)) return true;
+  return /^\d{3,4}$/.test(value) && HLS_RENDITION_HEIGHTS.has(Number(value));
+}
+
+/// A rendition playlist must carry a recognizable quality/variant marker in
+/// the path it is judged by (callers pass only the part below the parent).
 function isHlsRenditionPlaylistPath(path) {
   const parts = String(path || "").split("/").filter(Boolean);
   return parts.some((part) => {
     const name = part.replace(/\.m3u8?$/i, "");
     if (/^(?:chunklist|prog_index)(?:[._-].*)?$/i.test(name)) return true;
-    if (/^video[_-].+/i.test(name)) return true;
-    return name.split(/[._-]+/).some((token) =>
-      /^(?:\d{3,4}p?|variant\d*|level\d*)$/i.test(token)
-    );
+    return name.split(/[._-]+/).some(isHlsRenditionToken);
   });
 }
 
-/// A nested HLS playlist is a child only when it is exactly one directory
-/// below an earlier-requested playlist on the same origin and identifies
-/// itself as a rendition. Request order handles pre-load fetches, while the
-/// rendition and depth checks keep unrelated nested masters independent.
+/// A playlist is a child when it identifies itself as a rendition and an
+/// earlier-requested, non-rendition playlist on the same origin sits in the
+/// same directory (master-looking or name-prefix related) or up to
+/// MAX_NESTED_RENDITION_DEPTH directories above it. Request order, not
+/// loadstart, is the evidence, so players that fetch renditions before
+/// attaching their media element are handled. Marker evidence is taken only
+/// from the path below the parent, so a marker in a shared directory cannot
+/// turn an unrelated newer master into a "child".
 function nestedHlsPlaylistChildKeys(urls, firstSeenTimes) {
   if (!(firstSeenTimes instanceof Map)) return new Set();
   const playlists = [];
@@ -629,6 +649,7 @@ function nestedHlsPlaylistChildKeys(urls, firstSeenTimes) {
         origin: parsed.origin,
         path: parsed.pathname,
         directory,
+        filename: parsed.pathname.slice(slash + 1),
         key: urlPathKey(url),
         firstSeenAt: firstSeenTimes.get(urlPathKey(url)),
       });
@@ -637,12 +658,14 @@ function nestedHlsPlaylistChildKeys(urls, firstSeenTimes) {
     }
   }
 
+  const stripExtension = (name) => name.replace(/\.m3u8?$/i, "");
   const childKeys = new Set();
   for (const parent of playlists) {
     if (
-      parent.directory === "/" ||
-      !Number.isFinite(parent.firstSeenAt)
+      !Number.isFinite(parent.firstSeenAt) ||
+      isHlsRenditionPlaylistPath(parent.filename)
     ) continue;
+    const parentBase = stripExtension(parent.filename);
     for (const child of playlists) {
       if (
         child.origin !== parent.origin ||
@@ -656,12 +679,18 @@ function nestedHlsPlaylistChildKeys(urls, firstSeenTimes) {
         .slice(parent.directory.length)
         .split("/")
         .filter(Boolean);
-      const childFilename = child.path.slice(child.path.lastIndexOf("/") + 1);
-      const renditionPath = [...nestedDirectoryParts, childFilename].join("/");
-      if (
-        nestedDirectoryParts.length === 1 &&
-        isHlsRenditionPlaylistPath(renditionPath)
-      ) {
+      if (nestedDirectoryParts.length > MAX_NESTED_RENDITION_DEPTH) continue;
+      if (nestedDirectoryParts.length === 0) {
+        const childBase = stripExtension(child.filename);
+        const prefixRelated =
+          childBase.length > parentBase.length &&
+          childBase.toLowerCase().startsWith(parentBase.toLowerCase()) &&
+          /[._-]/.test(childBase[parentBase.length]);
+        if (!HLS_MASTER_NAME.test(parentBase) && !prefixRelated) continue;
+      } else if (parent.directory === "/") {
+        continue;
+      }
+      if (isHlsRenditionPlaylistPath([...nestedDirectoryParts, child.filename].join("/"))) {
         childKeys.add(child.key);
       }
     }
