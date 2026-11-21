@@ -85,6 +85,21 @@ async function tabOriginForHlsFetch(tabId) {
 /// audio, images, pages). Manifests win on content type alone because some
 /// are served extensionless; extensionless media is NOT guessed because
 /// DASH segments look exactly like that.
+function isAudioOnlyPlaylistUrl(url) {
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    const segments = pathname.split("/").filter(Boolean);
+    const filename = segments.pop() || "";
+    const basename = filename.replace(/\.(?:m3u8|m3u|mpd)$/i, "");
+    return (
+      segments.some((part) => /^(?:audio|audioonly|audio[-_]only|audio[-_]track)$/.test(part)) ||
+      /^(?:audio|audioonly|audio[-_]only|audio[-_]playlist|audioplaylist)(?:[._-].*)?$/.test(basename)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function classifyStream(url, contentType) {
   const u = String(url || "").toLowerCase();
   if (!/^https?:\/\//i.test(u)) return null;
@@ -96,6 +111,13 @@ function classifyStream(url, contentType) {
   } catch {
     return null;
   }
+  // Some HLS servers use audio/x-mpegurl for audio-only playlists. Reject
+  // explicit audio responses and audio-named playlists before extension
+  // detection, including playlists served with application/* MIME types.
+  if (
+    isAudioOnlyPlaylistUrl(url) ||
+    (/^audio\//.test(ct) && ct !== "audio/x-mpegurl" && ct !== "audio/mpegurl")
+  ) return null;
   if (/\.(m3u8|m3u|mpd)$/.test(path)) return "manifest";
   if (
     ct === "application/vnd.apple.mpegurl" ||
@@ -107,8 +129,6 @@ function classifyStream(url, contentType) {
   ) {
     return "manifest";
   }
-  // Explicitly audio-typed responses are not video candidates.
-  if (/^audio\//.test(ct)) return null;
   if (/\.(mp4|m4v|webm|ogv|mov|mkv)$/.test(path)) return "media";
   return null;
 }
@@ -537,6 +557,43 @@ function hlsChildPlaylistKeys(text, masterUrl) {
 /// reference. Public hosts are inspected by Grab through its guarded resolver;
 /// syntactically private hosts retain the existing private-page-only local path.
 /// Unknown playlists, unrelated streams, DASH manifests, and direct files stay.
+function hlsPlaylistNameHints(urls) {
+  const mastersByFolder = new Map();
+  const childrenByFolder = new Map();
+  for (const url of urls || []) {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      continue;
+    }
+    const basename = parsed.pathname.split("/").filter(Boolean).pop() || "";
+    const parent = parsed.pathname.slice(0, Math.max(1, parsed.pathname.lastIndexOf("/")));
+    const folder = parsed.origin + parent;
+    const key = urlPathKey(url);
+    if (/^(?:master|index|playlist|hlsplaylist|stream)(?:[_-][a-z0-9]+)?\.(?:m3u8|m3u)$/i.test(basename)) {
+      let masters = mastersByFolder.get(folder);
+      if (!masters) mastersByFolder.set(folder, masters = new Set());
+      masters.add(key);
+    } else if (/^(?:chunklist|prog_index)(?:[_-].*)?\.(?:m3u8|m3u)$/i.test(basename)) {
+      let children = childrenByFolder.get(folder);
+      if (!children) childrenByFolder.set(folder, children = new Set());
+      children.add(key);
+    }
+  }
+
+  const hintedChildren = new Set();
+  for (const [folder, masters] of mastersByFolder) {
+    // More than one plausible master in a directory makes the hint ambiguous.
+    if (masters.size !== 1) continue;
+    const [master] = masters;
+    for (const child of childrenByFolder.get(folder) || []) {
+      if (child !== master) hintedChildren.add(child);
+    }
+  }
+  return hintedChildren;
+}
+
 async function preferMasterPlaylists(
   urls,
   tabOrigin = null,
@@ -576,7 +633,7 @@ async function preferMasterPlaylists(
   await Promise.all(workers);
 
   const masterKeys = new Set();
-  const childKeys = new Set();
+  const childKeys = hlsPlaylistNameHints(manifests);
   for (const url of manifests) {
     const inspection = results.get(url);
     if (!inspection || inspection.is_master !== true) continue;
@@ -584,7 +641,7 @@ async function preferMasterPlaylists(
     for (const key of inspection.child_keys) childKeys.add(key);
   }
 
-  if (masterKeys.size === 0 || childKeys.size === 0) return urls || [];
+  if (childKeys.size === 0) return urls || [];
   return (urls || []).filter((url) => {
     if (!isHlsPlaylistUrl(url)) return true;
     const key = urlPathKey(url);
@@ -695,6 +752,7 @@ const MAX_VIDEO_FRAMES = 32;
 const MAX_VIDEO_TITLE_LENGTH = 512;
 const MAX_MANIFESTS_PER_FRAME = 20;
 const MAX_MEDIA_SNIFFS_PER_FRAME = 8;
+const MIN_WHOLE_VIDEO_MEDIA_BYTES = 1024 * 1024;
 const RETIRED_FRAME_TTL_MS = 5 * 60 * 1000;
 // A manifest must precede an element's resource start and be close enough to
 // that event to be a plausible request for the same playback session.
@@ -707,6 +765,8 @@ function createVideoFinds() {
     frames: new Map(),
     sniffedByFrame: new Map(),
     mediaByFrame: new Map(),
+    wholeMediaByFrame: new Map(),
+    mediaSizesByFrame: new Map(),
     kindsByFrame: new Map(),
     sniffSequencesByFrame: new Map(),
     sniffTimesByFrame: new Map(),
@@ -723,6 +783,8 @@ function trackedFrameIds(f) {
   for (const id of f.frames.keys()) ids.add(id);
   for (const id of f.sniffedByFrame.keys()) ids.add(id);
   for (const id of f.mediaByFrame.keys()) ids.add(id);
+  for (const id of f.wholeMediaByFrame.keys()) ids.add(id);
+  for (const id of f.mediaSizesByFrame.keys()) ids.add(id);
   for (const id of f.kindsByFrame.keys()) ids.add(id);
   for (const id of f.sniffSequencesByFrame.keys()) ids.add(id);
   for (const id of f.sniffTimesByFrame.keys()) ids.add(id);
@@ -736,6 +798,8 @@ function dropFrame(f, frameId) {
   f.frames.delete(frameId);
   f.sniffedByFrame.delete(frameId);
   f.mediaByFrame.delete(frameId);
+  f.wholeMediaByFrame.delete(frameId);
+  f.mediaSizesByFrame.delete(frameId);
   f.kindsByFrame.delete(frameId);
   f.sniffSequencesByFrame.delete(frameId);
   f.sniffTimesByFrame.delete(frameId);
@@ -1135,6 +1199,49 @@ function snapshotVideoFinds(finds) {
     if (out.length) mediaFrames.push([frameId, out]);
   }
 
+  const wholeMediaFrames = [];
+  for (const [frameId, urls] of finds.wholeMediaByFrame || []) {
+    if (wholeMediaFrames.length >= MAX_VIDEO_FRAMES) break;
+    const available = finds.mediaByFrame instanceof Map
+      ? finds.mediaByFrame.get(frameId) || []
+      : [];
+    const out = [];
+    for (const url of urls || []) {
+      if (out.length >= MAX_MEDIA_SNIFFS_PER_FRAME) break;
+      if (
+        typeof url === "string" &&
+        fitsGrabUrl(url) &&
+        available.includes(url) &&
+        classifyStream(url, "") === "media" &&
+        !isSegmentLikeVideoUrl(url)
+      ) {
+        out.push(url);
+      }
+    }
+    if (out.length) wholeMediaFrames.push([frameId, out]);
+  }
+
+  const mediaSizesFrames = [];
+  for (const [frameId, sizes] of finds.mediaSizesByFrame || []) {
+    if (mediaSizesFrames.length >= MAX_VIDEO_FRAMES) break;
+    const wholeUrls = finds.wholeMediaByFrame instanceof Map
+      ? finds.wholeMediaByFrame.get(frameId) || []
+      : [];
+    const out = [];
+    for (const [key, size] of sizes || []) {
+      if (
+        out.length >= MAX_MEDIA_SNIFFS_PER_FRAME ||
+        typeof key !== "string" ||
+        key.length > MAX_GRAB_URL_BYTES ||
+        !Number.isSafeInteger(size) ||
+        size < MIN_WHOLE_VIDEO_MEDIA_BYTES ||
+        !wholeUrls.some((url) => urlPathKey(url) === key)
+      ) continue;
+      out.push([key, size]);
+    }
+    if (out.length) mediaSizesFrames.push([frameId, out]);
+  }
+
   const sniffSequences = [];
   for (const [frameId, sequences] of finds.sniffSequencesByFrame || []) {
     if (sniffSequences.length >= MAX_VIDEO_FRAMES) break;
@@ -1195,6 +1302,8 @@ function snapshotVideoFinds(finds) {
     frames,
     sniffedFrames,
     mediaFrames,
+    wholeMediaFrames,
+    mediaSizesFrames,
     kindsFrames,
     sniffSequences,
     sniffTimes,
@@ -1343,6 +1452,68 @@ async function restoreVideoFinds(tabId) {
           if (urls.length) mediaByFrame.set(pair[0], urls);
         }
 
+        const wholeMediaByFrame = new Map();
+        let remainingWholeMedia = MAX_VIDEO_FRAMES * MAX_MEDIA_SNIFFS_PER_FRAME;
+        for (const pair of Array.isArray(saved.wholeMediaFrames) ? saved.wholeMediaFrames : []) {
+          if (
+            !Array.isArray(pair) ||
+            pair.length !== 2 ||
+            !Number.isInteger(pair[0]) ||
+            pair[0] < 0 ||
+            !Array.isArray(pair[1]) ||
+            wholeMediaByFrame.has(pair[0]) ||
+            wholeMediaByFrame.size >= MAX_VIDEO_FRAMES ||
+            remainingWholeMedia <= 0
+          ) continue;
+          const available = mediaByFrame.get(pair[0]) || [];
+          const urls = [];
+          const seen = new Set();
+          for (const url of pair[1].slice(0, MAX_MEDIA_SNIFFS_PER_FRAME)) {
+            if (
+              remainingWholeMedia <= 0 ||
+              typeof url !== "string" ||
+              !fitsGrabUrl(url) ||
+              !available.includes(url) ||
+              classifyStream(url, "") !== "media" ||
+              isSegmentLikeVideoUrl(url)
+            ) continue;
+            const key = urlPathKey(url);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            urls.push(url);
+            remainingWholeMedia -= 1;
+          }
+          if (urls.length) wholeMediaByFrame.set(pair[0], urls);
+        }
+
+        const mediaSizesByFrame = new Map();
+        for (const pair of Array.isArray(saved.mediaSizesFrames) ? saved.mediaSizesFrames : []) {
+          if (
+            !Array.isArray(pair) ||
+            pair.length !== 2 ||
+            !Number.isInteger(pair[0]) ||
+            pair[0] < 0 ||
+            !Array.isArray(pair[1]) ||
+            mediaSizesByFrame.has(pair[0]) ||
+            mediaSizesByFrame.size >= MAX_VIDEO_FRAMES
+          ) continue;
+          const wholeUrls = wholeMediaByFrame.get(pair[0]) || [];
+          const sizes = new Map();
+          for (const entry of pair[1].slice(0, MAX_MEDIA_SNIFFS_PER_FRAME)) {
+            if (
+              !Array.isArray(entry) ||
+              entry.length !== 2 ||
+              typeof entry[0] !== "string" ||
+              entry[0].length > MAX_GRAB_URL_BYTES ||
+              !Number.isSafeInteger(entry[1]) ||
+              entry[1] < MIN_WHOLE_VIDEO_MEDIA_BYTES ||
+              !wholeUrls.some((url) => urlPathKey(url) === entry[0])
+            ) continue;
+            sizes.set(entry[0], entry[1]);
+          }
+          if (sizes.size) mediaSizesByFrame.set(pair[0], sizes);
+        }
+
         let sniffSequence =
           Number.isSafeInteger(saved.sniffSequence) && saved.sniffSequence >= 0
             ? saved.sniffSequence
@@ -1480,6 +1651,8 @@ async function restoreVideoFinds(tabId) {
           frames,
           sniffedByFrame,
           mediaByFrame,
+          wholeMediaByFrame,
+          mediaSizesByFrame,
           kindsByFrame,
           sniffSequencesByFrame,
           sniffTimesByFrame,
@@ -1612,7 +1785,7 @@ function sniffedManifestsForFrame(finds, frameId) {
   const kinds = kindsForFrame(finds, frameId);
   return sniffedUrlsForFrame(finds, frameId).filter((url) => {
     const kind = manifestKind(url) || kinds.get(urlPathKey(url));
-    return isManifestKind(kind);
+    return isManifestKind(kind) && !isSegmentLikeVideoUrl(url);
   });
 }
 
@@ -1677,9 +1850,11 @@ function attributedManifestUrlsForVideo(videos, targetVideo, manifests, sniffTim
   return attributed;
 }
 
-async function bestManifestForVideo(tabId, finds, frameId, candidates) {
+async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVideo = null) {
   if (!candidates || candidates.length === 0) return null;
   const kinds = kindsForFrame(finds, frameId);
+  const sniffTimes = sniffTimesForFrame(finds, frameId);
+  const loadStartedAt = targetVideo && targetVideo.loadStartedAt;
   let resolved = [...candidates];
   if (resolved.length > 1) {
     resolved = await preferMasterPlaylists(
@@ -1689,9 +1864,23 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates) {
     );
   }
   const merged = mergeVideoFinds([], resolved, kinds);
-  merged.sort((a, b) =>
-    videoManifestPriority(b, kinds) - videoManifestPriority(a, kinds)
-  );
+  const gapToLoadStart = (url) => {
+    const observedAt = sniffTimes.get(urlPathKey(url));
+    return Number.isFinite(loadStartedAt) && Number.isFinite(observedAt)
+      ? loadStartedAt - observedAt
+      : Number.POSITIVE_INFINITY;
+  };
+  merged.sort((a, b) => {
+    const rankDifference = videoManifestPriority(b, kinds) - videoManifestPriority(a, kinds);
+    if (rankDifference !== 0) return rankDifference;
+    return gapToLoadStart(a) - gapToLoadStart(b);
+  });
+  if (
+    Number.isFinite(loadStartedAt) &&
+    merged.length > 1 &&
+    videoManifestPriority(merged[0], kinds) === videoManifestPriority(merged[1], kinds) &&
+    gapToLoadStart(merged[0]) === gapToLoadStart(merged[1])
+  ) return null;
   return merged[0] || null;
 }
 
@@ -1707,13 +1896,94 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) 
   const video = targetVideo || (videos.length === 1 ? videos[0] : null);
   if (!video || video.blob !== true || !videos.includes(video)) return null;
   const manifests = sniffedManifestsForFrame(finds, frameId);
+  const sniffTimes = sniffTimesForFrame(finds, frameId);
   const attributed = attributedManifestUrlsForVideo(
     videos,
     video,
     manifests,
-    sniffTimesForFrame(finds, frameId),
+    sniffTimes,
   );
-  return bestManifestForVideo(tabId, finds, frameId, attributed);
+  const best = await bestManifestForVideo(tabId, finds, frameId, attributed, video);
+  if (best) return best;
+
+  const wholeMedia = wholeMediaUrlsForFrame(finds, frameId);
+  const attributedMedia = attributedManifestUrlsForVideo(
+    videos,
+    video,
+    wholeMedia,
+    sniffTimes,
+  );
+  const uniqueMedia = dedupeVideoUrlsByPath(attributedMedia, finds);
+  return uniqueMedia.length === 1 ? uniqueMedia[0] : null;
+}
+
+function videoUrlCandidateObservedAt(finds, url) {
+  const key = urlPathKey(url);
+  let newest = Number.NEGATIVE_INFINITY;
+
+  for (const [frameId, videos] of finds.frames) {
+    for (const video of videos || []) {
+      if (
+        video &&
+        video.src === url &&
+        Number.isFinite(video.loadStartedAt)
+      ) newest = Math.max(newest, video.loadStartedAt);
+    }
+    const sniffed = finds.sniffedByFrame instanceof Map
+      ? finds.sniffedByFrame.get(frameId) || []
+      : [];
+    const media = finds.mediaByFrame instanceof Map
+      ? finds.mediaByFrame.get(frameId) || []
+      : [];
+    const observedUrls = [...sniffed, ...media];
+    if (observedUrls.includes(url)) {
+      const times = finds.sniffTimesByFrame instanceof Map
+        ? finds.sniffTimesByFrame.get(frameId)
+        : null;
+      const observedAt = times instanceof Map ? times.get(key) : null;
+      if (Number.isFinite(observedAt)) newest = Math.max(newest, observedAt);
+    }
+  }
+
+  // A network-only frame can hold a manifest without a DOM report.
+  for (const [frameId, observedUrls] of finds.sniffedByFrame || []) {
+    if (finds.frames.has(frameId) || !observedUrls.includes(url)) continue;
+    const times = finds.sniffTimesByFrame instanceof Map
+      ? finds.sniffTimesByFrame.get(frameId)
+      : null;
+    const observedAt = times instanceof Map ? times.get(key) : null;
+    if (Number.isFinite(observedAt)) newest = Math.max(newest, observedAt);
+  }
+  return newest;
+}
+
+function videoUrlCandidatePriority(finds, url) {
+  const kind = manifestKind(url) || detectedKindForUrl(finds, url);
+  return kind === "hls" ? 30
+    : kind === "manifest" ? 25
+    : kind === "dash" ? 20
+    : 10;
+}
+
+/// Deduplicate streams across frames and rotating query tokens. Keep the
+/// highest-ranked URL; ties prefer the most recently observed resource URL.
+function dedupeVideoUrlsByPath(urls, finds) {
+  const selected = new Map();
+  for (const url of urls || []) {
+    if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
+    const key = urlPathKey(url);
+    const priority = videoUrlCandidatePriority(finds, url);
+    const observedAt = videoUrlCandidateObservedAt(finds, url);
+    const previous = selected.get(key);
+    if (
+      !previous ||
+      priority > previous.priority ||
+      (priority === previous.priority && observedAt > previous.observedAt)
+    ) {
+      selected.set(key, { url, priority, observedAt });
+    }
+  }
+  return [...selected.values()].map((candidate) => candidate.url);
 }
 
 async function resolvedVideoUrlsForFrame(tabId, frameId) {
@@ -1721,7 +1991,10 @@ async function resolvedVideoUrlsForFrame(tabId, frameId) {
   if (!finds) return [];
   if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
   if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return [];
-  return menuVideoCandidatesForFrame(finds, frameId, tabId);
+  return dedupeVideoUrlsByPath(
+    await menuVideoCandidatesForFrame(finds, frameId, tabId),
+    finds,
+  );
 }
 
 /// Build one candidate per active DOM video. Direct sources are authoritative;
@@ -1759,8 +2032,21 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
       manifests,
       sniffTimes,
     );
-    const best = await bestManifestForVideo(tabId, finds, frameId, attributed);
-    if (best) urls.push(best);
+    const best = await bestManifestForVideo(tabId, finds, frameId, attributed, video);
+    if (best) {
+      urls.push(best);
+      continue;
+    }
+
+    const wholeMedia = wholeMediaUrlsForFrame(finds, frameId);
+    const attributedMedia = attributedManifestUrlsForVideo(
+      videos,
+      video,
+      wholeMedia,
+      sniffTimes,
+    );
+    const uniqueMedia = dedupeVideoUrlsByPath(attributedMedia, finds);
+    if (uniqueMedia.length === 1) urls.push(uniqueMedia[0]);
   }
   return urls;
 }
@@ -1783,9 +2069,8 @@ async function resolvedVideoUrls(tabId) {
   for (const frameId of frameIds) {
     const candidates = await menuVideoCandidatesForFrame(finds, frameId, tabId);
     urls.push(...candidates);
-    if (urls.length >= MAX_VIDEO_ITEMS) break;
   }
-  return [...new Set(urls)].slice(0, MAX_VIDEO_ITEMS);
+  return dedupeVideoUrlsByPath(urls, finds).slice(0, MAX_VIDEO_ITEMS);
 }
 
 function mergedVideoUrls(tabId) {
@@ -1793,7 +2078,7 @@ function mergedVideoUrls(tabId) {
   if (!finds) return [];
   const urls = [];
   for (const frameId of finds.frames.keys()) urls.push(...mergedVideoUrlsForFrame(tabId, frameId));
-  return [...new Set(urls)].slice(0, MAX_VIDEO_ITEMS);
+  return dedupeVideoUrlsByPath(urls, finds).slice(0, MAX_VIDEO_ITEMS);
 }
 
 function detectedKindForUrl(finds, url) {
@@ -1827,7 +2112,62 @@ function urlPathKey(u) {
   }
 }
 
-function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now()) {
+function isSegmentLikeVideoUrl(url) {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    const basename = path.split("/").filter(Boolean).pop() || "";
+    if (/(?:^|\/)(?:segments?|chunks?|fragments?|previews?|pre[-_]rolls?|prerolls?|mid[-_]rolls?|midrolls?|post[-_]rolls?|postrolls?|ads?|thumbnails?|storyboards?|sprites?|subtitles?|captions?|audio(?:[-_]only)?|prefetch(?:es)?)(?:\/|$)/.test(path)) {
+      return true;
+    }
+    if (/^(?:preview|trailer|teaser|ad|advert|advertisement|promo|thumbnail|thumb|storyboard|sprite|preroll|midroll|postroll|prefetch)(?:[._-]|$)/.test(basename)) {
+      return true;
+    }
+    return /(?:^|[._-])(?:seg(?:ment)?|chunk|part|frag(?:ment)?)[._-]?\d+(?:[._-]|$)/.test(basename);
+  } catch {
+    return true;
+  }
+}
+
+/// Return Content-Length only for a whole-object response suitable for a
+/// conservative blob-player fallback. Partial responses are never candidates.
+function wholeVideoMediaSize(details) {
+  if (
+    !details ||
+    details.statusCode !== 200 ||
+    classifyStream(
+      details.url,
+      sniffedHeader(details.responseHeaders, "content-type"),
+    ) !== "media" ||
+    sniffedHeader(details.responseHeaders, "content-range") ||
+    isSegmentLikeVideoUrl(details.url)
+  ) return null;
+  const rawLength = sniffedHeader(details.responseHeaders, "content-length");
+  if (!/^\d+$/.test(rawLength)) return null;
+  const length = Number(rawLength);
+  return Number.isSafeInteger(length) && length >= MIN_WHOLE_VIDEO_MEDIA_BYTES
+    ? length
+    : null;
+}
+
+function wholeMediaUrlsForFrame(finds, frameId) {
+  const urls = finds.wholeMediaByFrame instanceof Map
+    ? finds.wholeMediaByFrame.get(frameId) || []
+    : [];
+  const media = mediaUrlsForFrame(finds, frameId);
+  const sizes = finds.mediaSizesByFrame instanceof Map
+    ? finds.mediaSizesByFrame.get(frameId)
+    : null;
+  return urls.filter((url) =>
+    media.includes(url) &&
+    classifyStream(url, "") === "media" &&
+    !isSegmentLikeVideoUrl(url) &&
+    sizes instanceof Map &&
+    Number.isSafeInteger(sizes.get(urlPathKey(url))) &&
+    sizes.get(urlPathKey(url)) >= MIN_WHOLE_VIDEO_MEDIA_BYTES
+  );
+}
+
+function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMediaSize = null) {
   if (!fitsGrabUrl(url) || (kind !== "manifest" && kind !== "media")) return;
   let f = videoFinds.get(tabId);
   if (!f) {
@@ -1859,6 +2199,40 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now()) {
   if (idx >= 0) urls[idx] = url;
   else urls.push(url);
 
+  if (kind === "media") {
+    let wholeUrls = f.wholeMediaByFrame.get(sourceFrame);
+    if (!wholeUrls) {
+      wholeUrls = [];
+      f.wholeMediaByFrame.set(sourceFrame, wholeUrls);
+    }
+    let sizes = f.mediaSizesByFrame.get(sourceFrame);
+    if (!sizes) {
+      sizes = new Map();
+      f.mediaSizesByFrame.set(sourceFrame, sizes);
+    }
+    if (
+      Number.isSafeInteger(wholeMediaSize) &&
+      wholeMediaSize >= MIN_WHOLE_VIDEO_MEDIA_BYTES &&
+      !isSegmentLikeVideoUrl(url)
+    ) {
+      const wholeIndex = wholeUrls.findIndex((candidate) => urlPathKey(candidate) === key);
+      if (wholeIndex >= 0) wholeUrls[wholeIndex] = url;
+      else wholeUrls.push(url);
+      sizes.set(key, wholeMediaSize);
+    } else {
+      for (let i = wholeUrls.length - 1; i >= 0; i--) {
+        if (urlPathKey(wholeUrls[i]) === key) wholeUrls.splice(i, 1);
+      }
+      sizes.delete(key);
+    }
+    while (wholeUrls.length > MAX_MEDIA_SNIFFS_PER_FRAME) {
+      const removed = wholeUrls.shift();
+      sizes.delete(urlPathKey(removed));
+    }
+    if (wholeUrls.length === 0) f.wholeMediaByFrame.delete(sourceFrame);
+    if (sizes.size === 0) f.mediaSizesByFrame.delete(sourceFrame);
+  }
+
   const sequences = sniffSequenceMapForFrame(f, sourceFrame, true);
   sequences.set(key, nextSniffSequence(f));
   const times = sniffTimeMapForFrame(f, sourceFrame, true);
@@ -1870,6 +2244,18 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now()) {
   while (urls.length > limit) {
     const removed = urls.shift();
     const removedKey = urlPathKey(removed);
+    if (kind === "media") {
+      const wholeUrls = f.wholeMediaByFrame.get(sourceFrame) || [];
+      for (let i = wholeUrls.length - 1; i >= 0; i--) {
+        if (urlPathKey(wholeUrls[i]) === removedKey) wholeUrls.splice(i, 1);
+      }
+      const sizes = f.mediaSizesByFrame.get(sourceFrame);
+      if (sizes) {
+        sizes.delete(removedKey);
+        if (sizes.size === 0) f.mediaSizesByFrame.delete(sourceFrame);
+      }
+      if (wholeUrls.length === 0) f.wholeMediaByFrame.delete(sourceFrame);
+    }
     const otherList = kind === "manifest" ? f.mediaByFrame.get(sourceFrame) : f.sniffedByFrame.get(sourceFrame);
     const stillPresent = Array.isArray(otherList) &&
       otherList.some((candidate) => urlPathKey(candidate) === removedKey);
@@ -2098,6 +2484,7 @@ async function onSniffedResponse(details) {
     details.url,
     kind,
     Number.isFinite(details.timeStamp) ? details.timeStamp : Date.now(),
+    kind === "media" ? wholeVideoMediaSize(details) : null,
   );
   await persistVideoFinds(details.tabId);
   onVideoEvent(details.tabId);
