@@ -85,14 +85,17 @@ async function tabOriginForHlsFetch(tabId) {
 /// audio, images, pages). Manifests win on content type alone because some
 /// are served extensionless; extensionless media is NOT guessed because
 /// DASH segments look exactly like that.
-function isAudioOnlyPlaylistUrl(url) {
+function isAudioOnlyPlaylistUrl(url, contentType = "") {
   try {
     const pathname = new URL(url).pathname.toLowerCase();
     const segments = pathname.split("/").filter(Boolean);
     const filename = segments.pop() || "";
     const basename = filename.replace(/\.(?:m3u8|m3u|mpd)$/i, "");
+    const contentTypeIsAudioPlaylist =
+      contentType === "audio/x-mpegurl" || contentType === "audio/mpegurl";
     return (
-      segments.some((part) => /^(?:audio|audioonly|audio[-_]only|audio[-_]track)$/.test(part)) ||
+      segments.some((part) => /^(?:audioonly|audio[-_]only|audio[-_]track)$/.test(part)) ||
+      (segments.includes("audio") && contentTypeIsAudioPlaylist) ||
       /^(?:audio|audioonly|audio[-_]only|audio[-_]playlist|audioplaylist)(?:[._-].*)?$/.test(basename)
     );
   } catch {
@@ -115,7 +118,7 @@ function classifyStream(url, contentType) {
   // explicit audio responses and audio-named playlists before extension
   // detection, including playlists served with application/* MIME types.
   if (
-    isAudioOnlyPlaylistUrl(url) ||
+    isAudioOnlyPlaylistUrl(url, ct) ||
     (/^audio\//.test(ct) && ct !== "audio/x-mpegurl" && ct !== "audio/mpegurl")
   ) return null;
   if (/\.(m3u8|m3u|mpd)$/.test(path)) return "manifest";
@@ -518,8 +521,8 @@ async function isMasterPlaylist(value, tabOrigin = null, inspectPublic = inspect
 }
 
 /// Resolve playlist references against the master URL. Only explicit
-/// variant and EXT-X-MEDIA playlist references are considered children;
-/// directory ancestry alone is not evidence that two URLs are one stream.
+/// variant and EXT-X-MEDIA references belong to this content-based helper;
+/// the timing-aware nested-directory heuristic is applied during attribution.
 function hlsChildPlaylistKeys(text, masterUrl) {
   const children = new Set();
   const add = (reference) => {
@@ -592,6 +595,55 @@ function hlsPlaylistNameHints(urls) {
     }
   }
   return hintedChildren;
+}
+
+/// A nested playlist is treated as a child only when its ancestor playlist
+/// was first requested before loadstart and the nested request began after it.
+/// This avoids collapsing separately loaded episode directories.
+function nestedHlsPlaylistChildKeys(urls, firstSeenTimes, loadStartedAt) {
+  if (!Number.isFinite(loadStartedAt) || !(firstSeenTimes instanceof Map)) {
+    return new Set();
+  }
+  const playlists = [];
+  for (const url of urls || []) {
+    if (!isHlsPlaylistUrl(url)) continue;
+    try {
+      const parsed = new URL(url);
+      const slash = parsed.pathname.lastIndexOf("/");
+      const directory = slash > 0 ? parsed.pathname.slice(0, slash + 1) : "/";
+      playlists.push({
+        origin: parsed.origin,
+        path: parsed.pathname,
+        directory,
+        key: urlPathKey(url),
+        firstSeenAt: firstSeenTimes.get(urlPathKey(url)),
+      });
+    } catch {
+      // Invalid playlist URLs are not candidates.
+    }
+  }
+
+  const childKeys = new Set();
+  for (const parent of playlists) {
+    if (
+      parent.directory === "/" ||
+      !Number.isFinite(parent.firstSeenAt) ||
+      parent.firstSeenAt > loadStartedAt
+    ) continue;
+    for (const child of playlists) {
+      if (
+        child.origin === parent.origin &&
+        child.path !== parent.path &&
+        child.directory.length > parent.directory.length &&
+        child.directory.startsWith(parent.directory) &&
+        Number.isFinite(child.firstSeenAt) &&
+        child.firstSeenAt > loadStartedAt
+      ) {
+        childKeys.add(child.key);
+      }
+    }
+  }
+  return childKeys;
 }
 
 async function preferMasterPlaylists(
@@ -1987,9 +2039,17 @@ function attributedManifestUrlsForVideo(
 async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVideo = null) {
   if (!candidates || candidates.length === 0) return null;
   const kinds = kindsForFrame(finds, frameId);
-  const sniffTimes = sniffTimesForFrame(finds, frameId);
+  const firstSeenTimes = sniffFirstSeenTimesForFrame(finds, frameId);
   const loadStartedAt = targetVideo && targetVideo.loadStartedAt;
   let resolved = [...candidates];
+  const nestedChildKeys = nestedHlsPlaylistChildKeys(
+    resolved,
+    firstSeenTimes,
+    loadStartedAt,
+  );
+  if (nestedChildKeys.size > 0) {
+    resolved = resolved.filter((url) => !nestedChildKeys.has(urlPathKey(url)));
+  }
   if (resolved.length > 1) {
     resolved = await preferMasterPlaylists(
       resolved,
@@ -1998,24 +2058,36 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVid
     );
   }
   const merged = mergeVideoFinds([], resolved, kinds);
-  const gapToLoadStart = (url) => {
-    const observedAt = sniffTimes.get(urlPathKey(url));
-    return Number.isFinite(loadStartedAt) && Number.isFinite(observedAt)
-      ? loadStartedAt - observedAt
-      : Number.POSITIVE_INFINITY;
+  const timingFor = (url) => {
+    const firstSeenAt = firstSeenTimes.get(urlPathKey(url));
+    if (!Number.isFinite(firstSeenAt)) {
+      return { phase: 2, distance: Number.POSITIVE_INFINITY };
+    }
+    if (!Number.isFinite(loadStartedAt)) {
+      return { phase: 1, distance: firstSeenAt };
+    }
+    return firstSeenAt <= loadStartedAt
+      ? { phase: 0, distance: loadStartedAt - firstSeenAt }
+      : { phase: 1, distance: firstSeenAt - loadStartedAt };
   };
   merged.sort((a, b) => {
     const rankDifference = videoManifestPriority(b, kinds) - videoManifestPriority(a, kinds);
     if (rankDifference !== 0) return rankDifference;
-    return gapToLoadStart(a) - gapToLoadStart(b);
+    const aTiming = timingFor(a);
+    const bTiming = timingFor(b);
+    if (aTiming.phase !== bTiming.phase) return aTiming.phase - bTiming.phase;
+    return aTiming.distance - bTiming.distance;
   });
-  const firstGap = merged.length > 1 ? gapToLoadStart(merged[0]) : null;
-  const secondGap = merged.length > 1 ? gapToLoadStart(merged[1]) : null;
+
+  const firstTiming = merged.length > 1 ? timingFor(merged[0]) : null;
+  const secondTiming = merged.length > 1 ? timingFor(merged[1]) : null;
   if (
-    Number.isFinite(firstGap) &&
-    Number.isFinite(secondGap) &&
+    firstTiming &&
+    secondTiming &&
+    firstTiming.phase === 0 &&
+    secondTiming.phase === 0 &&
     videoManifestPriority(merged[0], kinds) === videoManifestPriority(merged[1], kinds) &&
-    Math.abs(firstGap - secondGap) <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
+    Math.abs(firstTiming.distance - secondTiming.distance) <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
   ) return null;
   return merged[0] || null;
 }
@@ -2104,13 +2176,44 @@ function videoUrlCandidatePriority(finds, url) {
     : 10;
 }
 
-/// Deduplicate streams across frames and rotating query tokens. Keep the
-/// highest-ranked URL; ties prefer the most recently observed resource URL.
+const AUTH_QUERY_PARAMETER_NAME =
+  /^(?:access[-_]?token|api[-_]?token|auth|auth[-_]?key|auth[-_]?token|authorization|bearer|exp|expires|expiry|hdnea|hdnts|hmac|jwt|policy|session[-_]?token|sig|signature|token|x-amz-(?:credential|date|expires|security-token|signature)|x-goog-(?:algorithm|credential|date|expires|signature))$/i;
+
+/// Build a stable request identity while ignoring only recognized auth-token
+/// query parameters. Preserve every other parameter's spelling, encoding and order.
+function videoUrlIdentityKey(url) {
+  try {
+    const parsed = new URL(url);
+    const retainedParameters = parsed.search
+      .slice(1)
+      .split("&")
+      .filter((parameter) => {
+        if (!parameter) return true;
+        const separator = parameter.indexOf("=");
+        const rawName = separator < 0 ? parameter : parameter.slice(0, separator);
+        let name;
+        try {
+          name = decodeURIComponent(rawName.replace(/\+/g, " "));
+        } catch {
+          return true;
+        }
+        return !AUTH_QUERY_PARAMETER_NAME.test(name);
+      })
+      .join("&");
+    return parsed.origin + parsed.pathname +
+      (retainedParameters ? `?${retainedParameters}` : "");
+  } catch {
+    return url;
+  }
+}
+
+/// Deduplicate streams across frames while retaining non-auth query parameters.
+/// Keep the highest-ranked URL; ties prefer the most recently observed resource.
 function dedupeVideoUrlsByPath(urls, finds) {
   const selected = new Map();
   for (const url of urls || []) {
     if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
-    const key = urlPathKey(url);
+    const key = videoUrlIdentityKey(url);
     const priority = videoUrlCandidatePriority(finds, url);
     const observedAt = videoUrlCandidateObservedAt(finds, url);
     const previous = selected.get(key);
@@ -2258,13 +2361,13 @@ function isSegmentLikeVideoUrl(url) {
   try {
     const path = new URL(url).pathname.toLowerCase();
     const basename = path.split("/").filter(Boolean).pop() || "";
-    if (/(?:^|\/)(?:segments?|chunks?|fragments?|previews?|pre[-_]rolls?|prerolls?|mid[-_]rolls?|midrolls?|post[-_]rolls?|postrolls?|ads?|thumbnails?|storyboards?|sprites?|subtitles?|captions?|audio(?:[-_]only)?|prefetch(?:es)?)(?:\/|$)/.test(path)) {
+    if (/(?:^|\/)(?:segments?|chunks?|fragments?|previews?|pre[-_]rolls?|prerolls?|mid[-_]rolls?|midrolls?|post[-_]rolls?|postrolls?|ads|thumbnails?|storyboards?|sprites?|subtitles?|captions?|audio[-_]only|audioonly|prefetch(?:es)?)(?:\/|$)/.test(path)) {
       return true;
     }
     if (/^(?:preview|trailer|teaser|ad|advert|advertisement|promo|thumbnail|thumb|storyboard|sprite|preroll|midroll|postroll|prefetch)(?:[._-]|$)/.test(basename)) {
       return true;
     }
-    return /(?:^|[._-])(?:seg(?:ment)?|chunk|part|frag(?:ment)?)[._-]?\d+(?:[._-]|$)/.test(basename);
+    return /^(?:seg(?:ment)?|chunk|frag(?:ment)?)[._-]+\d+(?:[._-]|$)/.test(basename);
   } catch {
     return true;
   }

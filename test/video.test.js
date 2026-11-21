@@ -326,6 +326,16 @@ describe("classifyStream", () => {
     assert.equal(bg.classifyStream("https://cdn.example.com/page", "text/html"), null);
   });
 
+  test("a generic audio directory does not hide an HLS manifest", () => {
+    assert.equal(
+      bg.classifyStream(
+        "https://cdn.example.com/audio/master.m3u8",
+        "application/vnd.apple.mpegurl",
+      ),
+      "manifest",
+    );
+  });
+
   test("extensionless video content types are not guessed (DASH segments look like this)", () => {
     assert.equal(bg.classifyStream("https://cdn.example.com/s/seg", "video/mp4"), null);
   });
@@ -496,6 +506,61 @@ describe("per-video menu candidates", () => {
     assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [direct]);
   });
 
+  test("direct sources with distinct resource IDs remain separate", async () => {
+    const first = "https://cdn.example.com/get_video.php?id=1";
+    const second = "https://cdn.example.com/get_video.php?id=2";
+    const findings = makeFinds([
+      { src: first, blob: false, elementId: 1, loadStartedAt: 1000 },
+      { src: second, blob: false, elementId: 2, loadStartedAt: 2000 },
+    ]);
+    bg._videoFinds.set(190, findings);
+
+    assert.deepEqual(await bg.resolvedVideoUrls(190), [first, second]);
+  });
+
+  test("direct-source dedupe preserves the exact order of non-auth query parameters", async () => {
+    const first = "https://cdn.example.com/get_video.php?id=1&format=mp4";
+    const second = "https://cdn.example.com/get_video.php?format=mp4&id=1";
+    const findings = makeFinds([
+      { src: first, blob: false, elementId: 1, loadStartedAt: 1000 },
+      { src: second, blob: false, elementId: 2, loadStartedAt: 2000 },
+    ]);
+    bg._videoFinds.set(193, findings);
+
+    assert.deepEqual(await bg.resolvedVideoUrls(193), [first, second]);
+  });
+
+  test("direct-source dedupe still ignores rotating auth-token values", async () => {
+    const oldUrl = "https://cdn.example.com/get_video.php?token=old";
+    const newUrl = "https://cdn.example.com/get_video.php?token=new";
+    const findings = makeFinds([
+      { src: oldUrl, blob: false, elementId: 1, loadStartedAt: 1000 },
+      { src: newUrl, blob: false, elementId: 2, loadStartedAt: 2000 },
+    ]);
+    bg._videoFinds.set(191, findings);
+
+    assert.deepEqual(await bg.resolvedVideoUrls(191), [newUrl]);
+  });
+
+  test("a manifest under /audio/ is recorded and remains a menu candidate", async () => {
+    const tabId = 192;
+    const manifest = "https://cdn.example.com/audio/master.m3u8";
+    await chrome._listeners["webRequest.onResponseStarted"]({
+      tabId,
+      frameId: 0,
+      url: manifest,
+      timeStamp: Date.now(),
+      responseHeaders: [
+        { name: "content-type", value: "application/vnd.apple.mpegurl" },
+      ],
+    });
+
+    const findings = bg._videoFinds.get(tabId);
+    assert.ok(findings);
+    assert.deepEqual(findings.sniffedByFrame.get(0), [manifest]);
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [manifest]);
+  });
+
   test("a blob video chooses its HLS master and ignores sniffed media files", async () => {
     const master = "http://192.168.1.20/hls/master.m3u8";
     const child = "http://192.168.1.20/hls/variant.m3u8";
@@ -611,6 +676,66 @@ describe("per-video menu candidates", () => {
       await bg.menuVideoCandidatesForFrame(findings, 0),
       [current],
     );
+  });
+
+  test("a pre-load master beats its nested post-load child when inspection is unavailable", async () => {
+    const master = "http://192.168.1.20/abc/playlist.m3u8";
+    const child = "http://192.168.1.20/abc/720p/stream.m3u8";
+    chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://page.example/player",
+        elementId: 1, loadStartedAt: 10_000,
+      }],
+      [master, child],
+      new Map([[pathKey(master), 20_000], [pathKey(child), 30_000]]),
+    );
+    findings.sniffFirstSeenByFrame.set(0, new Map([
+      [pathKey(master), 9_000],
+      [pathKey(child), 10_100],
+    ]));
+
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [master]);
+  });
+
+  test("a pre-load manifest outranks a sibling post-load manifest", async () => {
+    const earlier = "http://192.168.1.20/first/master.m3u8";
+    const later = "http://192.168.1.20/second/master.m3u8";
+    chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://page.example/player",
+        elementId: 1, loadStartedAt: 10_000,
+      }],
+      [earlier, later],
+      new Map([[pathKey(earlier), 20_000], [pathKey(later), 30_000]]),
+    );
+    findings.sniffFirstSeenByFrame.set(0, new Map([
+      [pathKey(earlier), 9_000],
+      [pathKey(later), 10_100],
+    ]));
+
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [earlier]);
+  });
+
+  test("among post-load manifests, the earliest first-seen request wins over a later refresh", async () => {
+    const earliest = "http://192.168.1.20/first/master.m3u8";
+    const refreshed = "http://192.168.1.20/second/master.m3u8";
+    chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://page.example/player",
+        elementId: 1, loadStartedAt: 10_000,
+      }],
+      [earliest, refreshed],
+      new Map([[pathKey(earliest), 15_000], [pathKey(refreshed), 30_000]]),
+    );
+    findings.sniffFirstSeenByFrame.set(0, new Map([
+      [pathKey(earliest), 10_100],
+      [pathKey(refreshed), 10_300],
+    ]));
+
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [earliest]);
   });
 
   test("a manifest requested a few seconds after loadstart can belong to one of multiple players", async () => {
@@ -826,6 +951,12 @@ describe("per-video menu candidates", () => {
       "https://cdn.example.com/segments/0001.mp4",
       "https://cdn.example.com/previews/preview.mp4",
     ]) assert.equal(bg.wholeVideoMediaSize(details(url, 200, full)), null, url);
+
+    for (const url of [
+      base + "lecture-part-2.mp4",
+      base + "chunk1.mp4",
+      "https://cdn.example.com/ad/episode.mp4",
+    ]) assert.equal(bg.wholeVideoMediaSize(details(url, 200, full)), 8388608, url);
   });
 
   test("a whole-file fallback survives session restore", async () => {
