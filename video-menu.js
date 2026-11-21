@@ -114,12 +114,17 @@ function classifyStream(url, contentType) {
   // Some HLS servers use audio/x-mpegurl for audio-only playlists. Reject
   // explicit audio responses and audio-named playlists before extension
   // detection, including playlists served with application/* MIME types.
-  if (/^audio\//.test(ct) || isAudioOnlyPlaylistUrl(url)) return null;
+  if (
+    isAudioOnlyPlaylistUrl(url) ||
+    (/^audio\//.test(ct) && ct !== "audio/x-mpegurl" && ct !== "audio/mpegurl")
+  ) return null;
   if (/\.(m3u8|m3u|mpd)$/.test(path)) return "manifest";
   if (
     ct === "application/vnd.apple.mpegurl" ||
     ct === "application/x-mpegurl" ||
     ct === "application/mpegurl" ||
+    ct === "audio/x-mpegurl" ||
+    ct === "audio/mpegurl" ||
     ct === "application/dash+xml"
   ) {
     return "manifest";
