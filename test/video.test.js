@@ -827,6 +827,43 @@ describe("per-video menu candidates", () => {
     ]) assert.equal(bg.isHlsRenditionPlaylistPath(path), false, path);
   });
 
+  // No active <video>: the manifest-only fallback collapses renditions too.
+  async function fallbackPlaylists(requests) {
+    chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
+    const urls = requests.map(([path]) => `http://192.168.1.20${path}`);
+    const firstSeen = new Map(requests.map(([path, at]) => [pathKey(`http://192.168.1.20${path}`), at]));
+    const findings = makeFinds([], urls, new Map(firstSeen));
+    findings.sniffFirstSeenByFrame.set(0, firstSeen);
+    return bg.menuVideoCandidatesForFrame(findings, 0);
+  }
+
+  test("the no-video fallback collapses renditions into their earlier master", async () => {
+    assert.deepEqual(
+      await fallbackPlaylists([
+        ["/v/master.m3u8", 1_000],
+        ["/v/720p/index.m3u8", 1_300],
+        ["/v/1080p/index.m3u8", 1_600],
+      ]),
+      ["http://192.168.1.20/v/master.m3u8"],
+    );
+  });
+
+  test("the no-video fallback keeps unrelated manifests and renditions requested before their parent", async () => {
+    assert.deepEqual(
+      await fallbackPlaylists([
+        ["/a/main/master.m3u8", 1_000],
+        ["/b/other/master.m3u8", 1_300],
+      ]),
+      ["http://192.168.1.20/a/main/master.m3u8", "http://192.168.1.20/b/other/master.m3u8"],
+    );
+    // A rendition seen before the playlist above it is not that playlist's child.
+    const early = await fallbackPlaylists([
+      ["/v/720p/index.m3u8", 1_000],
+      ["/v/master.m3u8", 1_300],
+    ]);
+    assert.ok(early.includes("http://192.168.1.20/v/master.m3u8"));
+  });
+
   test("a rendition marker in the parent directory does not classify a nested master as a child", async () => {
     const earlier = "http://192.168.1.20/vod/1080/a.m3u8";
     const current = "http://192.168.1.20/vod/1080/b/master.m3u8";
