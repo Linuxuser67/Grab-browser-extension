@@ -1850,13 +1850,25 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) 
   const video = targetVideo || (videos.length === 1 ? videos[0] : null);
   if (!video || video.blob !== true || !videos.includes(video)) return null;
   const manifests = sniffedManifestsForFrame(finds, frameId);
+  const sniffTimes = sniffTimesForFrame(finds, frameId);
   const attributed = attributedManifestUrlsForVideo(
     videos,
     video,
     manifests,
-    sniffTimesForFrame(finds, frameId),
+    sniffTimes,
   );
-  return bestManifestForVideo(tabId, finds, frameId, attributed);
+  const best = await bestManifestForVideo(tabId, finds, frameId, attributed);
+  if (best) return best;
+
+  const wholeMedia = wholeMediaUrlsForFrame(finds, frameId);
+  const attributedMedia = attributedManifestUrlsForVideo(
+    videos,
+    video,
+    wholeMedia,
+    sniffTimes,
+  );
+  const uniqueMedia = dedupeVideoUrlsByPath(attributedMedia, finds);
+  return uniqueMedia.length === 1 ? uniqueMedia[0] : null;
 }
 
 function videoUrlCandidateObservedAt(finds, url) {
