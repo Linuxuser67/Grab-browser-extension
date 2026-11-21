@@ -85,6 +85,21 @@ async function tabOriginForHlsFetch(tabId) {
 /// audio, images, pages). Manifests win on content type alone because some
 /// are served extensionless; extensionless media is NOT guessed because
 /// DASH segments look exactly like that.
+function isAudioOnlyPlaylistUrl(url) {
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    const segments = pathname.split("/").filter(Boolean);
+    const filename = segments.pop() || "";
+    const basename = filename.replace(/\.(?:m3u8|m3u|mpd)$/i, "");
+    return (
+      segments.some((part) => /^(?:audio|audioonly|audio[-_]only|audio[-_]track)$/.test(part)) ||
+      /^(?:audio|audioonly|audio[-_]only|audio[-_]playlist|audioplaylist)(?:[._-].*)?$/.test(basename)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function classifyStream(url, contentType) {
   const u = String(url || "").toLowerCase();
   if (!/^https?:\/\//i.test(u)) return null;
@@ -97,8 +112,9 @@ function classifyStream(url, contentType) {
     return null;
   }
   // Some HLS servers use audio/x-mpegurl for audio-only playlists. Reject
-  // explicit audio responses before considering their .m3u8 extension.
-  if (/^audio\//.test(ct)) return null;
+  // explicit audio responses and audio-named playlists before extension
+  // detection, including playlists served with application/* MIME types.
+  if (/^audio\//.test(ct) || isAudioOnlyPlaylistUrl(url)) return null;
   if (/\.(m3u8|m3u|mpd)$/.test(path)) return "manifest";
   if (
     ct === "application/vnd.apple.mpegurl" ||
@@ -2072,6 +2088,9 @@ function isSegmentLikeVideoUrl(url) {
     const path = new URL(url).pathname.toLowerCase();
     const basename = path.split("/").filter(Boolean).pop() || "";
     if (/(?:^|\/)(?:segments?|chunks?|fragments?|previews?|ads?|thumbnails?|storyboards?|sprites?)(?:\/|$)/.test(path)) {
+      return true;
+    }
+    if (/^(?:preview|trailer|teaser|ad|advert|advertisement|promo|thumbnail|thumb|storyboard|sprite)(?:[._-]|$)/.test(basename)) {
       return true;
     }
     return /(?:^|[._-])(?:seg(?:ment)?|chunk|part|frag(?:ment)?)[._-]?\d+(?:[._-]|$)/.test(basename);
