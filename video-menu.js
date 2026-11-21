@@ -1646,15 +1646,15 @@ function attributedManifestUrlsForVideo(videos, targetVideo, manifests, sniffTim
   const attributed = [];
   for (const url of manifests) {
     const observedAt = sniffTimes.get(urlPathKey(url));
-    // A single active player owns its frame's manifests, but timestamped
-    // requests must still belong to that player's current resource load.
-    // Legacy single-player reports without timing keep their old fallback.
-    if (!Number.isFinite(observedAt) || observedAt < 0) {
-      if (!multipleVideos && !Number.isFinite(targetVideo.loadStartedAt)) {
-        attributed.push(url);
-      }
+    // Old v2 reports have no element timing. Preserve their single-player
+    // fallback even when the corresponding sniff timestamp was persisted.
+    if (!multipleVideos && !Number.isFinite(targetVideo.loadStartedAt)) {
+      attributed.push(url);
       continue;
     }
+    // A single active player owns its frame's manifests, but timestamped
+    // requests must still belong to that player's current resource load.
+    if (!Number.isFinite(observedAt) || observedAt < 0) continue;
 
     const possibleOwners = videos
       .map((video) => ({
