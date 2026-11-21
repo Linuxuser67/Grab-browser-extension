@@ -2479,6 +2479,33 @@ describe("detection wiring", () => {
     await L["runtime.onMessage"](
       { type: "grab-videos-detected", videos: [videoA, videoB] }, sender,
     );
+    const beforePause = bg._videoFinds.get(tabId);
+    const previousVideos = beforePause.frames.get(0);
+    const firstSeen = beforePause.sniffFirstSeenByFrame.get(0);
+    assert.equal(firstSeen.get(pathKey(manifestA)), now - 2_900);
+    assert.equal(firstSeen.get(pathKey(manifestB)), now - 900);
+    assert.deepEqual(
+      bg.attributedManifestUrlsForVideo(
+        previousVideos, previousVideos[0], [manifestA],
+        beforePause.sniffTimesByFrame.get(0), firstSeen,
+      ),
+      [manifestA],
+    );
+    assert.deepEqual(
+      bg.attributedManifestUrlsForVideo(
+        previousVideos, previousVideos[1], [manifestB],
+        beforePause.sniffTimesByFrame.get(0), firstSeen,
+      ),
+      [manifestB],
+    );
+    assert.deepEqual(
+      [...bg.preservedSniffsForOtherPlayers(
+        beforePause, 0,
+        { source: videoA.blobUrl, previousVideos },
+        [previousVideos[1]],
+      )],
+      [pathKey(manifestB)],
+    );
     await L["runtime.onMessage"](
       {
         type: "grab-videos-detected",
