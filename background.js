@@ -213,8 +213,6 @@ if (typeof module !== "undefined" && module.exports) {
     wholeVideoMediaSize,
     wholeMediaUrlsForFrame,
     isSegmentLikeVideoUrl,
-    isHlsRenditionPlaylistPath,
-    nestedHlsPlaylistChildKeys,
     MIN_WHOLE_VIDEO_MEDIA_BYTES,
     VIDEO_MANIFEST_ATTRIBUTION_WINDOW_MS,
     resolvedVideoUrls,
