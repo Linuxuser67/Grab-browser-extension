@@ -2503,7 +2503,7 @@ describe("explicit context-menu page URL", () => {
 
 
 
-  test("a single blob player exposes explicit menu candidates without auto-selecting", async () => {
+  test("a single blob player resolves to one best menu candidate", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);
     const first = "https://cdn.example.com/a/master.m3u8";
@@ -2519,8 +2519,8 @@ describe("explicit context-menu page URL", () => {
       ])]]),
       title: "Episode",
     });
-    assert.deepEqual(await bg.resolvedVideoUrlsForFrame(148, 0), [first, second]);
-    assert.equal(await bg.resolvedBlobVideoUrlForFrame(148, 0), null);
+    assert.deepEqual(await bg.resolvedVideoUrlsForFrame(148, 0), [first]);
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(148, 0), first);
   });
 
   test("blob right-click uses only the stream observed in its frame", async () => {
