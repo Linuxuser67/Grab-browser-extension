@@ -2067,7 +2067,9 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVid
     Math.abs(firstTiming.distance - secondTiming.distance) <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
   ) return null;
   return merged[0] || null;
-}/// Resolve a blob element to its single best attributed stream URL. Passing the
+}
+
+/// Resolve a blob element to its single best attributed stream URL. Passing the
 /// element keeps right-click behavior aligned with the global menu even when
 /// several players share a frame.
 async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) {
@@ -2339,6 +2341,7 @@ function isSegmentLikeVideoUrl(url) {
     return true;
   }
 }
+
 function wholeVideoMediaSize(details) {
   if (
     !details ||
