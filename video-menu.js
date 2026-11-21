@@ -2020,7 +2020,11 @@ function dedupeVideoUrlsByPath(urls, finds) {
   const selected = new Map();
   for (const url of urls || []) {
     if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
-    const key = urlPathKey(url);
+    const directSource = finds && finds.frames instanceof Map &&
+      [...finds.frames.values()].some((videos) =>
+        (videos || []).some((video) => video && video.src === url)
+      );
+    const key = directSource ? directVideoUrlIdentityKey(url) : urlPathKey(url);
     const priority = videoUrlCandidatePriority(finds, url);
     const observedAt = videoUrlCandidateObservedAt(finds, url);
     const previous = selected.get(key);
