@@ -88,9 +88,14 @@ async function tabOriginForHlsFetch(tabId) {
 function isAudioOnlyPlaylistUrl(url) {
   try {
     const pathname = new URL(url).pathname.toLowerCase();
-    const filename = pathname.split("/").filter(Boolean).pop() || "";
+    const segments = pathname.split("/").filter(Boolean);
+    const filename = segments.pop() || "";
     const basename = filename.replace(/\.(?:m3u8|m3u|mpd)$/i, "");
-    return /^(?:audio|audio[-_]track|audioonly|audio[-_]only|audio[-_]playlist|audioplaylist)(?:[._-].*)?$/.test(basename);
+    const explicitAudioOnlyDirectory = segments.some((part) =>
+      /^(?:audioonly|audio[-_]only|audio[-_]track)$/.test(part)
+    );
+    return explicitAudioOnlyDirectory ||
+      /^(?:audio|audio[-_]track|audioonly|audio[-_]only|audio[-_]playlist|audioplaylist)(?:[._-].*)?$/.test(basename);
   } catch {
     return false;
   }
