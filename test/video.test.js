@@ -3101,6 +3101,7 @@ describe("HLS master playlist filtering", () => {
   });
 
   test("uses chunklist and prog_index filenames as child hints beside one master", async () => {
+    const bg = loadBackground(makeChrome());
     const master = "https://cdn.example.com/hls/master.m3u8";
     const chunklist = "https://cdn.example.com/hls/chunklist_b123.m3u8";
     const progIndex = "https://cdn.example.com/hls/prog_index_123.m3u8";
@@ -3114,6 +3115,7 @@ describe("HLS master playlist filtering", () => {
   });
 
   test("rotating master tokens do not disable chunklist filename hints", async () => {
+    const bg = loadBackground(makeChrome());
     const masterOld = "https://cdn.example.com/hls/master.m3u8?token=old";
     const masterNew = "https://cdn.example.com/hls/master.m3u8?token=new";
     const child = "https://cdn.example.com/hls/chunklist_b123.m3u8";
@@ -3150,16 +3152,16 @@ describe("HLS master playlist filtering", () => {
     );
   });
 
-  test("preserves candidates when playlist fetching fails", async () => {
+  test("uses conservative filename hints when playlist fetching fails", async () => {
     const master = "https://cdn.example.com/v/42/master.m3u8";
     const chunk = "https://cdn.example.com/v/42/chunklist.m3u8";
     assert.deepEqual(
       await filterWithPlaylists([master, chunk], new Map()),
-      [master, chunk],
+      [master],
     );
   });
 
-  test("preserves candidates when the paired Grab inspector rejects a master", async () => {
+  test("uses filename hints when the paired Grab inspector cannot classify a master", async () => {
     const master = "https://cdn.example.com/v/42/master.m3u8";
     const child = "https://cdn.example.com/v/42/chunklist.m3u8";
     const bg = loadBackground(makeChrome());
@@ -3170,7 +3172,7 @@ describe("HLS master playlist filtering", () => {
         [master, child],
         async () => null,
       ),
-      [master, child],
+      [master],
     );
   });
 
