@@ -586,6 +586,85 @@ describe("per-video menu candidates", () => {
   });
 });
 
+describe("cross-frame video URL deduplication", () => {
+  test("rotating query tokens for the same direct video keep the latest frame URL", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const tabId = 173;
+    await chrome._listeners["tabs.onActivated"]({ tabId });
+    await chrome._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{
+          src: "https://cdn.example.com/watch/main.mp4?token=old",
+          blob: false,
+          elementId: 1,
+          loadStartedAt: 1000,
+        }],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    await chrome._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{
+          src: "https://cdn.example.com/watch/main.mp4?token=new",
+          blob: false,
+          elementId: 1,
+          loadStartedAt: 2000,
+        }],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 7 },
+    );
+
+    assert.deepEqual(
+      await bg.resolvedVideoUrls(tabId),
+      ["https://cdn.example.com/watch/main.mp4?token=new"],
+    );
+    const badges = chrome._calls.filter(([name]) => name === "action.setBadgeText");
+    assert.equal(badges.at(-1)[1].text, "1");
+  });
+
+  test("rotating manifest tokens across frames keep the latest observed URL", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const tabId = 174;
+    await chrome._listeners["tabs.onActivated"]({ tabId });
+    const observations = [
+      { frameId: 0, url: "https://cdn.example.com/live/master.m3u8?token=old", timeStamp: 1000 },
+      { frameId: 8, url: "https://cdn.example.com/live/master.m3u8?token=new", timeStamp: 2000 },
+    ];
+    for (const observation of observations) {
+      await chrome._listeners["webRequest.onResponseStarted"]({
+        tabId,
+        ...observation,
+        responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+      });
+      await chrome._listeners["runtime.onMessage"](
+        {
+          type: "grab-videos-detected",
+          videos: [{
+            src: null,
+            blob: true,
+            blobUrl: "blob:https://example.com/player-" + observation.frameId,
+          }],
+        },
+        { tab: { id: tabId, url: "https://example.com/" }, frameId: observation.frameId },
+      );
+    }
+
+    assert.deepEqual(
+      await bg.resolvedVideoUrls(tabId),
+      ["https://cdn.example.com/live/master.m3u8?token=new"],
+    );
+    assert.equal(
+      await bg.resolvedBlobVideoUrlForFrame(tabId, 0),
+      "https://cdn.example.com/live/master.m3u8?token=old",
+      "frame-scoped right-click resolution retains its own observed token",
+    );
+  });
+});
+
 describe("collectVideos (content script)", () => {
   let content;
   beforeEach(() => {
