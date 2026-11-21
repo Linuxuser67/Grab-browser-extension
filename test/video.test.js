@@ -3082,6 +3082,19 @@ describe("HLS master playlist filtering", () => {
     assert.deepEqual(result, [master]);
   });
 
+  test("rotating master tokens do not disable chunklist filename hints", async () => {
+    const masterOld = "https://cdn.example.com/hls/master.m3u8?token=old";
+    const masterNew = "https://cdn.example.com/hls/master.m3u8?token=new";
+    const child = "https://cdn.example.com/hls/chunklist_b123.m3u8";
+    const result = await bg.preferMasterPlaylists(
+      [masterOld, masterNew, child],
+      "https://page.example/watch",
+      [masterOld, masterNew, child],
+      async () => null,
+    );
+    assert.deepEqual(result, [masterOld, masterNew]);
+  });
+
   test("does not classify an ordinary non-standard media playlist as a master", async () => {
     const ordinary = "https://cdn.example.com/v/42/720p.m3u8";
     const chunk = "https://cdn.example.com/v/42/chunklist.m3u8";
