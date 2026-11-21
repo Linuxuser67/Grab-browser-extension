@@ -446,6 +446,20 @@ describe("mergeVideoFinds", () => {
     assert.deepEqual(bg.mergeVideoFinds([], [dash, hls], kinds), [hls]);
   });
 
+  test("cross-folder protocol pairing does not absorb a direct file in the shared parent directory", () => {
+    const direct = "https://cdn.example.com/episode/full.mp4";
+    const hls = "https://cdn.example.com/episode/hls/master.m3u8";
+    const dash = "https://cdn.example.com/episode/dash/manifest.mpd";
+    const kinds = new Map([
+      [pathKey(hls), "hls"],
+      [pathKey(dash), "dash"],
+    ]);
+    assert.deepEqual(
+      bg.mergeVideoFinds([{ src: direct, blob: false }], [hls, dash], kinds),
+      [direct, hls],
+    );
+  });
+
   test("cross-folder HLS/DASH pairing stays separate when either protocol has multiple candidates", () => {
     const hls = "https://cdn.example.com/episode/hls/master.m3u8";
     const otherHls = "https://cdn.example.com/episode/hls/alternate.m3u8";
