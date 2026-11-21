@@ -646,12 +646,15 @@ describe("per-video menu candidates", () => {
     const hls = "https://cdn.example.com/one/master.m3u8";
     const dash = "https://cdn.example.com/one/manifest.mpd";
     const second = "https://cdn.example.com/two/master.m3u8";
+    const completeMedia = "https://cdn.example.com/one/full.mp4";
     const findings = makeFinds(
       [],
       [hls, dash, second],
-      new Map(),
-      ["https://cdn.example.com/one/preview.mp4"],
+      new Map([[pathKey(completeMedia), 1000]]),
+      [completeMedia, "https://cdn.example.com/one/preview.mp4"],
     );
+    findings.wholeMediaByFrame = new Map([[0, [completeMedia]]]);
+    findings.mediaSizesByFrame = new Map([[0, new Map([[pathKey(completeMedia), 8 * 1024 * 1024]])]]);
 
     const candidates = await bg.menuVideoCandidatesForFrame(findings, 0);
     assert.deepEqual(candidates, [hls, second]);
@@ -707,6 +710,39 @@ describe("per-video menu candidates", () => {
     const video = findings.frames.get(0)[0];
     assert.deepEqual(await bg.resolvedVideoUrls(tabId), [url]);
     assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0, video), url);
+  });
+
+  test("a blob video does not use ordinary or multiple complete media sniffs", async () => {
+    const ordinary = "https://cdn.example.com/video/unknown.mp4";
+    const first = "https://cdn.example.com/video/first.mp4";
+    const second = "https://cdn.example.com/video/second.mp4";
+    const video = [{
+      src: null, blob: true, blobUrl: "blob:https://example.com/player",
+      elementId: 1, loadStartedAt: 2000,
+    }];
+    const ordinaryFinds = makeFinds(
+      video,
+      [],
+      new Map([[pathKey(ordinary), 1900]]),
+      [ordinary],
+    );
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(ordinaryFinds, 0), []);
+
+    const multipleFinds = makeFinds(
+      video,
+      [],
+      new Map([[pathKey(first), 1900], [pathKey(second), 1950]]),
+      [first, second],
+    );
+    multipleFinds.wholeMediaByFrame = new Map([[0, [first, second]]]);
+    multipleFinds.mediaSizesByFrame = new Map([[
+      0,
+      new Map([
+        [pathKey(first), 8 * 1024 * 1024],
+        [pathKey(second), 12 * 1024 * 1024],
+      ]),
+    ]]);
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(multipleFinds, 0), []);
   });
 
   test("whole-file fallback rejects small, partial and segment-like responses", () => {
