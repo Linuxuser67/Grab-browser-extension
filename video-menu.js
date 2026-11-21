@@ -85,14 +85,17 @@ async function tabOriginForHlsFetch(tabId) {
 /// audio, images, pages). Manifests win on content type alone because some
 /// are served extensionless; extensionless media is NOT guessed because
 /// DASH segments look exactly like that.
-function isAudioOnlyPlaylistUrl(url) {
+function isAudioOnlyPlaylistUrl(url, contentType = "") {
   try {
     const pathname = new URL(url).pathname.toLowerCase();
     const segments = pathname.split("/").filter(Boolean);
     const filename = segments.pop() || "";
     const basename = filename.replace(/\.(?:m3u8|m3u|mpd)$/i, "");
+    const contentTypeIsAudioPlaylist =
+      contentType === "audio/x-mpegurl" || contentType === "audio/mpegurl";
     return (
       segments.some((part) => /^(?:audioonly|audio[-_]only|audio[-_]track)$/.test(part)) ||
+      (segments.includes("audio") && contentTypeIsAudioPlaylist) ||
       /^(?:audio|audioonly|audio[-_]only|audio[-_]playlist|audioplaylist)(?:[._-].*)?$/.test(basename)
     );
   } catch {
@@ -115,7 +118,7 @@ function classifyStream(url, contentType) {
   // explicit audio responses and audio-named playlists before extension
   // detection, including playlists served with application/* MIME types.
   if (
-    isAudioOnlyPlaylistUrl(url) ||
+    isAudioOnlyPlaylistUrl(url, ct) ||
     (/^audio\//.test(ct) && ct !== "audio/x-mpegurl" && ct !== "audio/mpegurl")
   ) return null;
   if (/\.(m3u8|m3u|mpd)$/.test(path)) return "manifest";
@@ -594,7 +597,13 @@ function hlsPlaylistNameHints(urls) {
   return hintedChildren;
 }
 
-function nestedHlsPlaylistChildKeys(urls) {
+/// A nested playlist is treated as a child only when its ancestor playlist
+/// was first requested before loadstart and the nested request began after it.
+/// This avoids collapsing separately loaded episode directories.
+function nestedHlsPlaylistChildKeys(urls, firstSeenTimes, loadStartedAt) {
+  if (!Number.isFinite(loadStartedAt) || !(firstSeenTimes instanceof Map)) {
+    return new Set();
+  }
   const playlists = [];
   for (const url of urls || []) {
     if (!isHlsPlaylistUrl(url)) continue;
@@ -607,6 +616,7 @@ function nestedHlsPlaylistChildKeys(urls) {
         path: parsed.pathname,
         directory,
         key: urlPathKey(url),
+        firstSeenAt: firstSeenTimes.get(urlPathKey(url)),
       });
     } catch {
       // Invalid playlist URLs are not candidates.
@@ -615,13 +625,19 @@ function nestedHlsPlaylistChildKeys(urls) {
 
   const childKeys = new Set();
   for (const parent of playlists) {
-    if (parent.directory === "/") continue;
+    if (
+      parent.directory === "/" ||
+      !Number.isFinite(parent.firstSeenAt) ||
+      parent.firstSeenAt > loadStartedAt
+    ) continue;
     for (const child of playlists) {
       if (
         child.origin === parent.origin &&
         child.path !== parent.path &&
         child.directory.length > parent.directory.length &&
-        child.directory.startsWith(parent.directory)
+        child.directory.startsWith(parent.directory) &&
+        Number.isFinite(child.firstSeenAt) &&
+        child.firstSeenAt > loadStartedAt
       ) {
         childKeys.add(child.key);
       }
@@ -670,7 +686,6 @@ async function preferMasterPlaylists(
 
   const masterKeys = new Set();
   const childKeys = hlsPlaylistNameHints(manifests);
-  for (const key of nestedHlsPlaylistChildKeys(manifests)) childKeys.add(key);
   for (const url of manifests) {
     const inspection = results.get(url);
     if (!inspection || inspection.is_master !== true) continue;
@@ -2027,6 +2042,14 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVid
   const firstSeenTimes = sniffFirstSeenTimesForFrame(finds, frameId);
   const loadStartedAt = targetVideo && targetVideo.loadStartedAt;
   let resolved = [...candidates];
+  const nestedChildKeys = nestedHlsPlaylistChildKeys(
+    resolved,
+    firstSeenTimes,
+    loadStartedAt,
+  );
+  if (nestedChildKeys.size > 0) {
+    resolved = resolved.filter((url) => !nestedChildKeys.has(urlPathKey(url)));
+  }
   if (resolved.length > 1) {
     resolved = await preferMasterPlaylists(
       resolved,
@@ -2041,7 +2064,7 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVid
       return { phase: 2, distance: Number.POSITIVE_INFINITY };
     }
     if (!Number.isFinite(loadStartedAt)) {
-      return { phase: 0, distance: firstSeenAt };
+      return { phase: 1, distance: firstSeenAt };
     }
     return firstSeenAt <= loadStartedAt
       ? { phase: 0, distance: loadStartedAt - firstSeenAt }
