@@ -1803,6 +1803,42 @@ describe("detection wiring", () => {
     assert.deepEqual(finds.sniffedByFrame.get(0), [newManifest]);
   });
 
+  test("expired retired state is cleared by frame-specific URL resolution", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 170;
+    const manifest = "https://cdn.example.com/live/master.m3u8";
+    const video = { src: null, blob: true, blobUrl: "blob:https://example.com/expired" };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [video] }, sender,
+    );
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [],
+        replaceFrame: true,
+        lifecycle: "reset",
+        lifecycleSource: video.blobUrl,
+        lifecycleAt: Date.now(),
+      },
+      sender,
+    );
+
+    const finds = bg._videoFinds.get(tabId);
+    finds.retiredFrames.get(0).retiredAt = Date.now() - 6 * 60 * 1000;
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), null);
+    assert.equal(finds.retiredFrames.has(0), false);
+    assert.equal(finds.sniffedByFrame.has(0), false);
+    assert.equal(finds.frames.has(0), false);
+  });
+
   test("pause with multiple active videos deliberately drops ambiguous retained manifests", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);

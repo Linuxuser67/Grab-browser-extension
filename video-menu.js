@@ -952,8 +952,10 @@ function pruneExpiredRetiredFrames(finds, now = Date.now()) {
       retired.retiredAt > now + 60_000 ||
       now - retired.retiredAt < RETIRED_FRAME_TTL_MS
     ) continue;
-    removeFrameSniffsAtOrBefore(finds, frameId, retired.retiredAtSeq);
-    finds.retiredFrames.delete(frameId);
+    // Once the grace period expires, the stream can no longer be safely
+    // attributed. Drop the entire retired frame rather than resurfacing any
+    // post-retirement observations as no-DOM fallback candidates.
+    dropFrame(finds, frameId);
     changed = true;
   }
   return changed;
@@ -1576,7 +1578,9 @@ function findVideoForSource(tabId, srcUrl, frameId) {
 /// that frame and its candidates collapse to one stream after HLS master checks.
 async function resolvedBlobVideoUrlForFrame(tabId, frameId) {
   const finds = videoFinds.get(tabId);
-  if (!finds || finds.retiredFrames.has(frameId)) return null;
+  if (!finds) return null;
+  if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
+  if (finds.retiredFrames.has(frameId)) return null;
   const videos = finds.frames.get(frameId) || [];
   if (videos.length !== 1 || videos[0].blob !== true) return null;
   let urls = mergedVideoUrlsForFrame(tabId, frameId);
@@ -1592,7 +1596,9 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId) {
 
 async function resolvedVideoUrlsForFrame(tabId, frameId) {
   const finds = videoFinds.get(tabId);
-  if (!finds || finds.retiredFrames.has(frameId)) return [];
+  if (!finds) return [];
+  if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
+  if (finds.retiredFrames.has(frameId)) return [];
   const videos = finds.frames.get(frameId) || [];
   if (videos.length === 0) return [];
   if (videos.length > 1) {
