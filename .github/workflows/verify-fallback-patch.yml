@@ -1,0 +1,25 @@
+name: Verify fallback rendition patch applies
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  apply-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply patch to a clean worktree at the stated base
+        env:
+          BASE_SHA: b524ab0272195cc65e335179f5c4caf20e38a0ee
+          PATCH_SHA: b086a92cd9d9c546db2b3fe1a21660f59a6bcdc6
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_SHA"
+          git fetch --no-tags origin "$PATCH_SHA"
+          fresh="$RUNNER_TEMP/fallback-base"
+          git worktree add --detach "$fresh" "$BASE_SHA"
+          git -C "$fresh" apply --check "$GITHUB_WORKSPACE/fallback-rendition-collapse.patch"
+          git -C "$fresh" apply "$GITHUB_WORKSPACE/fallback-rendition-collapse.patch"
+          git -C "$fresh" diff --no-ext-diff --exit-code "$PATCH_SHA" -- test/video.test.js video-menu.js

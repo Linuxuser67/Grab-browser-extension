@@ -1,0 +1,84 @@
+From b086a92cd9d9c546db2b3fe1a21660f59a6bcdc6 Mon Sep 17 00:00:00 2001
+From: Linuxuser67 <41808005+Linuxuser67@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 15:00:15 +0000
+Subject: [PATCH] Collapse HLS renditions in the no-video fallback
+
+---
+ test/video.test.js | 37 +++++++++++++++++++++++++++++++++++++
+ video-menu.js      | 11 ++++++++++-
+ 2 files changed, 47 insertions(+), 1 deletion(-)
+
+diff --git a/test/video.test.js b/test/video.test.js
+index b0534c1..07e16e7 100644
+--- a/test/video.test.js
++++ b/test/video.test.js
+@@ -827,6 +827,43 @@ describe("per-video menu candidates", () => {
+     ]) assert.equal(bg.isHlsRenditionPlaylistPath(path), false, path);
+   });
+
++  // No active <video>: the manifest-only fallback collapses renditions too.
++  async function fallbackPlaylists(requests) {
++    chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
++    const urls = requests.map(([path]) => \`http://192.168.1.20\${path}\`);
++    const firstSeen = new Map(requests.map(([path, at]) => [pathKey(\`http://192.168.1.20\${path}\`), at]));
++    const findings = makeFinds([], urls, new Map(firstSeen));
++    findings.sniffFirstSeenByFrame.set(0, firstSeen);
++    return bg.menuVideoCandidatesForFrame(findings, 0);
++  }
+
++  test("the no-video fallback collapses renditions into their earlier master", async () => {
++    assert.deepEqual(
++      await fallbackPlaylists([
++        ["/v/master.m3u8", 1_000],
++        ["/v/720p/index.m3u8", 1_300],
++        ["/v/1080p/index.m3u8", 1_600],
++      ]),
++      ["http://192.168.1.20/v/master.m3u8"],
++    );
++  });
+
++  test("the no-video fallback keeps unrelated manifests and renditions requested before their parent", async () => {
++    assert.deepEqual(
++      await fallbackPlaylists([
++        ["/a/main/master.m3u8", 1_000],
++        ["/b/other/master.m3u8", 1_300],
++      ]),
++      ["http://192.168.1.20/a/main/master.m3u8", "http://192.168.1.20/b/other/master.m3u8"],
++    );
++    // A rendition seen before the playlist above it is not that playlist's child.
++    const early = await fallbackPlaylists([
++      ["/v/720p/index.m3u8", 1_000],
++      ["/v/master.m3u8", 1_300],
++    ]);
++    assert.ok(early.includes("http://192.168.1.20/v/master.m3u8"));
++  });
+
+   test("a rendition marker in the parent directory does not classify a nested master as a child", async () => {
+     const earlier = "http://192.168.1.20/vod/1080/a.m3u8";
+     const current = "http://192.168.1.20/vod/1080/b/master.m3u8";
+diff --git a/video-menu.js b/video-menu.js
+index ef67929..711f369 100644
+--- a/video-menu.js
++++ b/video-menu.js
+@@ -2302,7 +2302,16 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
+   const manifests = sniffedManifestsForFrame(finds, frameId);
+   const kinds = kindsForFrame(finds, frameId);
+   if (videos.length === 0) {
+-    let fallback = mergeVideoFinds([], manifests, kinds);
++    // No active <video>: collapse renditions into their earlier-requested
++    // master the same way the per-video path does, so one stream is one entry.
++    const nestedChildKeys = nestedHlsPlaylistChildKeys(
++      manifests,
++      sniffFirstSeenTimesForFrame(finds, frameId),
++    );
++    const candidates = nestedChildKeys.size > 0
++      ? manifests.filter((url) => !nestedChildKeys.has(urlPathKey(url)))
++      : manifests;
++    let fallback = mergeVideoFinds([], candidates, kinds);
+     if (fallback.length > 1) {
+       fallback = await preferMasterPlaylists(
+         fallback,
+         await tabOriginForHlsFetch(tabId),
+         manifests,
+-- 
+2.43.0
