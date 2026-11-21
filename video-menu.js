@@ -1580,7 +1580,7 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId) {
   const finds = videoFinds.get(tabId);
   if (!finds) return null;
   if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
-  if (finds.retiredFrames.has(frameId)) return null;
+  if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return null;
   const videos = finds.frames.get(frameId) || [];
   if (videos.length !== 1 || videos[0].blob !== true) return null;
   let urls = mergedVideoUrlsForFrame(tabId, frameId);
@@ -1598,7 +1598,7 @@ async function resolvedVideoUrlsForFrame(tabId, frameId) {
   const finds = videoFinds.get(tabId);
   if (!finds) return [];
   if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
-  if (finds.retiredFrames.has(frameId)) return [];
+  if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return [];
   const videos = finds.frames.get(frameId) || [];
   if (videos.length === 0) return [];
   if (videos.length > 1) {
@@ -1641,7 +1641,13 @@ function menuVideoCandidatesForFrame(finds, frameId) {
   const videos = finds.frames.get(frameId) || [];
   const sniffed = sniffedUrlsForFrame(finds, frameId);
   const kinds = kindsForFrame(finds, frameId);
-  if (videos.length > 0) return mergeVideoFinds(videos, sniffed, kinds);
+  if (videos.length > 0) {
+    // Task A separates media storage so it cannot evict manifests, while
+    // preserving the pre-Task-B candidate behavior. Task B applies the
+    // per-element relevance rules to this bounded media ring.
+    const media = mediaUrlsForFrame(finds, frameId);
+    return mergeVideoFinds(videos, [...sniffed, ...media], kinds);
+  }
 
   const manifests = sniffed.filter((url) => {
     const kind = manifestKind(url) || kinds.get(urlPathKey(url));
