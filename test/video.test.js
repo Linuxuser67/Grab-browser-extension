@@ -758,6 +758,26 @@ describe("per-video menu candidates", () => {
     assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [deepRendition]);
   });
 
+  test("a rendition marker in the parent directory does not classify a nested master as a child", async () => {
+    const earlier = "http://192.168.1.20/vod/1080/a.m3u8";
+    const current = "http://192.168.1.20/vod/1080/b/master.m3u8";
+    chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://page.example/player",
+        elementId: 1, loadStartedAt: 20_000,
+      }],
+      [earlier, current],
+      new Map([[pathKey(earlier), 1_000], [pathKey(current), 19_800]]),
+    );
+    findings.sniffFirstSeenByFrame.set(0, new Map([
+      [pathKey(earlier), 1_000],
+      [pathKey(current), 19_800],
+    ]));
+
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [current]);
+  });
+
   test("separate nested episode directories remain attributed to their own players", async () => {
     const episodeA = "http://192.168.1.20/abc/episode-a/playlist.m3u8";
     const episodeB = "http://192.168.1.20/abc/episode-b/720p/stream.m3u8";
