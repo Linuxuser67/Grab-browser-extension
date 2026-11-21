@@ -697,7 +697,7 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
   // Keep query-bearing direct resources distinct when their query values
   // identify different media objects, not just different authentication.
   const directSourceKeysByPath = new Map();
-  for (const item of groupingCandidates) {
+  for (const item of candidates) {
     if (!item.fromDom) continue;
     const path = urlPathKey(item.url);
     let keys = directSourceKeysByPath.get(path);
