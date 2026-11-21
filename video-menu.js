@@ -2177,7 +2177,7 @@ function videoUrlCandidatePriority(finds, url) {
 }
 
 const AUTH_QUERY_PARAMETER_NAME =
-  /^(?:access[-_]?token|api[-_]?token|auth|auth[-_]?key|auth[-_]?token|authorization|bearer|exp|expires|expiry|hdnea|hdnts|hmac|jwt|policy|session[-_]?token|sig|signature|x-amz-(?:credential|date|expires|security-token|signature)|x-goog-(?:algorithm|credential|date|expires|signature))$/i;
+  /^(?:access[-_]?token|api[-_]?token|auth|auth[-_]?key|auth[-_]?token|authorization|bearer|exp|expires|expiry|hdnea|hdnts|hmac|jwt|policy|session[-_]?token|sig|signature|token|x-amz-(?:credential|date|expires|security-token|signature)|x-goog-(?:algorithm|credential|date|expires|signature))$/i;
 
 /// Build a stable request identity while ignoring only recognized auth-token
 /// query parameters. Preserve every other parameter's spelling, encoding and order.
