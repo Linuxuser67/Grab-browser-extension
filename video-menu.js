@@ -1864,9 +1864,9 @@ function videoManifestPriority(url, kinds) {
   return kind === "hls" ? 30 : kind === "manifest" ? 25 : kind === "dash" ? 20 : 0;
 }
 
-/// Attribute each manifest to the nearest element resource start that follows
-/// the request. When several active videos cannot be distinguished in time,
-/// the manifest is deliberately dropped instead of being guessed.
+/// A lone active player owns the frame's manifests. For concurrent players,
+/// use the first request observation and each element's real loadstart time;
+/// when ownership is uncertain, omit the manifest rather than guessing.
 function attributedManifestUrlsForVideo(
   videos,
   targetVideo,
@@ -2310,11 +2310,16 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
   }
 
   const sequences = sniffSequenceMapForFrame(f, sourceFrame, true);
+  const hadPriorObservation = sequences.has(key);
   sequences.set(key, nextSniffSequence(f));
   const times = sniffTimeMapForFrame(f, sourceFrame, true);
   times.set(key, validLifecycleTime(observedAt));
   const firstSeen = sniffFirstSeenMapForFrame(f, sourceFrame, true);
-  if (!firstSeen.has(key)) firstSeen.set(key, validLifecycleTime(observedAt));
+  // Do not manufacture first-seen timing for entries restored from older v2
+  // snapshots: only a genuinely new path has a trustworthy initial request time.
+  if (!hadPriorObservation && !firstSeen.has(key)) {
+    firstSeen.set(key, validLifecycleTime(observedAt));
+  }
 
   const limit = kind === "manifest"
     ? MAX_MANIFESTS_PER_FRAME
