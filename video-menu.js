@@ -54,21 +54,6 @@ function removeContextMenu(id) {
   });
 }
 
-// Host exclusion domains and their predicate are defined once in shared.js.
-
-/// True when the tab lives on an excluded host. Host permissions are granted,
-/// so tabs.get exposes the URL; anything odd (no tab, weird URL) is treated
-/// as not excluded.
-async function isExcludedTab(tabId) {
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    const url = tab && tab.url;
-    return !!url && sharedHostExcluded(new URL(url).hostname);
-  } catch {
-    return false;
-  }
-}
-
 /// The HLS fetch policy needs the top-level origin to distinguish a local
 /// player's own manifest from a public page's attempt to probe another host.
 async function tabOriginForHlsFetch(tabId) {
@@ -2709,9 +2694,6 @@ async function doRefreshVideoMenu(tabId) {
     // Playlist candidates do not require a unique or even discoverable
     // <video> element; individual element clicks remain frame-scoped below.
     let urls = tabId === videoUi.activeTabId ? await resolvedVideoUrls(tabId) : [];
-    // Backstop: collection already filters excluded hosts, but a tab may
-    // have navigated there after its videos were recorded.
-    if (urls.length > 0 && (await isExcludedTab(tabId))) urls = [];
     // The setting can change while the manifest checks above are awaiting.
     if (!videoUi.detectVideosOn) urls = [];
     // One entry per video/stream; its rows go straight into the one submenu
@@ -2866,16 +2848,12 @@ async function onSniffedResponse(details) {
   if (!videoUi.detectVideosOn) return;
   if (details.tabId == null || details.tabId < 0) return;
   // Classify first: it is synchronous and rejects nearly every response,
-  // so the tabs.get round trip below only runs for real stream hits.
+  // so unrelated traffic is discarded before touching detection state.
   const kind = classifyStream(
     details.url,
     sniffedHeader(details.responseHeaders, "content-type"),
   );
   if (kind === null) return;
-  // Skip yt-dlp-exclusive hosts at collection time: their players use
-  // auth-gated URLs, so sniffed manifests are unusable noise. Filtering
-  // here (not just at menu-build) keeps videoFinds clean.
-  if (await isExcludedTab(details.tabId)) return;
   await restoreVideoFinds(details.tabId);
   noteSniffed(
     details.tabId,
@@ -2996,12 +2974,6 @@ async function onVideoReport(msg, sender) {
   if (!videoUi.detectVideosOn) return;
   const tabId = sender && sender.tab && sender.tab.id;
   if (tabId == null || tabId < 0) return;
-  // Same collection-time filter: sender.tab.url is available synchronously.
-  try {
-    if (sender.tab.url && sharedHostExcluded(new URL(sender.tab.url).hostname)) return;
-  } catch {
-    // Unparseable URL: fall through and let the menu-build check decide.
-  }
   await restoreVideoFinds(tabId);
   const reportedFrameId = sender && sender.frameId != null ? sender.frameId : 0;
   const frameId =
