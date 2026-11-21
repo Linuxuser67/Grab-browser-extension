@@ -597,11 +597,25 @@ function hlsPlaylistNameHints(urls) {
   return hintedChildren;
 }
 
-/// A nested HLS playlist is a child when it is strictly below an
-/// earlier-requested playlist on the same origin. Comparing request order,
-/// rather than loadstart, also handles players that fetch renditions before
-/// attaching their media element. The root-directory guard and path-boundary
-/// check keep sibling episode directories independent.
+/// A rendition playlist must carry a recognizable quality/variant marker.
+/// Checking path components (including the filename) avoids treating an
+/// unrelated nested content master as a rendition merely because it is newer.
+function isHlsRenditionPlaylistPath(path) {
+  const parts = String(path || "").split("/").filter(Boolean);
+  return parts.some((part) => {
+    const name = part.replace(/\.m3u8?$/i, "");
+    if (/^(?:chunklist|prog_index)(?:[._-].*)?$/i.test(name)) return true;
+    if (/^video[_-].+/i.test(name)) return true;
+    return name.split(/[._-]+/).some((token) =>
+      /^(?:\d{3,4}p?|variant\d*|level\d*)$/i.test(token)
+    );
+  });
+}
+
+/// A nested HLS playlist is a child only when it is exactly one directory
+/// below an earlier-requested playlist on the same origin and identifies
+/// itself as a rendition. Request order handles pre-load fetches, while the
+/// rendition and depth checks keep unrelated nested masters independent.
 function nestedHlsPlaylistChildKeys(urls, firstSeenTimes) {
   if (!(firstSeenTimes instanceof Map)) return new Set();
   const playlists = [];
@@ -631,12 +645,22 @@ function nestedHlsPlaylistChildKeys(urls, firstSeenTimes) {
     ) continue;
     for (const child of playlists) {
       if (
-        child.origin === parent.origin &&
-        child.path !== parent.path &&
-        child.directory.length > parent.directory.length &&
-        child.directory.startsWith(parent.directory) &&
-        Number.isFinite(child.firstSeenAt) &&
-        child.firstSeenAt > parent.firstSeenAt
+        child.origin !== parent.origin ||
+        child.path === parent.path ||
+        !child.directory.startsWith(parent.directory) ||
+        !Number.isFinite(child.firstSeenAt) ||
+        child.firstSeenAt <= parent.firstSeenAt
+      ) continue;
+
+      const nestedDirectoryParts = child.directory
+        .slice(parent.directory.length)
+        .split("/")
+        .filter(Boolean);
+      const childFilename = child.path.slice(child.path.lastIndexOf("/") + 1);
+      const renditionPath = [...nestedDirectoryParts, childFilename].join("/");
+      if (
+        nestedDirectoryParts.length === 1 &&
+        isHlsRenditionPlaylistPath(renditionPath)
       ) {
         childKeys.add(child.key);
       }
