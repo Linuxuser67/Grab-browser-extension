@@ -4290,4 +4290,74 @@ describe("warned tabs survive a worker restart", () => {
       "the paused player's manifest is discarded without evicting the active player's manifest");
     assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0, finds.frames.get(0)[0]), manifestB);
   });
+
+  test("re-sniffing a pre-retirement playlist does not masquerade as a new stream", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 187;
+    const original = "https://cdn.example.com/live/master.m3u8?token=old";
+    const refreshed = "https://cdn.example.com/live/master.m3u8?token=rotated";
+    const other = "https://cdn.example.com/other/master.m3u8";
+    const oldVideo = {
+      src: null, blob: true, blobUrl: "blob:https://example.com/old-player",
+    };
+    const newVideo = {
+      src: null, blob: true, blobUrl: "blob:https://example.com/new-player",
+    };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+    const pauseAt = Date.now();
+
+    for (const [url, timeStamp] of [[original, pauseAt - 200], [other, pauseAt - 100]]) {
+      await L["webRequest.onResponseStarted"]({
+        tabId,
+        frameId: 0,
+        url,
+        timeStamp,
+        responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+      });
+    }
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [oldVideo] },
+      sender,
+    );
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [],
+        replaceFrame: true,
+        lifecycle: "reset",
+        lifecycleSource: oldVideo.blobUrl,
+        lifecycleAt: pauseAt,
+      },
+      sender,
+    );
+
+    const finds = bg._videoFinds.get(tabId);
+    const key = new URL(original).origin + new URL(original).pathname;
+    const originalSequence = finds.sniffSequencesByFrame.get(0).get(key);
+    await L["webRequest.onResponseStarted"]({
+      tabId,
+      frameId: 0,
+      url: refreshed,
+      timeStamp: pauseAt + 100,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    assert.equal(
+      finds.sniffSequencesByFrame.get(0).get(key),
+      originalSequence,
+      "a refresh keeps the path's original observation sequence",
+    );
+
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [newVideo] },
+      sender,
+    );
+    assert.deepEqual(
+      finds.sniffedByFrame.get(0),
+      [refreshed, other],
+      "a same-path refresh alone does not trigger new-stream cleanup",
+    );
+    assert.equal(finds.retiredFrames.has(0), false);
+  });
 });
