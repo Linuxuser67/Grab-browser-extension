@@ -536,6 +536,42 @@ function hlsChildPlaylistKeys(text, masterUrl) {
 /// reference. Public hosts are inspected by Grab through its guarded resolver;
 /// syntactically private hosts retain the existing private-page-only local path.
 /// Unknown playlists, unrelated streams, DASH manifests, and direct files stay.
+function hlsPlaylistNameHints(urls) {
+  const mastersByFolder = new Map();
+  const childrenByFolder = new Map();
+  for (const url of urls || []) {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      continue;
+    }
+    const basename = parsed.pathname.split("/").filter(Boolean).pop() || "";
+    const parent = parsed.pathname.slice(0, Math.max(1, parsed.pathname.lastIndexOf("/")));
+    const folder = parsed.origin + parent;
+    const key = urlPathKey(url);
+    if (/^(?:master|index|playlist|hlsplaylist|stream)(?:[_-][a-z0-9]+)?\.(?:m3u8|m3u)$/i.test(basename)) {
+      let masters = mastersByFolder.get(folder);
+      if (!masters) mastersByFolder.set(folder, masters = []);
+      masters.push(key);
+    } else if (/^(?:chunklist|prog_index)(?:[_-].*)?\.(?:m3u8|m3u)$/i.test(basename)) {
+      let children = childrenByFolder.get(folder);
+      if (!children) childrenByFolder.set(folder, children = []);
+      children.push(key);
+    }
+  }
+
+  const hintedChildren = new Set();
+  for (const [folder, masters] of mastersByFolder) {
+    // More than one plausible master in a directory makes the hint ambiguous.
+    if (masters.length !== 1) continue;
+    for (const child of childrenByFolder.get(folder) || []) {
+      if (child !== masters[0]) hintedChildren.add(child);
+    }
+  }
+  return hintedChildren;
+}
+
 async function preferMasterPlaylists(
   urls,
   tabOrigin = null,
@@ -575,7 +611,7 @@ async function preferMasterPlaylists(
   await Promise.all(workers);
 
   const masterKeys = new Set();
-  const childKeys = new Set();
+  const childKeys = hlsPlaylistNameHints(manifests);
   for (const url of manifests) {
     const inspection = results.get(url);
     if (!inspection || inspection.is_master !== true) continue;
@@ -583,7 +619,7 @@ async function preferMasterPlaylists(
     for (const key of inspection.child_keys) childKeys.add(key);
   }
 
-  if (masterKeys.size === 0 || childKeys.size === 0) return urls || [];
+  if (childKeys.size === 0) return urls || [];
   return (urls || []).filter((url) => {
     if (!isHlsPlaylistUrl(url)) return true;
     const key = urlPathKey(url);
