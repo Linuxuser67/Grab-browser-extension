@@ -1772,7 +1772,7 @@ function sniffedManifestsForFrame(finds, frameId) {
   const kinds = kindsForFrame(finds, frameId);
   return sniffedUrlsForFrame(finds, frameId).filter((url) => {
     const kind = manifestKind(url) || kinds.get(urlPathKey(url));
-    return isManifestKind(kind);
+    return isManifestKind(kind) && !isSegmentLikeVideoUrl(url);
   });
 }
 
@@ -2087,10 +2087,10 @@ function isSegmentLikeVideoUrl(url) {
   try {
     const path = new URL(url).pathname.toLowerCase();
     const basename = path.split("/").filter(Boolean).pop() || "";
-    if (/(?:^|\/)(?:segments?|chunks?|fragments?|previews?|ads?|thumbnails?|storyboards?|sprites?)(?:\/|$)/.test(path)) {
+    if (/(?:^|\/)(?:segments?|chunks?|fragments?|previews?|pre[-_]rolls?|prerolls?|mid[-_]rolls?|midrolls?|post[-_]rolls?|postrolls?|ads?|thumbnails?|storyboards?|sprites?|subtitles?|captions?|audio(?:[-_]only)?|prefetch(?:es)?)(?:\/|$)/.test(path)) {
       return true;
     }
-    if (/^(?:preview|trailer|teaser|ad|advert|advertisement|promo|thumbnail|thumb|storyboard|sprite)(?:[._-]|$)/.test(basename)) {
+    if (/^(?:preview|trailer|teaser|ad|advert|advertisement|promo|thumbnail|thumb|storyboard|sprite|preroll|midroll|postroll|prefetch)(?:[._-]|$)/.test(basename)) {
       return true;
     }
     return /(?:^|[._-])(?:seg(?:ment)?|chunk|part|frag(?:ment)?)[._-]?\d+(?:[._-]|$)/.test(basename);
