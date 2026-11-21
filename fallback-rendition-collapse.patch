@@ -60,10 +60,7 @@ diff --git a/video-menu.js b/video-menu.js
 index ef67929..711f369 100644
 --- a/video-menu.js
 +++ b/video-menu.js
-@@ -2302,7 +2302,16 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
-   const manifests = sniffedManifestsForFrame(finds, frameId);
-   const kinds = kindsForFrame(finds, frameId);
-   if (videos.length === 0) {
+@@ -2305,1 +2305,10 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
 -    let fallback = mergeVideoFinds([], manifests, kinds);
 +    // No active <video>: collapse renditions into their earlier-requested
 +    // master the same way the per-video path does, so one stream is one entry.
@@ -75,10 +72,5 @@ index ef67929..711f369 100644
 +      ? manifests.filter((url) => !nestedChildKeys.has(urlPathKey(url)))
 +      : manifests;
 +    let fallback = mergeVideoFinds([], candidates, kinds);
-     if (fallback.length > 1) {
-       fallback = await preferMasterPlaylists(
-         fallback,
-         await tabOriginForHlsFetch(tabId),
-         manifests,
 -- 
 2.43.0
