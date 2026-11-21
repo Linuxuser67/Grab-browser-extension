@@ -210,6 +210,7 @@ if (typeof module !== "undefined" && module.exports) {
     menuVideoCandidatesForFrame,
     attributedManifestUrlsForVideo,
     preservedSniffsForOtherPlayers,
+    sniffedManifestsForFrame,
     wholeVideoMediaSize,
     wholeMediaUrlsForFrame,
     isSegmentLikeVideoUrl,
