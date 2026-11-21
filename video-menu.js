@@ -757,6 +757,7 @@ const RETIRED_FRAME_TTL_MS = 5 * 60 * 1000;
 // A manifest must precede an element's resource start and be close enough to
 // that event to be a plausible request for the same playback session.
 const VIDEO_MANIFEST_ATTRIBUTION_WINDOW_MS = 30_000;
+const VIDEO_MANIFEST_POST_LOAD_WINDOW_MS = 5_000;
 const VIDEO_MANIFEST_ATTRIBUTION_TIE_MS = 250;
 const videoFinds = new Map();
 
@@ -770,6 +771,7 @@ function createVideoFinds() {
     kindsByFrame: new Map(),
     sniffSequencesByFrame: new Map(),
     sniffTimesByFrame: new Map(),
+    sniffFirstSeenByFrame: new Map(),
     retiredFrames: new Map(),
     sniffSequence: 0,
     title: "",
@@ -788,6 +790,7 @@ function trackedFrameIds(f) {
   for (const id of f.kindsByFrame.keys()) ids.add(id);
   for (const id of f.sniffSequencesByFrame.keys()) ids.add(id);
   for (const id of f.sniffTimesByFrame.keys()) ids.add(id);
+  for (const id of f.sniffFirstSeenByFrame.keys()) ids.add(id);
   for (const id of f.retiredFrames.keys()) ids.add(id);
   return ids;
 }
@@ -803,6 +806,7 @@ function dropFrame(f, frameId) {
   f.kindsByFrame.delete(frameId);
   f.sniffSequencesByFrame.delete(frameId);
   f.sniffTimesByFrame.delete(frameId);
+  f.sniffFirstSeenByFrame.delete(frameId);
   f.retiredFrames.delete(frameId);
 }
 
@@ -918,6 +922,19 @@ function sniffTimeMapForFrame(finds, frameId, create = false) {
   return times || null;
 }
 
+function sniffFirstSeenMapForFrame(finds, frameId, create = false) {
+  if (!(finds.sniffFirstSeenByFrame instanceof Map)) {
+    if (!create) return null;
+    finds.sniffFirstSeenByFrame = new Map();
+  }
+  let firstSeen = finds.sniffFirstSeenByFrame.get(frameId);
+  if (!firstSeen && create) {
+    firstSeen = new Map();
+    finds.sniffFirstSeenByFrame.set(frameId, firstSeen);
+  }
+  return firstSeen || null;
+}
+
 function validLifecycleTime(value, fallback = Date.now()) {
   return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
@@ -954,6 +971,7 @@ function removeFrameSniffsAtOrBefore(finds, frameId, sequence) {
   const cutoff = Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : 0;
   const sequences = sniffSequenceMapForFrame(finds, frameId);
   const times = sniffTimeMapForFrame(finds, frameId);
+  const firstSeen = sniffFirstSeenMapForFrame(finds, frameId);
   const lists = [
     finds.sniffedByFrame,
     finds.mediaByFrame,
@@ -986,10 +1004,12 @@ function removeFrameSniffsAtOrBefore(finds, frameId, sequence) {
     for (const key of removedKeys) {
       sequences.delete(key);
       if (times) times.delete(key);
+      if (firstSeen) firstSeen.delete(key);
     }
     if (sequences.size === 0) finds.sniffSequencesByFrame.delete(frameId);
   }
   if (times && times.size === 0) finds.sniffTimesByFrame.delete(frameId);
+  if (firstSeen && firstSeen.size === 0) finds.sniffFirstSeenByFrame.delete(frameId);
   const kinds = finds.kindsByFrame.get(frameId);
   if (kinds) {
     for (const key of removedKeys) {
@@ -1276,6 +1296,23 @@ function snapshotVideoFinds(finds) {
     if (out.length) sniffTimes.push([frameId, out]);
   }
 
+  const sniffFirstSeen = [];
+  for (const [frameId, times] of finds.sniffFirstSeenByFrame || []) {
+    if (sniffFirstSeen.length >= MAX_VIDEO_FRAMES) break;
+    const out = [];
+    for (const [key, observedAt] of times || []) {
+      if (
+        out.length >= MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME ||
+        typeof key !== "string" ||
+        key.length > MAX_GRAB_URL_BYTES ||
+        !Number.isFinite(observedAt) ||
+        observedAt < 0
+      ) continue;
+      out.push([key, observedAt]);
+    }
+    if (out.length) sniffFirstSeen.push([frameId, out]);
+  }
+
   const retiredFrames = [];
   for (const [frameId, retired] of finds.retiredFrames || []) {
     if (retiredFrames.length >= MAX_VIDEO_FRAMES) break;
@@ -1307,6 +1344,7 @@ function snapshotVideoFinds(finds) {
     kindsFrames,
     sniffSequences,
     sniffTimes,
+    sniffFirstSeen,
     sniffSequence: Number.isSafeInteger(finds.sniffSequence) && finds.sniffSequence >= 0
       ? finds.sniffSequence
       : 0,
@@ -1605,6 +1643,31 @@ async function restoreVideoFinds(tabId) {
           }
         }
 
+        const sniffFirstSeenByFrame = new Map();
+        for (const pair of Array.isArray(saved.sniffFirstSeen) ? saved.sniffFirstSeen : []) {
+          if (
+            !Array.isArray(pair) ||
+            pair.length !== 2 ||
+            !Number.isInteger(pair[0]) ||
+            pair[0] < 0 ||
+            !Array.isArray(pair[1]) ||
+            sniffFirstSeenByFrame.size >= MAX_VIDEO_FRAMES
+          ) continue;
+          const firstSeen = new Map();
+          for (const entry of pair[1].slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME)) {
+            if (
+              !Array.isArray(entry) ||
+              entry.length !== 2 ||
+              typeof entry[0] !== "string" ||
+              entry[0].length > MAX_GRAB_URL_BYTES ||
+              !Number.isFinite(entry[1]) ||
+              entry[1] < 0
+            ) continue;
+            firstSeen.set(entry[0], entry[1]);
+          }
+          if (firstSeen.size) sniffFirstSeenByFrame.set(pair[0], firstSeen);
+        }
+
         const retiredFrames = new Map();
         for (const pair of Array.isArray(saved.retiredFrames) ? saved.retiredFrames : []) {
           if (
@@ -1656,6 +1719,7 @@ async function restoreVideoFinds(tabId) {
           kindsByFrame,
           sniffSequencesByFrame,
           sniffTimesByFrame,
+          sniffFirstSeenByFrame,
           retiredFrames,
           sniffSequence,
           title: typeof saved.title === "string" ? saved.title.slice(0, MAX_VIDEO_TITLE_LENGTH) : "",
@@ -1781,6 +1845,12 @@ function sniffTimesForFrame(finds, frameId) {
     : new Map();
 }
 
+function sniffFirstSeenTimesForFrame(finds, frameId) {
+  return finds.sniffFirstSeenByFrame instanceof Map
+    ? finds.sniffFirstSeenByFrame.get(frameId) || new Map()
+    : new Map();
+}
+
 function sniffedManifestsForFrame(finds, frameId) {
   const kinds = kindsForFrame(finds, frameId);
   return sniffedUrlsForFrame(finds, frameId).filter((url) => {
@@ -1797,53 +1867,54 @@ function videoManifestPriority(url, kinds) {
 /// Attribute each manifest to the nearest element resource start that follows
 /// the request. When several active videos cannot be distinguished in time,
 /// the manifest is deliberately dropped instead of being guessed.
-function attributedManifestUrlsForVideo(videos, targetVideo, manifests, sniffTimes) {
+function attributedManifestUrlsForVideo(
+  videos,
+  targetVideo,
+  manifests,
+  _sniffTimes,
+  firstSeenTimes = _sniffTimes,
+) {
   if (!Array.isArray(videos) || !videos.includes(targetVideo)) return [];
-  const multipleVideos = videos.length > 1;
+  // A frame with one active player has one unambiguous owner. Timing is only
+  // needed to disambiguate concurrent players; hls.js commonly requests its
+  // manifest after loadstart, and older manifests can precede it by minutes.
+  if (videos.length === 1) return Array.isArray(manifests) ? manifests : [];
 
-  if (multipleVideos) {
-    const elementIds = new Set();
-    for (const video of videos) {
-      if (
-        !video ||
-        !Number.isSafeInteger(video.elementId) ||
-        video.elementId <= 0 ||
-        !Number.isFinite(video.loadStartedAt) ||
-        video.loadStartedAt < 0 ||
-        elementIds.has(video.elementId)
-      ) return [];
-      elementIds.add(video.elementId);
-    }
+  const elementIds = new Set();
+  for (const video of videos) {
+    if (
+      !video ||
+      !Number.isSafeInteger(video.elementId) ||
+      video.elementId <= 0 ||
+      !Number.isFinite(video.loadStartedAt) ||
+      video.loadStartedAt < 0 ||
+      elementIds.has(video.elementId)
+    ) return [];
+    elementIds.add(video.elementId);
   }
 
   const attributed = [];
-  for (const url of manifests) {
-    const observedAt = sniffTimes.get(urlPathKey(url));
-    // Old v2 reports have no element timing. Preserve their single-player
-    // fallback even when the corresponding sniff timestamp was persisted.
-    if (!multipleVideos && !Number.isFinite(targetVideo.loadStartedAt)) {
-      attributed.push(url);
-      continue;
-    }
-    // A single active player owns its frame's manifests, but timestamped
-    // requests must still belong to that player's current resource load.
+  for (const url of manifests || []) {
+    const observedAt = firstSeenTimes instanceof Map
+      ? firstSeenTimes.get(urlPathKey(url))
+      : null;
     if (!Number.isFinite(observedAt) || observedAt < 0) continue;
 
     const possibleOwners = videos
-      .map((video) => ({
-        video,
-        gap: video.loadStartedAt - observedAt,
-      }))
+      .map((video) => {
+        const gap = video.loadStartedAt - observedAt;
+        return { video, gap, distance: Math.abs(gap) };
+      })
       .filter(({ gap }) =>
         Number.isFinite(gap) &&
-        gap >= 0 &&
+        gap >= -VIDEO_MANIFEST_POST_LOAD_WINDOW_MS &&
         gap <= VIDEO_MANIFEST_ATTRIBUTION_WINDOW_MS
       )
-      .sort((a, b) => a.gap - b.gap);
+      .sort((a, b) => a.distance - b.distance);
     if (possibleOwners.length === 0) continue;
     if (
       possibleOwners.length > 1 &&
-      possibleOwners[1].gap - possibleOwners[0].gap <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
+      possibleOwners[1].distance - possibleOwners[0].distance <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
     ) continue;
     if (possibleOwners[0].video === targetVideo) attributed.push(url);
   }
@@ -1897,11 +1968,13 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) 
   if (!video || video.blob !== true || !videos.includes(video)) return null;
   const manifests = sniffedManifestsForFrame(finds, frameId);
   const sniffTimes = sniffTimesForFrame(finds, frameId);
+  const firstSeenTimes = sniffFirstSeenTimesForFrame(finds, frameId);
   const attributed = attributedManifestUrlsForVideo(
     videos,
     video,
     manifests,
     sniffTimes,
+    firstSeenTimes,
   );
   const best = await bestManifestForVideo(tabId, finds, frameId, attributed, video);
   if (best) return best;
@@ -2020,6 +2093,7 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
 
   const urls = [];
   const sniffTimes = sniffTimesForFrame(finds, frameId);
+  const firstSeenTimes = sniffFirstSeenTimesForFrame(finds, frameId);
   for (const video of videos) {
     if (video && typeof video.src === "string" && fitsGrabUrl(video.src)) {
       urls.push(video.src);
@@ -2031,6 +2105,7 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
       video,
       manifests,
       sniffTimes,
+      firstSeenTimes,
     );
     const best = await bestManifestForVideo(tabId, finds, frameId, attributed, video);
     if (best) {
@@ -2044,6 +2119,7 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
       video,
       wholeMedia,
       sniffTimes,
+      firstSeenTimes,
     );
     const uniqueMedia = dedupeVideoUrlsByPath(attributedMedia, finds);
     if (uniqueMedia.length === 1) urls.push(uniqueMedia[0]);
@@ -2237,6 +2313,8 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
   sequences.set(key, nextSniffSequence(f));
   const times = sniffTimeMapForFrame(f, sourceFrame, true);
   times.set(key, validLifecycleTime(observedAt));
+  const firstSeen = sniffFirstSeenMapForFrame(f, sourceFrame, true);
+  if (!firstSeen.has(key)) firstSeen.set(key, validLifecycleTime(observedAt));
 
   const limit = kind === "manifest"
     ? MAX_MANIFESTS_PER_FRAME
@@ -2262,12 +2340,14 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
     if (!stillPresent) {
       sequences.delete(removedKey);
       times.delete(removedKey);
+      firstSeen.delete(removedKey);
       kinds.delete(removedKey);
     }
   }
   if (urls.length === 0) listMap.delete(sourceFrame);
   if (sequences.size === 0) f.sniffSequencesByFrame.delete(sourceFrame);
   if (times.size === 0) f.sniffTimesByFrame.delete(sourceFrame);
+  if (firstSeen.size === 0) f.sniffFirstSeenByFrame.delete(sourceFrame);
   if (kinds.size === 0) f.kindsByFrame.delete(sourceFrame);
 }
 
