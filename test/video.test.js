@@ -4014,4 +4014,136 @@ describe("warned tabs survive a worker restart", () => {
     await bg.warnedTabsReady;
     assert.deepEqual([...bg._warnedTabs], [3]);
   });
+
+  test("a single blob player keeps manifests requested after loadstart, after refresh, and long before loadstart", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 181;
+    const startedAt = Date.now() - 45_000;
+    const first = "https://cdn.example.com/player/master.m3u8?token=first";
+    const refreshed = "https://cdn.example.com/player/master.m3u8?token=rotated";
+    const video = {
+      src: null,
+      blob: true,
+      blobUrl: "blob:https://example.com/single-player",
+      elementId: 1,
+      loadStartedAt: startedAt,
+    };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await L["webRequest.onResponseStarted"]({
+      tabId,
+      frameId: 0,
+      url: first,
+      timeStamp: startedAt + 2_000,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [video] },
+      sender,
+    );
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), first,
+      "a manifest requested shortly after loadstart is accepted");
+
+    await L["webRequest.onResponseStarted"]({
+      tabId,
+      frameId: 0,
+      url: refreshed,
+      timeStamp: Date.now(),
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), refreshed,
+      "re-sniffing a live playlist with a rotated token does not hide it");
+
+    const oldTab = tabId + 1;
+    const oldChrome = makeChrome();
+    const oldBg = loadBackground(oldChrome);
+    const oldManifest = "https://cdn.example.com/old/master.m3u8";
+    await oldChrome._listeners["webRequest.onResponseStarted"]({
+      tabId: oldTab,
+      frameId: 0,
+      url: oldManifest,
+      timeStamp: startedAt - 90_000,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await oldChrome._listeners["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [video] },
+      { tab: { id: oldTab, url: "https://example.com/" }, frameId: 0 },
+    );
+    assert.equal(await oldBg.resolvedBlobVideoUrlForFrame(oldTab, 0), oldManifest,
+      "a single player is not rejected because its manifest is more than 30 seconds old");
+  });
+
+  test("multi-player attribution uses first-seen manifest timing and allows a short post-load request", async () => {
+    const shared = {};
+    const chrome = makeChrome(shared);
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 183;
+    const now = Date.now();
+    const firstSeenAt = now - 950;
+    const startA = now - 1_000;
+    const startB = now - 500;
+    const initial = "https://cdn.example.com/player-a/master.m3u8?token=old";
+    const refreshed = "https://cdn.example.com/player-a/master.m3u8?token=new";
+    const videoA = {
+      src: null, blob: true, blobUrl: "blob:https://example.com/a",
+      elementId: 11, loadStartedAt: startA,
+    };
+    const videoB = {
+      src: null, blob: true, blobUrl: "blob:https://example.com/b",
+      elementId: 12, loadStartedAt: startB,
+    };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: initial, timeStamp: firstSeenAt,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [videoA, videoB] },
+      sender,
+    );
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: refreshed, timeStamp: now - 100,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0, videoA), refreshed,
+      "the original request timing still attributes a refreshed URL to player A");
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0, videoB), null,
+      "the refresh timestamp is not used to reassign player A's manifest to player B");
+
+    await bg._persistVideoFinds(tabId);
+    const restarted = loadBackground(makeChrome(shared));
+    await restarted._restoreVideoFinds(tabId);
+    const restoredVideos = restarted._videoFinds.get(tabId).frames.get(0);
+    assert.equal(
+      await restarted.resolvedBlobVideoUrlForFrame(tabId, 0, restoredVideos[0]),
+      refreshed,
+      "first-seen request timing survives a worker restart",
+    );
+  });
+
+  test("multi-player attribution fails closed when real loadstart timing is unavailable", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 184;
+    const manifest = "https://cdn.example.com/ambiguous/master.m3u8";
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    const videos = [
+      { src: null, blob: true, blobUrl: "blob:https://example.com/a", elementId: 1, loadStartedAt: Date.now() - 100 },
+      { src: null, blob: true, blobUrl: "blob:https://example.com/b", elementId: 2 },
+    ];
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    assert.deepEqual(await bg.resolvedVideoUrls(tabId), []);
+  });
 });
