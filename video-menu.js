@@ -1716,12 +1716,68 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) 
   return bestManifestForVideo(tabId, finds, frameId, attributed);
 }
 
+function newestVideoUrlObservation(finds, url) {
+  const key = urlPathKey(url);
+  let newest = Number.NEGATIVE_INFINITY;
+
+  for (const times of finds.sniffTimesByFrame instanceof Map
+    ? finds.sniffTimesByFrame.values()
+    : []) {
+    const observedAt = times instanceof Map ? times.get(key) : null;
+    if (Number.isFinite(observedAt)) newest = Math.max(newest, observedAt);
+  }
+
+  for (const videos of finds.frames.values()) {
+    for (const video of videos || []) {
+      if (
+        video &&
+        typeof video.src === "string" &&
+        urlPathKey(video.src) === key &&
+        Number.isFinite(video.loadStartedAt)
+      ) newest = Math.max(newest, video.loadStartedAt);
+    }
+  }
+  return newest;
+}
+
+function videoUrlCandidatePriority(finds, url) {
+  const kind = manifestKind(url) || detectedKindForUrl(finds, url);
+  return kind === "hls" ? 30
+    : kind === "manifest" ? 25
+    : kind === "dash" ? 20
+    : 10;
+}
+
+/// Deduplicate streams across frames and rotating query tokens. Keep the
+/// highest-ranked URL; ties prefer the most recently observed resource URL.
+function dedupeVideoUrlsByPath(urls, finds) {
+  const selected = new Map();
+  for (const url of urls || []) {
+    if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
+    const key = urlPathKey(url);
+    const priority = videoUrlCandidatePriority(finds, url);
+    const observedAt = newestVideoUrlObservation(finds, url);
+    const previous = selected.get(key);
+    if (
+      !previous ||
+      priority > previous.priority ||
+      (priority === previous.priority && observedAt > previous.observedAt)
+    ) {
+      selected.set(key, { url, priority, observedAt });
+    }
+  }
+  return [...selected.values()].map((candidate) => candidate.url);
+}
+
 async function resolvedVideoUrlsForFrame(tabId, frameId) {
   const finds = videoFinds.get(tabId);
   if (!finds) return [];
   if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
   if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return [];
-  return menuVideoCandidatesForFrame(finds, frameId, tabId);
+  return dedupeVideoUrlsByPath(
+    await menuVideoCandidatesForFrame(finds, frameId, tabId),
+    finds,
+  );
 }
 
 /// Build one candidate per active DOM video. Direct sources are authoritative;
@@ -1783,9 +1839,8 @@ async function resolvedVideoUrls(tabId) {
   for (const frameId of frameIds) {
     const candidates = await menuVideoCandidatesForFrame(finds, frameId, tabId);
     urls.push(...candidates);
-    if (urls.length >= MAX_VIDEO_ITEMS) break;
   }
-  return [...new Set(urls)].slice(0, MAX_VIDEO_ITEMS);
+  return dedupeVideoUrlsByPath(urls, finds).slice(0, MAX_VIDEO_ITEMS);
 }
 
 function mergedVideoUrls(tabId) {
@@ -1793,7 +1848,7 @@ function mergedVideoUrls(tabId) {
   if (!finds) return [];
   const urls = [];
   for (const frameId of finds.frames.keys()) urls.push(...mergedVideoUrlsForFrame(tabId, frameId));
-  return [...new Set(urls)].slice(0, MAX_VIDEO_ITEMS);
+  return dedupeVideoUrlsByPath(urls, finds).slice(0, MAX_VIDEO_ITEMS);
 }
 
 function detectedKindForUrl(finds, url) {
