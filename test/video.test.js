@@ -274,6 +274,14 @@ describe("classifyStream", () => {
       bg.classifyStream("https://cdn.example.com/audio/playlist", "audio/mpegurl"),
       null,
     );
+    assert.equal(
+      bg.classifyStream("https://cdn.example.com/audio-only/master.m3u8", "application/vnd.apple.mpegurl"),
+      null,
+    );
+    assert.equal(
+      bg.classifyStream("https://cdn.example.com/hls/audio-track-1.m3u8", "application/vnd.apple.mpegurl"),
+      null,
+    );
     for (const url of [
       "https://cdn.example.com/subtitles/captions.vtt",
       "https://cdn.example.com/thumbnails/storyboard.jpg",
@@ -666,6 +674,10 @@ describe("per-video menu candidates", () => {
     for (const url of [
       base + "segment-12.mp4",
       base + "chunk_001.mp4",
+      base + "preview-720p.mp4",
+      base + "trailer.mp4",
+      base + "ad-video.mp4",
+      base + "promo-clip.mp4",
       "https://cdn.example.com/segments/0001.mp4",
       "https://cdn.example.com/previews/preview.mp4",
     ]) assert.equal(bg.wholeVideoMediaSize(details(url, 200, full)), null, url);
