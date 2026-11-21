@@ -3403,6 +3403,76 @@ describe("video detection on formerly excluded sites", () => {
       assert.deepEqual(findings.sniffedByFrame.get(0), [manifest], host);
     }
   });
+
+  test("a formerly excluded YouTube tab still gets the video menu", async () => {
+    const chrome = makeChrome();
+    chrome.tabs.get = async (id) => ({ id, url: "https://www.youtube.com/watch?v=x" });
+    loadBackground(chrome);
+    const L = chrome._listeners;
+
+    await L["tabs.onActivated"]({ tabId: 9 });
+    L["webRequest.onResponseStarted"]({
+      tabId: 9,
+      url: "https://cdn.example.com/s/stream.m3u8",
+      responseHeaders: [],
+    });
+    L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }],
+      },
+      { tab: { id: 9, url: "https://www.youtube.com/watch?v=x" } },
+    );
+    await tick();
+    await tick();
+    assert.ok(
+      chrome._calls.some(([name, id]) => name === "menus.create" && id === "grabVideo:0"),
+      "YouTube tab exposes the detected video menu",
+    );
+  });
+
+  test("a report with a stale active-tab cache still builds the menu", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    const L = chrome._listeners;
+    chrome.tabs.query = (query, callback) => callback([{ id: 5 }]);
+
+    L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }],
+      },
+      { tab: { id: 5 } },
+    );
+    await tick();
+    await tick();
+    assert.ok(
+      chrome._calls.some(([name, id]) => name === "menus.create" && id === "grabVideo:0"),
+      "menu built after live verification, without a tab switch",
+    );
+  });
+
+  test("a report from a background tab stays silent with a stale cache", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    const L = chrome._listeners;
+    chrome.tabs.query = (query, callback) => callback([{ id: 9 }]);
+
+    L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }],
+      },
+      { tab: { id: 5 } },
+    );
+    await tick();
+    await tick();
+    assert.equal(
+      chrome._calls.some(([name, id]) => name === "menus.create" && String(id).startsWith("grabVideo")),
+      false,
+      "no menu for a tab that is not live-active",
+    );
+  });
 });
 
 describe("pageVideoTitle", () => {
