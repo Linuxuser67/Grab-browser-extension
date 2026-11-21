@@ -56,10 +56,12 @@ Grab must be installed with its desktop entry (it registers as the
   media requests. Blob players use the best attributable HLS/DASH manifest; when
   no manifest is available, a fallback is allowed only for a complete, large
   media response (HTTP 200, known Content-Length, no byte range, and no obvious
-  segment, ad, preview, or thumbnail URL). Attribution uses frame and media-load
-  timing; ambiguous candidates are omitted rather than guessed. A manifest-only
-  fallback remains for embedded or custom players with no discoverable active
-  `<video>` element; it groups known playlist variants conservatively.
+  segment, ad, preview, or thumbnail URL). When no DOM video is discoverable,
+  a unique complete-file response is the last fallback; manifests always take
+  precedence and multiple complete files remain ambiguous. HLS/DASH are paired
+  across folders only for one unambiguous pair in explicitly named sibling
+  `hls`/`dash` directories. Attribution uses frame and media-load timing;
+  ambiguous candidates are omitted rather than guessed.
   Picking a menu entry opens its URL in Grab, which probes it like any other link.
   Skipped on video platforms yt-dlp handles itself (YouTube, TikTok,
   Instagram, Facebook, X, Twitch, Vimeo, …) — a detected media URL can't

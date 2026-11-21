@@ -435,6 +435,41 @@ describe("mergeVideoFinds", () => {
     ]);
   });
 
+
+  test("one HLS and one DASH manifest in sibling protocol folders form one stream family", () => {
+    const hls = "https://cdn.example.com/episode/hls/master.m3u8";
+    const dash = "https://cdn.example.com/episode/dash/manifest.mpd";
+    const kinds = new Map([
+      [pathKey(hls), "hls"],
+      [pathKey(dash), "dash"],
+    ]);
+    assert.deepEqual(bg.mergeVideoFinds([], [dash, hls], kinds), [hls]);
+  });
+
+  test("cross-folder HLS/DASH pairing stays separate when either protocol has multiple candidates", () => {
+    const hls = "https://cdn.example.com/episode/hls/master.m3u8";
+    const otherHls = "https://cdn.example.com/episode/hls/alternate.m3u8";
+    const dash = "https://cdn.example.com/episode/dash/manifest.mpd";
+    const kinds = new Map([
+      [pathKey(hls), "hls"],
+      [pathKey(otherHls), "hls"],
+      [pathKey(dash), "dash"],
+    ]);
+    assert.deepEqual(bg.mergeVideoFinds([], [hls, otherHls, dash], kinds), [
+      hls, otherHls, dash,
+    ]);
+  });
+
+  test("unrelated HLS and DASH folders are not paired by protocol name alone", () => {
+    const hls = "https://cdn.example.com/episode/hls/master.m3u8";
+    const dash = "https://cdn.example.com/other/dash/manifest.mpd";
+    const kinds = new Map([
+      [pathKey(hls), "hls"],
+      [pathKey(dash), "dash"],
+    ]);
+    assert.deepEqual(bg.mergeVideoFinds([], [hls, dash], kinds), [hls, dash]);
+  });
+
   test("extensionless manifests group sibling renditions and keep manifest menu treatment", () => {
     const kinds = new Map([
       ["https://cdn.example.com/live/playlist", "manifest"],
@@ -697,6 +732,57 @@ describe("per-video menu candidates", () => {
 
     const candidates = await bg.menuVideoCandidatesForFrame(findings, 0);
     assert.deepEqual(candidates, [hls, second]);
+  });
+
+
+  test("network-only fallback uses exactly one qualified complete file when no manifest exists", async () => {
+    const completeMedia = "https://cdn.example.com/video/full.mp4?token=one";
+    const findings = makeFinds(
+      [],
+      [],
+      new Map([[pathKey(completeMedia), 1_000]]),
+      [completeMedia],
+    );
+    findings.wholeMediaByFrame = new Map([[0, [completeMedia]]]);
+    findings.mediaSizesByFrame = new Map([[
+      0,
+      new Map([[pathKey(completeMedia), 8 * 1024 * 1024]]),
+    ]]);
+    assert.deepEqual(
+      await bg.menuVideoCandidatesForFrame(findings, 0),
+      [completeMedia],
+    );
+  });
+
+  test("network-only fallback omits multiple complete files when no manifest exists", async () => {
+    const first = "https://cdn.example.com/video/first.mp4";
+    const second = "https://cdn.example.com/video/second.mp4";
+    const findings = makeFinds(
+      [],
+      [],
+      new Map([[pathKey(first), 1_000], [pathKey(second), 1_050]]),
+      [first, second],
+    );
+    findings.wholeMediaByFrame = new Map([[0, [first, second]]]);
+    findings.mediaSizesByFrame = new Map([[
+      0,
+      new Map([
+        [pathKey(first), 8 * 1024 * 1024],
+        [pathKey(second), 9 * 1024 * 1024],
+      ]),
+    ]]);
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), []);
+  });
+
+  test("network-only fallback does not promote ordinary unqualified media", async () => {
+    const ordinary = "https://cdn.example.com/video/segment.mp4";
+    const findings = makeFinds(
+      [],
+      [],
+      new Map([[pathKey(ordinary), 1_000]]),
+      [ordinary],
+    );
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), []);
   });
 
   test("a blob video falls back only to one complete large MP4 response", async () => {

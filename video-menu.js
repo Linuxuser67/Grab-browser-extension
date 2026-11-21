@@ -649,6 +649,30 @@ async function preferMasterPlaylists(
   });
 }
 
+/// Recognize explicit sibling protocol directories such as /stream/hls/ and
+/// /stream/dash/. This is a narrow cross-folder equivalence; arbitrary HLS and
+/// DASH URLs are not merged because they may represent different videos.
+function crossProtocolManifestRootKey(url, kind) {
+  if (kind !== "hls" && kind !== "dash") return null;
+  const folder = manifestFolderKey(url, kind);
+  if (!folder) return null;
+  try {
+    const parsed = new URL(folder);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const protocolFolder = parts[parts.length - 1] || "";
+    const isHlsFolder = kind === "hls" &&
+      /^(?:hls|m3u8|hls[-_].+|.+[-_]hls)$/i.test(protocolFolder);
+    const isDashFolder = kind === "dash" &&
+      /^(?:dash|mpd|dash[-_].+|.+[-_]dash)$/i.test(protocolFolder);
+    if (!isHlsFolder && !isDashFolder) return null;
+    parts.pop();
+    parsed.pathname = parts.length ? `/${parts.join("/")}` : "/";
+    return parsed.origin + parsed.pathname;
+  } catch {
+    return null;
+  }
+}
+
 /// Merge DOM-reported video sources with sniffed requests. Ignore rotating auth
 /// query strings and group a direct rendition with its manifest directory only
 /// when that directory holds a single stream family. Distinct manifests keep
@@ -700,6 +724,33 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
     familiesByFolder.set(folder, families);
   }
 
+  // Pair HLS/DASH only when they occupy explicitly named sibling protocol
+  // directories under one common stream root, with one unique URL of each kind.
+  const protocolFamilies = new Map();
+  const protocolBuckets = new Map();
+  for (const item of candidates) {
+    const kind = manifestKind(item.url) || item.kind;
+    const root = crossProtocolManifestRootKey(item.url, kind);
+    if (!root) continue;
+    let bucket = protocolBuckets.get(root);
+    if (!bucket) {
+      bucket = { hls: new Set(), dash: new Set() };
+      protocolBuckets.set(root, bucket);
+    }
+    bucket[kind].add(urlPathKey(item.url));
+  }
+  for (const [root, bucket] of protocolBuckets) {
+    const hls = [...bucket.hls];
+    const dash = [...bucket.dash];
+    if (hls.length !== 1 || dash.length !== 1) continue;
+    const family = hls[0];
+    protocolFamilies.set(hls[0], family);
+    protocolFamilies.set(dash[0], family);
+    const rootFamilies = familiesByFolder.get(root) || new Set();
+    rootFamilies.add(family);
+    familiesByFolder.set(root, rootFamilies);
+  }
+
   const groups = new Map();
   candidates.forEach((item, order) => {
     const kind = manifestKind(item.url) || item.kind;
@@ -707,6 +758,7 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
     if (isManifestKind(kind)) {
       const folder = manifestFolderKey(item.url, kind);
       key =
+        protocolFamilies.get(urlPathKey(item.url)) ||
         (folder && familyFor.get(`${folder}\u0000${urlPathKey(item.url)}`)) ||
         urlPathKey(item.url);
     } else {
@@ -2137,8 +2189,8 @@ async function resolvedVideoUrlsForFrame(tabId, frameId) {
 
 /// Build one candidate per active DOM video. Direct sources are authoritative;
 /// sniffed MP4 requests are never added as sibling entries. Blob players receive
-/// only manifests attributed to their element. With no DOM video, preserve the
-/// existing conservative manifest-only fallback for embedded/custom players.
+/// only manifests attributed to their element. With no DOM video, manifests take
+/// precedence; a unique qualified complete-file response is the last fallback.
 async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
   if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return [];
   const videos = finds.frames.get(frameId) || [];
@@ -2153,7 +2205,14 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
         manifests,
       );
     }
-    return fallback;
+    // Never add a full-file response alongside a usable manifest. With no
+    // manifest, accept only one unique object-qualified media response.
+    if (fallback.length > 0) return dedupeVideoUrlsByPath(fallback, finds);
+    const wholeMedia = dedupeVideoUrlsByPath(
+      wholeMediaUrlsForFrame(finds, frameId),
+      finds,
+    );
+    return wholeMedia.length === 1 ? wholeMedia : [];
   }
 
   const urls = [];
