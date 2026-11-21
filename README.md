@@ -53,9 +53,11 @@ Grab must be installed with its desktop entry (it registers as the
   autoplay and streams behind `blob:` players — appear under right-click →
   **Videos detected by Grab**, with one best URL per active video and a matching
   toolbar badge count. Direct `<video>` sources take priority over network-sniffed
-  media requests; blob players use HLS/DASH manifests attributed by frame and
-  media-load timing. When several active videos cannot be distinguished safely,
-  an ambiguous blob candidate is omitted rather than guessed. A manifest-only
+  media requests. Blob players use the best attributable HLS/DASH manifest; when
+  no manifest is available, a fallback is allowed only for a complete, large
+  media response (HTTP 200, known Content-Length, no byte range, and no obvious
+  segment, ad, preview, or thumbnail URL). Attribution uses frame and media-load
+  timing; ambiguous candidates are omitted rather than guessed. A manifest-only
   fallback remains for embedded or custom players with no discoverable active
   `<video>` element; it groups known playlist variants conservatively.
   Picking a menu entry opens its URL in Grab, which probes it like any other link.
