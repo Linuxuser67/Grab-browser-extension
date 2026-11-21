@@ -1862,6 +1862,12 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVid
     if (rankDifference !== 0) return rankDifference;
     return gapToLoadStart(a) - gapToLoadStart(b);
   });
+  if (
+    Number.isFinite(loadStartedAt) &&
+    merged.length > 1 &&
+    videoManifestPriority(merged[0], kinds) === videoManifestPriority(merged[1], kinds) &&
+    gapToLoadStart(merged[0]) === gapToLoadStart(merged[1])
+  ) return null;
   return merged[0] || null;
 }
 
