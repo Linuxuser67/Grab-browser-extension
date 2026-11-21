@@ -2457,6 +2457,10 @@ describe("detection wiring", () => {
     const now = Date.now();
     const manifestA = "https://cdn.example.com/player-a/master.m3u8";
     const manifestB = "https://cdn.example.com/player-b/master.m3u8";
+    const pathKey = (url) => {
+      const parsed = new URL(url);
+      return parsed.origin + parsed.pathname;
+    };
     const videoA = {
       src: null, blob: true, blobUrl: "blob:https://example.com/player-a",
       elementId: 41, loadStartedAt: now - 3_000,
