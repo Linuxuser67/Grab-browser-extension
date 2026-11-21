@@ -74,9 +74,10 @@ function allVideos(root, onShadowRoot) {
 /// Pure over a document-like: [{src, blob, height?}] for each qualifying <video>.
 /// `isActive` decides which videos count as active; the live wiring passes
 /// `isActiveVideo`. Tests pass explicit predicates. Pierces shadow roots via allVideos.
-function collectVideos(doc, isActive, onShadowRoot) {
+function collectVideos(doc, isActive, onShadowRoot, onVideo) {
   const out = [];
   for (const v of allVideos(doc, onShadowRoot)) {
+    if (onVideo) onVideo(v);
     if (!isBigEnough(v)) continue;
     if (isActive && !isActive(v)) continue;
     const src = usableVideoSrc(v);
@@ -128,37 +129,85 @@ if (
   // worker applies the same gate to sniffed manifests.
   (typeof location === "undefined" || !isExcludedHost(location.hostname))
 ) {
-  let forceFrameReplace = false;
+  let pendingFrameLifecycle = null;
+  let pendingFrameLifecycleSource = null;
   let lastSent = "";
+  const lastVideoSource = new WeakMap();
+  const frameLifecyclePriority = { pause: 1, ended: 2, reset: 3 };
 
-  function report() {
+  function currentVideoSource(video) {
+    const direct = usableVideoSrc(video);
+    if (direct) return direct;
+    const candidate = video && (video.currentSrc || video.src);
+    return typeof candidate === "string" && candidate.startsWith("blob:")
+      ? candidate
+      : null;
+  }
+
+  function rememberVideoSource(video) {
+    const current = currentVideoSource(video);
+    if (current) lastVideoSource.set(video, current);
+    return current || lastVideoSource.get(video) || null;
+  }
+
+  function report(lifecycleOverride = null, lifecycleSourceOverride = null) {
     // Full scans happen on startup, media events, and worker rescan requests,
     // not on every pointer/click interaction.
-    const videos = collectVideos(document, isActiveVideo, wireShadowRoot);
+    const videos = collectVideos(
+      document,
+      isActiveVideo,
+      wireShadowRoot,
+      rememberVideoSource,
+    );
     const title = pageVideoTitle(document);
-    // Pause/end reports must be able to clear stale frame state even when the
-    // resulting video list equals the last local snapshot.
-    const replaceFrame = forceFrameReplace;
-    forceFrameReplace = false;
+    // Keep the strongest lifecycle event when media events coalesce during
+    // the debounce window (a reset must not be downgraded to a pause).
+    const pendingPriority = frameLifecyclePriority[pendingFrameLifecycle] || 0;
+    const overridePriority = frameLifecyclePriority[lifecycleOverride] || 0;
+    const lifecycle = overridePriority > pendingPriority
+      ? lifecycleOverride
+      : pendingFrameLifecycle;
+    const lifecycleSource = overridePriority > pendingPriority
+      ? lifecycleSourceOverride
+      : pendingFrameLifecycleSource;
+    pendingFrameLifecycle = null;
+    pendingFrameLifecycleSource = null;
+    const replaceFrame = lifecycle !== null;
     // The title is part of the snapshot: an SPA can change it with no new
     // video, and the menu labels must follow.
     const snapshot = JSON.stringify([videos, title]);
     if (snapshot === lastSent && !replaceFrame) return;
     lastSent = snapshot;
-    const sent = chrome.runtime.sendMessage({
+    const message = {
       type: "grab-videos-detected",
       videos,
       title,
       replaceFrame,
-    });
+    };
+    if (lifecycle) message.lifecycle = lifecycle;
+    if (typeof lifecycleSource === "string") message.lifecycleSource = lifecycleSource;
+    const sent = chrome.runtime.sendMessage(message);
     // Rejects when no receiver is listening (worker restarting, or a stale
     // script after an extension update). Nothing to recover.
     if (sent && typeof sent.catch === "function") sent.catch(() => {});
   }
 
   let timer = null;
-  function scheduleReport(replaceFrame = false) {
-    if (replaceFrame) forceFrameReplace = true;
+  function scheduleReport(lifecycle = null, lifecycleSource = null) {
+    const incomingPriority = frameLifecyclePriority[lifecycle] || 0;
+    const pendingPriority = frameLifecyclePriority[pendingFrameLifecycle] || 0;
+    if (lifecycle && incomingPriority > pendingPriority) {
+      pendingFrameLifecycle = lifecycle;
+      pendingFrameLifecycleSource = lifecycleSource;
+    } else if (
+      lifecycle &&
+      incomingPriority === pendingPriority &&
+      lifecycleSource !== pendingFrameLifecycleSource
+    ) {
+      // Coalesced events from different elements are ambiguous. Do not attribute
+      // a frame-level manifest to whichever element happened to fire last.
+      pendingFrameLifecycleSource = null;
+    }
     if (timer) clearTimeout(timer);
     timer = setTimeout(report, 400);
   }
@@ -169,17 +218,37 @@ if (
     // Site-initiated playback is valid media too. The report scan checks the
     // live paused/ended state and the existing size threshold filters tiny
     // inline previews and trackers.
+    rememberVideoSource(t);
     scheduleReport();
   }
 
   function onStopped(e) {
     const t = e && e.target;
-    if (t && t.tagName === "VIDEO") scheduleReport(true);
+    if (t && t.tagName === "VIDEO") {
+      scheduleReport(
+        e.type === "ended" ? "ended" : "pause",
+        rememberVideoSource(t),
+      );
+    }
   }
 
   function onEmptied(e) {
     const t = e && e.target;
-    if (t && t.tagName === "VIDEO") scheduleReport(true);
+    if (!t || t.tagName !== "VIDEO") return;
+    // Use the pre-reset source identity: currentSrc may already be empty.
+    const source = lastVideoSource.get(t) || currentVideoSource(t);
+    lastVideoSource.delete(t);
+    // Reset immediately so the old manifest is retired before replacement
+    // source requests normally arrive. Pause/end remain debounced.
+    if (timer) clearTimeout(timer);
+    timer = null;
+    report("reset", source);
+  }
+
+  function onLoadedMetadata(e) {
+    const t = e && e.target;
+    if (t && t.tagName === "VIDEO") rememberVideoSource(t);
+    scheduleReport();
   }
 
   // Media events don't bubble and aren't composed, so they never leave a
@@ -194,7 +263,7 @@ if (
     sr.addEventListener("pause", onStopped, true);
     sr.addEventListener("ended", onStopped, true);
     sr.addEventListener("emptied", onEmptied, true);
-    sr.addEventListener("loadedmetadata", () => scheduleReport(), true);
+    sr.addEventListener("loadedmetadata", onLoadedMetadata, true);
   }
 
   // play/playing don't bubble; capture at the document.
@@ -204,7 +273,7 @@ if (
   document.addEventListener("ended", onStopped, true);
   document.addEventListener("emptied", onEmptied, true);
   // The decoded height only exists once metadata has loaded.
-  document.addEventListener("loadedmetadata", () => scheduleReport(), true);
+  document.addEventListener("loadedmetadata", onLoadedMetadata, true);
 
   // Pointer/click events expose the open shadow roots on the event path. Wire
   // only those roots; don't walk every node on the page for each interaction.

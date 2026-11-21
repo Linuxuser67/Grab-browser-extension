@@ -157,7 +157,7 @@ describe("shadow-root video detection (jsdom)", () => {
     }
   });
 
-  test("pausing immediately reports no active video and replaces stale frame state", async () => {
+  test("pausing immediately reports no active video with a pause lifecycle", async () => {
     const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
     const { messages, document, window, cleanup } = loadContent(dom);
     try {
@@ -175,7 +175,39 @@ describe("shadow-root video detection (jsdom)", () => {
       reports = messages.filter((m) => m.type === "grab-videos-detected");
       const last = reports[reports.length - 1];
       assert.deepEqual(last.videos, [], "paused video is no longer offered");
-      assert.equal(last.replaceFrame, true, "empty pause report clears the background cache");
+      assert.equal(last.replaceFrame, true, "empty pause report replaces the frame snapshot");
+      assert.equal(last.lifecycle, "pause", "pause is distinct from a source reset");
+      assert.equal(last.lifecycleSource, "https://example.com/v.mp4");
+      await new Promise((r) => setTimeout(r, 500));
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("an emptied video emits a source-reset lifecycle", async () => {
+    const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
+    const { messages, document, window, cleanup } = loadContent(dom);
+    try {
+      const video = makeVideo(document, { muted: false });
+      document.body.appendChild(video);
+      video.dispatchEvent(new window.Event("play", { bubbles: false }));
+      await new Promise((r) => setTimeout(r, 500));
+      messages.length = 0;
+
+      // A pending pause report must not delay or downgrade a real reset.
+      video.dispatchEvent(new window.Event("pause", { bubbles: false }));
+      video.dispatchEvent(new window.Event("emptied", { bubbles: false }));
+      const immediateReports = messages.filter((m) => m.type === "grab-videos-detected");
+      assert.ok(immediateReports.length > 0, "source reset is reported synchronously");
+      assert.equal(immediateReports.at(-1).lifecycle, "reset");
+      assert.equal(immediateReports.at(-1).lifecycleSource, "https://example.com/v.mp4");
+
+      await new Promise((r) => setTimeout(r, 500));
+      const reports = messages.filter((m) => m.type === "grab-videos-detected");
+      assert.ok(reports.length > 0, "the reset report remains observable after the debounce window");
+      const last = reports.find((message) => message.lifecycle === "reset");
+      assert.ok(last, "the reset lifecycle is not downgraded by the pending pause");
+      assert.equal(last.replaceFrame, true);
       await new Promise((r) => setTimeout(r, 500));
     } finally {
       cleanup();
