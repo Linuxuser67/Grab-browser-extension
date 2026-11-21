@@ -678,6 +678,55 @@ describe("per-video menu candidates", () => {
     );
   });
 
+  test("a pre-load master beats its nested child when both requests precede loadstart", async () => {
+    const master = "http://192.168.1.20/abc/playlist.m3u8";
+    const child = "http://192.168.1.20/abc/720p/stream.m3u8";
+    chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://page.example/player",
+        elementId: 1, loadStartedAt: 10_000,
+      }],
+      [master, child],
+      new Map([[pathKey(master), 9_450], [pathKey(child), 9_800]]),
+    );
+    findings.sniffFirstSeenByFrame.set(0, new Map([
+      [pathKey(master), 9_200],
+      [pathKey(child), 9_700],
+    ]));
+
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [master]);
+  });
+
+  test("separate nested episode directories remain attributed to their own players", async () => {
+    const episodeA = "http://192.168.1.20/abc/episode-a/playlist.m3u8";
+    const episodeB = "http://192.168.1.20/abc/episode-b/720p/stream.m3u8";
+    chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
+    const findings = makeFinds(
+      [
+        {
+          src: null, blob: true, blobUrl: "blob:https://page.example/player-a",
+          elementId: 1, loadStartedAt: 10_000,
+        },
+        {
+          src: null, blob: true, blobUrl: "blob:https://page.example/player-b",
+          elementId: 2, loadStartedAt: 20_000,
+        },
+      ],
+      [episodeA, episodeB],
+      new Map([[pathKey(episodeA), 9_500], [pathKey(episodeB), 19_800]]),
+    );
+    findings.sniffFirstSeenByFrame.set(0, new Map([
+      [pathKey(episodeA), 9_200],
+      [pathKey(episodeB), 19_700],
+    ]));
+
+    assert.deepEqual(
+      await bg.menuVideoCandidatesForFrame(findings, 0),
+      [episodeA, episodeB],
+    );
+  });
+
   test("a pre-load master beats its nested post-load child when inspection is unavailable", async () => {
     const master = "http://192.168.1.20/abc/playlist.m3u8";
     const child = "http://192.168.1.20/abc/720p/stream.m3u8";
@@ -937,12 +986,16 @@ describe("per-video menu candidates", () => {
     assert.equal(bg.wholeVideoMediaSize(details(base + "preview.mp4", 200, [
       { name: "content-length", value: "120000" },
     ])), null);
+    assert.equal(bg.wholeVideoMediaSize(details(base + "segment12.mp4", 200, [
+      { name: "content-length", value: "120000" },
+    ])), null);
     assert.equal(bg.wholeVideoMediaSize(details(base + "clip.mp4", 206, full)), null);
     assert.equal(bg.wholeVideoMediaSize(details(base + "clip.mp4", 200, [
       ...full, { name: "content-range", value: "bytes 0-999/8388608" },
     ])), null);
     for (const url of [
       base + "segment-12.mp4",
+      base + "segment12.mp4",
       base + "chunk_001.mp4",
       base + "preview-720p.mp4",
       base + "trailer.mp4",
@@ -955,8 +1008,13 @@ describe("per-video menu candidates", () => {
     for (const url of [
       base + "lecture-part-2.mp4",
       base + "chunk1.mp4",
-      "https://cdn.example.com/ad/episode.mp4",
     ]) assert.equal(bg.wholeVideoMediaSize(details(url, 200, full)), 8388608, url);
+
+    assert.equal(
+      bg.wholeVideoMediaSize(details("https://cdn.example.com/ad/episode.mp4", 200, full)),
+      null,
+      "an /ad/ directory is an advertisement path",
+    );
   });
 
   test("a whole-file fallback survives session restore", async () => {
@@ -1035,6 +1093,48 @@ describe("cross-frame video URL deduplication", () => {
     );
     const badges = chrome._calls.filter(([name]) => name === "action.setBadgeText");
     assert.equal(badges.at(-1)[1].text, "1");
+  });
+
+  test("rotating non-auth query parameters on the same manifest deduplicate across frames", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const tabId = 175;
+    await chrome._listeners["tabs.onActivated"]({ tabId });
+    const observations = [
+      {
+        frameId: 0,
+        url: "https://cdn.example.com/live/master.m3u8?md5=old&e=old&ts=100&_=old&cb=old",
+        timeStamp: 1000,
+      },
+      {
+        frameId: 8,
+        url: "https://cdn.example.com/live/master.m3u8?md5=new&e=new&ts=200&_=new&cb=new",
+        timeStamp: 2000,
+      },
+    ];
+    for (const observation of observations) {
+      await chrome._listeners["webRequest.onResponseStarted"]({
+        tabId,
+        ...observation,
+        responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+      });
+      await chrome._listeners["runtime.onMessage"](
+        {
+          type: "grab-videos-detected",
+          videos: [{
+            src: null,
+            blob: true,
+            blobUrl: "blob:https://example.com/player-" + observation.frameId,
+          }],
+        },
+        { tab: { id: tabId, url: "https://example.com/" }, frameId: observation.frameId },
+      );
+    }
+
+    assert.deepEqual(
+      await bg.resolvedVideoUrls(tabId),
+      [observations[1].url],
+    );
   });
 
   test("rotating manifest tokens across frames keep the latest observed URL", async () => {
