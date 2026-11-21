@@ -3336,152 +3336,72 @@ describe("manifest permission mirror", () => {
   });
 });
 
-describe("excluded hosts", () => {
+describe("video detection on formerly excluded sites", () => {
   const tick = () => new Promise((r) => setTimeout(r, 30));
+  const hosts = [
+    "www.youtube.com",
+    "youtu.be",
+    "player.vimeo.com",
+    "www.dailymotion.com",
+    "dai.ly",
+    "www.tiktok.com",
+    "www.instagram.com",
+    "www.facebook.com",
+    "fb.com",
+    "fb.watch",
+    "twitter.com",
+    "x.com",
+    "www.twitch.tv",
+  ];
 
-  test("hostExcluded matches hosts and subdomains only", () => {
-    const bg = loadBackground(makeChrome());
-    for (const h of [
-      "instagram.com",
-      "www.tiktok.com",
-      "vm.tiktok.com",
-      "youtube.com",
-      "www.youtube.com",
-      "youtu.be",
-      "vimeo.com",
-      "www.dailymotion.com",
-      "dai.ly",
-      "facebook.com",
-      "fb.watch",
-      "twitter.com",
-      "x.com",
-      "www.twitch.tv",
-      "INSTAGRAM.COM",
-    ]) {
-      assert.ok(bg.sharedHostExcluded(h), h);
-    }
-    for (const h of [
-      "example.com",
-      "rumble.com",
-      "tiktok.com.evil.com",
-      "nottiktok.com",
-      "x.com.evil.com",
-      "",
-    ]) {
-      assert.equal(bg.sharedHostExcluded(h), false, h);
-    }
-    assert.equal(bg.sharedHostExcluded(null), false);
-  });
+  test("accepts DOM video reports from every formerly excluded site", async () => {
+    for (const [index, host] of hosts.entries()) {
+      const chrome = makeChrome();
+      const bg = loadBackground(chrome);
+      const tabId = index + 1;
+      const src = `https://cdn.example.com/${index}/clip.mp4`;
+      const L = chrome._listeners;
 
-  test("content script hostExcluded agrees with the worker's", () => {
-    const bg = loadBackground(makeChrome());
-    const content = loadContent();
-    assert.deepEqual(
-      [...content.SHARED_EXCLUDED_HOSTS].sort(),
-      [...bg.SHARED_EXCLUDED_HOSTS].sort(),
-      "the two exclusion lists must stay in sync"
-    );
-    for (const h of ["instagram.com", "www.tiktok.com", "youtube.com", "x.com", "example.com"]) {
-      assert.equal(content.sharedHostExcluded(h), bg.sharedHostExcluded(h), h);
+      await L["tabs.onActivated"]({ tabId });
+      await L["runtime.onMessage"](
+        {
+          type: "grab-videos-detected",
+          videos: [{ src, blob: false, height: 360 }],
+        },
+        { tab: { id: tabId, url: `https://${host}/watch` }, frameId: 0 },
+      );
+      await tick();
+
+      const findings = bg._videoFinds.get(tabId);
+      assert.ok(findings, `video report retained for ${host}`);
+      assert.deepEqual(findings.frames.get(0).map((video) => video.src), [src], host);
     }
   });
 
-  test("no menu or badge on excluded hosts, even with finds", async () => {
-    const chrome = makeChrome();
-    // The tab lives on TikTok: direct sources and sniffed manifests exist,
-    // but nothing may be shown.
-    chrome.tabs.get = async (id) => ({ id, url: "https://www.tiktok.com/@u/video/1" });
-    loadBackground(chrome);
-    const L = chrome._listeners;
+  test("collects HLS manifests from every formerly excluded site", async () => {
+    for (const [index, host] of hosts.entries()) {
+      const chrome = makeChrome();
+      const bg = loadBackground(chrome);
+      const tabId = index + 1;
+      const manifest = `https://cdn.example.com/${index}/master.m3u8`;
+      const L = chrome._listeners;
 
-    await L["tabs.onActivated"]({ tabId: 7 });
-    L["webRequest.onResponseStarted"]({
-      tabId: 7,
-      url: "https://cdn.example.com/s/stream.m3u8",
-      responseHeaders: [],
-    });
-    await tick();
-    await tick();
-    assert.equal(
-      chrome._calls.some(([n, id]) => n === "menus.create" && String(id).startsWith("grabVideo")),
-      false,
-      "no video menu on excluded host"
-    );
-    assert.equal(
-      chrome._calls.some(([n, arg]) => n === "action.setBadgeText" && arg.text !== ""),
-      false,
-      "no badge on excluded host"
-    );
-  });
+      await L["tabs.onActivated"]({ tabId });
+      L["webRequest.onResponseStarted"]({
+        tabId,
+        frameId: 0,
+        url: manifest,
+        responseHeaders: [
+          { name: "content-type", value: "application/vnd.apple.mpegurl" },
+        ],
+      });
+      await tick();
+      await tick();
 
-  test("non-excluded hosts still get the menu", async () => {
-    const chrome = makeChrome();
-    loadBackground(chrome);
-    const L = chrome._listeners;
-
-    await L["tabs.onActivated"]({ tabId: 9 });
-    L["webRequest.onResponseStarted"]({
-      tabId: 9,
-      url: "https://cdn.example.com/s/stream.m3u8",
-      responseHeaders: [],
-    });
-    // Played-only menu: the sniffed manifest needs a started video to surface.
-    L["runtime.onMessage"](
-      { type: "grab-videos-detected", videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }] },
-      { tab: { id: 9 } }
-    );
-    await tick();
-    await tick();
-    assert.ok(
-      chrome._calls.some(([n, id]) => n === "menus.create" && id === "grabVideo:0"),
-      "menu shown on ordinary hosts"
-    );
-  });
-
-  test("a report with a stale active-tab cache still builds the menu", async () => {
-    // Simulates a worker restart: the in-memory activeTabId is gone (no
-    // onActivated fired), but the tab is live. The old code dropped the
-    // report and the menu never appeared until the next tab switch.
-    const chrome = makeChrome();
-    loadBackground(chrome);
-    const L = chrome._listeners;
-    chrome.tabs.query = (q, cb) => cb([{ id: 5 }]);
-
-    L["runtime.onMessage"](
-      {
-        type: "grab-videos-detected",
-        videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }],
-      },
-      { tab: { id: 5 } }
-    );
-    await tick();
-    await tick();
-    assert.ok(
-      chrome._calls.some(([n, id]) => n === "menus.create" && id === "grabVideo:0"),
-      "menu built after live verification, no tab switch needed"
-    );
-  });
-
-  test("a report from a background tab stays silent with a stale cache", async () => {
-    const chrome = makeChrome();
-    loadBackground(chrome);
-    const L = chrome._listeners;
-    chrome.tabs.query = (q, cb) => cb([{ id: 9 }]);
-
-    L["runtime.onMessage"](
-      {
-        type: "grab-videos-detected",
-        videos: [{ src: "https://cdn.example.com/v/clip.mp4", blob: false }],
-      },
-      { tab: { id: 5 } }
-    );
-    await tick();
-    await tick();
-    assert.equal(
-      chrome._calls.some(([n, id]) => n === "menus.create" && String(id).startsWith("grabVideo")),
-      false,
-      "no menu for a tab that is not live-active"
-    );
+      const findings = bg._videoFinds.get(tabId);
+      assert.ok(findings, `network manifest retained for ${host}`);
+      assert.deepEqual(findings.sniffedByFrame.get(0), [manifest], host);
+    }
   });
 });
 
@@ -3522,48 +3442,6 @@ describe("pageVideoTitle", () => {
 
   test("empty on missing document", () => {
     assert.equal(content.pageVideoTitle(null), "");
-  });
-});
-
-describe("collection-time exclusion", () => {
-  const tick = () => new Promise((r) => setTimeout(r, 30));
-
-  test("webRequest sniffer skips yt-dlp-exclusive hosts", async () => {
-    const chrome = makeChrome();
-    // Mock tabs.get to return a YouTube URL.
-    chrome.tabs.get = async (id) => ({ id, url: "https://www.youtube.com/watch?v=x" });
-    const bg = loadBackground(chrome);
-    const L = chrome._listeners;
-    await L["tabs.onActivated"]({ tabId: 5 });
-    // Sniff a manifest on the YouTube tab.
-    await L["webRequest.onResponseStarted"]({
-      tabId: 5,
-      url: "https://cdn.example.com/hls/master.m3u8",
-      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
-    });
-    await tick();
-    await tick();
-    // The URL was never stored: collection-time filter, not just menu-build.
-    assert.equal(bg._videoFinds.has(5), false, "no finds stored for excluded host");
-    const menuCreates = chrome._calls.filter(([n]) => n === "contextMenus.create");
-    assert.equal(menuCreates.length, 0, "no menu items for excluded host");
-  });
-
-  test("content-script reports are dropped on excluded hosts", async () => {
-    const chrome = makeChrome();
-    const bg = loadBackground(chrome);
-    const L = chrome._listeners;
-    await L["tabs.onActivated"]({ tabId: 5 });
-    // Simulate a content-script message from a YouTube tab.
-    await L["runtime.onMessage"](
-      { type: "grab-videos-detected", videos: [{ src: "https://cdn.example.com/v.mp4" }] },
-      { tab: { id: 5, url: "https://www.youtube.com/watch?v=x" }, frameId: 0 }
-    );
-    await tick();
-    await tick();
-    assert.equal(bg._videoFinds.has(5), false, "no finds stored for excluded host");
-    const menuCreates = chrome._calls.filter(([n]) => n === "contextMenus.create");
-    assert.equal(menuCreates.length, 0, "no menu items for excluded host");
   });
 });
 

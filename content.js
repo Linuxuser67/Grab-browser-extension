@@ -9,14 +9,6 @@
 // FDM/IDM-style downloaders use.
 
 const MIN_VIDEO_PX = 120; // ignore tiny players (ads, trackers)
-// The worker and content script use one shared host exclusion list.
-// In the browser these come from shared.js globals; under Node tests, from require.
-const sharedModule = typeof SHARED_EXCLUDED_HOSTS !== "undefined"
-  ? { SHARED_EXCLUDED_HOSTS, sharedHostExcluded }
-  : require("./shared.js");
-const excludedHostList = sharedModule.SHARED_EXCLUDED_HOSTS;
-const isExcludedHost = sharedModule.sharedHostExcluded;
-
 /// First http(s) candidate among currentSrc, src and <source> children.
 function usableVideoSrc(video) {
   const candidates = [];
@@ -131,10 +123,7 @@ function pageVideoTitle(doc) {
 if (
   typeof chrome !== "undefined" &&
   chrome.runtime &&
-  typeof document !== "undefined" &&
-  // No reporting where detection can't produce a downloadable URL; the
-  // worker applies the same gate to sniffed manifests.
-  (typeof location === "undefined" || !isExcludedHost(location.hostname))
+  typeof document !== "undefined"
 ) {
   let pendingFrameLifecycle = null;
   let pendingFrameLifecycleSource = null;
@@ -363,5 +352,5 @@ if (
 
 // Test hook for node:test.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { collectVideos, usableVideoSrc, sharedHostExcluded: isExcludedHost, SHARED_EXCLUDED_HOSTS: excludedHostList, MIN_VIDEO_PX, pageVideoTitle, isActiveVideo };
+  module.exports = { collectVideos, usableVideoSrc, MIN_VIDEO_PX, pageVideoTitle, isActiveVideo };
 }

@@ -239,7 +239,6 @@ if (typeof module !== "undefined" && module.exports) {
     removeAllContextMenus,
     removeContextMenu,
     pendingKey,
-    sharedHostExcluded,
     _setSleep,
     postToGrab,
     normalizeReferer,
@@ -255,7 +254,6 @@ if (typeof module !== "undefined" && module.exports) {
     _setWakeTimeout,
     verifyGrab,
     grabStatus,
-    SHARED_EXCLUDED_HOSTS,
     SIZE_WAIT_MS,
     GRAB_SCHEME,
     // Test hook: inspect per-tab detections.
