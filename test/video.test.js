@@ -555,6 +555,20 @@ describe("per-video menu candidates", () => {
     assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [main]);
   });
 
+  test("equal-rank manifests observed at the same time stay ambiguous", async () => {
+    const first = "https://cdn.example.com/first/master.m3u8";
+    const second = "https://cdn.example.com/second/master.m3u8";
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/player",
+        elementId: 1, loadStartedAt: 2000,
+      }],
+      [first, second],
+      new Map([[pathKey(first), 1900], [pathKey(second), 1900]]),
+    );
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), []);
+  });
+
   test("a blob video prefers the manifest observed closest before its load start", async () => {
     const older = "https://cdn.example.com/prefetched/master.m3u8";
     const current = "https://cdn.example.com/current/master.m3u8";
