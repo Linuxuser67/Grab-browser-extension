@@ -2061,15 +2061,9 @@ describe("detection wiring", () => {
     const L = chrome._listeners;
     const tabId = 166;
     const manifest = "https://cdn.example.com/old/master.m3u8";
-    const sniffAt = Date.now() - 100;
-    const video = {
-      src: null,
-      blob: true,
-      blobUrl: "blob:https://example.com/old",
-      elementId: 7,
-      loadStartedAt: sniffAt + 25,
-    };
+    const video = { src: null, blob: true, blobUrl: "blob:https://example.com/old" };
     const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+    const sniffAt = Date.now() - 100;
     const pauseAt = Date.now();
 
     await L["webRequest.onResponseStarted"]({
@@ -2101,8 +2095,6 @@ describe("detection wiring", () => {
     assert.deepEqual(saved.sniffTimes, [[0, [[
       "https://cdn.example.com/old/master.m3u8", sniffAt,
     ]]]]);
-    assert.equal(saved.frames[0][1][0].elementId, 7);
-    assert.equal(saved.frames[0][1][0].loadStartedAt, video.loadStartedAt);
 
     const restoredChrome = makeChrome(shared);
     const restoredBg = loadBackground(restoredChrome);
@@ -2111,8 +2103,6 @@ describe("detection wiring", () => {
     assert.equal(restored.sniffSequence, 1);
     assert.equal(restored.retiredFrames.get(0).retiredAtSeq, 1);
     assert.equal(restored.sniffTimesByFrame.get(0).get("https://cdn.example.com/old/master.m3u8"), sniffAt);
-    assert.equal(restored.frames.get(0)[0].elementId, 7);
-    assert.equal(restored.frames.get(0)[0].loadStartedAt, video.loadStartedAt);
     assert.deepEqual(await restoredBg.resolvedVideoUrls(tabId), []);
     await restoredChrome._listeners["runtime.onMessage"](
       { type: "grab-videos-detected", videos: [video] }, sender,
@@ -2137,6 +2127,51 @@ describe("detection wiring", () => {
     assert.equal(legacy.sniffSequence, 1);
     assert.equal(legacy.retiredFrames.get(0).source, video.blobUrl);
     assert.equal(legacy.retiredFrames.get(0).retiredAtSeq, 1);
+  });
+
+  test("per-element identity and load-start timing survive a session round trip", async () => {
+    const shared = {};
+    const first = makeChrome(shared);
+    const firstBg = loadBackground(first);
+    const tabId = 172;
+    const sniffedAt = Date.now() - 500;
+    const video = {
+      src: null,
+      blob: true,
+      blobUrl: "blob:https://example.com/player",
+      elementId: 12,
+      loadStartedAt: sniffedAt + 100,
+    };
+    await first._listeners["webRequest.onResponseStarted"]({
+      tabId,
+      frameId: 0,
+      url: "https://cdn.example.com/player/master.m3u8",
+      timeStamp: sniffedAt,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await first._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [video],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    await firstBg._persistVideoFinds(tabId);
+
+    const saved = shared.session.get("videoFinds:v2:" + tabId);
+    assert.equal(saved.frames[0][1][0].elementId, 12);
+    assert.equal(saved.frames[0][1][0].loadStartedAt, video.loadStartedAt);
+
+    const restoredChrome = makeChrome(shared);
+    const restoredBg = loadBackground(restoredChrome);
+    await restoredBg._restoreVideoFinds(tabId);
+    const restoredVideo = restoredBg._videoFinds.get(tabId).frames.get(0)[0];
+    assert.equal(restoredVideo.elementId, 12);
+    assert.equal(restoredVideo.loadStartedAt, video.loadStartedAt);
+    assert.equal(
+      await restoredBg.resolvedBlobVideoUrlForFrame(tabId, 0),
+      "https://cdn.example.com/player/master.m3u8",
+    );
   });
 
   test("multiple players expose separate network candidates without guessing an element match", async () => {
