@@ -2302,7 +2302,16 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
   const manifests = sniffedManifestsForFrame(finds, frameId);
   const kinds = kindsForFrame(finds, frameId);
   if (videos.length === 0) {
-    let fallback = mergeVideoFinds([], manifests, kinds);
+    // No active <video>: collapse renditions into their earlier-requested
+    // master the same way the per-video path does, so one stream is one entry.
+    const nestedChildKeys = nestedHlsPlaylistChildKeys(
+      manifests,
+      sniffFirstSeenTimesForFrame(finds, frameId),
+    );
+    const candidates = nestedChildKeys.size > 0
+      ? manifests.filter((url) => !nestedChildKeys.has(urlPathKey(url)))
+      : manifests;
+    let fallback = mergeVideoFinds([], candidates, kinds);
     if (fallback.length > 1) {
       fallback = await preferMasterPlaylists(
         fallback,
