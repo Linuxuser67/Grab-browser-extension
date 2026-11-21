@@ -524,6 +524,23 @@ describe("per-video menu candidates", () => {
     assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [direct]);
   });
 
+  test("manifest collection ignores media-only ad and segment path heuristics", () => {
+    const audioFolder = "https://cdn.example.com/audio/master.m3u8";
+    const adFolder = "https://cdn.example.com/ad/episode.m3u8";
+    const findings = makeFinds(
+      [{
+        src: null,
+        blob: true,
+        blobUrl: "blob:https://example.com/manifest-collection",
+      }],
+      [audioFolder, adFolder],
+    );
+    assert.deepEqual(
+      bg.sniffedManifestsForFrame(findings, 0),
+      [audioFolder, adFolder],
+    );
+  });
+
   test("a blob video chooses its HLS master and ignores sniffed media files", async () => {
     const master = "http://192.168.1.20/hls/master.m3u8";
     const child = "http://192.168.1.20/hls/variant.m3u8";
