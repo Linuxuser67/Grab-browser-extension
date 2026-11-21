@@ -215,4 +215,28 @@ describe("shadow-root video detection (jsdom)", () => {
       cleanup();
     }
   });
+
+  test("late initial scan reports video identity without fabricating loadstart timing", async () => {
+    const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
+    const video = makeVideo(dom.window.document);
+    dom.window.document.body.appendChild(video);
+    const { messages, window, cleanup } = loadContent(dom);
+    try {
+      const initial = messages.find((m) => m.type === "grab-videos-detected");
+      assert.ok(initial);
+      assert.equal(initial.videos.length, 1);
+      assert.equal(initial.videos[0].elementId > 0, true);
+      assert.equal(Object.hasOwn(initial.videos[0], "loadStartedAt"), false,
+        "discovery time is not presented as a real loadstart event");
+
+      video.dispatchEvent(new window.Event("loadstart", { bubbles: false }));
+      await new Promise((r) => setTimeout(r, 450));
+      const reports = messages.filter((m) => m.type === "grab-videos-detected");
+      const afterLoadStart = reports[reports.length - 1];
+      assert.equal(Number.isFinite(afterLoadStart.videos[0].loadStartedAt), true,
+        "an observed loadstart event supplies the timing used for multi-player attribution");
+    } finally {
+      cleanup();
+    }
+  });
 });
