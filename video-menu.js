@@ -1626,32 +1626,45 @@ function videoManifestPriority(url, kinds) {
 /// the manifest is deliberately dropped instead of being guessed.
 function attributedManifestUrlsForVideo(videos, targetVideo, manifests, sniffTimes) {
   if (!Array.isArray(videos) || !videos.includes(targetVideo)) return [];
-  if (videos.length === 1) return [...manifests];
+  const multipleVideos = videos.length > 1;
 
-  const elementIds = new Set();
-  for (const video of videos) {
-    if (
-      !video ||
-      !Number.isSafeInteger(video.elementId) ||
-      video.elementId <= 0 ||
-      !Number.isFinite(video.loadStartedAt) ||
-      video.loadStartedAt < 0 ||
-      elementIds.has(video.elementId)
-    ) return [];
-    elementIds.add(video.elementId);
+  if (multipleVideos) {
+    const elementIds = new Set();
+    for (const video of videos) {
+      if (
+        !video ||
+        !Number.isSafeInteger(video.elementId) ||
+        video.elementId <= 0 ||
+        !Number.isFinite(video.loadStartedAt) ||
+        video.loadStartedAt < 0 ||
+        elementIds.has(video.elementId)
+      ) return [];
+      elementIds.add(video.elementId);
+    }
   }
 
   const attributed = [];
   for (const url of manifests) {
     const observedAt = sniffTimes.get(urlPathKey(url));
-    if (!Number.isFinite(observedAt) || observedAt < 0) continue;
+    // A single active player owns its frame's manifests, but timestamped
+    // requests must still belong to that player's current resource load.
+    // Legacy single-player reports without timing keep their old fallback.
+    if (!Number.isFinite(observedAt) || observedAt < 0) {
+      if (!multipleVideos && !Number.isFinite(targetVideo.loadStartedAt)) {
+        attributed.push(url);
+      }
+      continue;
+    }
+
     const possibleOwners = videos
       .map((video) => ({
         video,
         gap: video.loadStartedAt - observedAt,
       }))
       .filter(({ gap }) =>
-        gap >= 0 && gap <= VIDEO_MANIFEST_ATTRIBUTION_WINDOW_MS
+        Number.isFinite(gap) &&
+        gap >= 0 &&
+        gap <= VIDEO_MANIFEST_ATTRIBUTION_WINDOW_MS
       )
       .sort((a, b) => a.gap - b.gap);
     if (possibleOwners.length === 0) continue;
@@ -1985,7 +1998,7 @@ async function doRefreshVideoMenu(tabId) {
     chrome.storage.session.set({ menuUrls: videoUi.menuUrls }).catch(() => {});
     const badged = chrome.action.setBadgeText({
       tabId,
-      text: String(urls.length),
+      text: String(entries.length),
     });
     if (badged && typeof badged.catch === "function") badged.catch(() => {});
   };
