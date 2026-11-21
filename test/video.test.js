@@ -628,7 +628,7 @@ describe("per-video menu candidates", () => {
       new Map([[pathKey(manifest), 8_000]]),
     );
 
-    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [direct]);
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [direct, manifest]);
   });
 
   test("multiple active elements receive only manifests nearest to their own load start", async () => {
