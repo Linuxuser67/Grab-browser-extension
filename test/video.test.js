@@ -252,8 +252,6 @@ describe("classifyStream", () => {
       "application/vnd.apple.mpegurl",
       "application/x-mpegurl",
       "application/mpegurl",
-      "audio/x-mpegurl",
-      "audio/mpegurl",
     ]) {
       assert.equal(
         bg.classifyStream("https://cdn.example.com/s/playlist", contentType),
@@ -265,6 +263,42 @@ describe("classifyStream", () => {
       bg.classifyStream("https://cdn.example.com/s/playlist", "application/dash+xml"),
       "manifest"
     );
+  });
+
+  test("audio-typed HLS responses and non-video thumbnails are ignored", () => {
+    assert.equal(
+      bg.classifyStream("https://cdn.example.com/audio/playlist.m3u8", "audio/x-mpegurl"),
+      null,
+    );
+    assert.equal(
+      bg.classifyStream("https://cdn.example.com/audio/playlist", "audio/mpegurl"),
+      null,
+    );
+    for (const mime of ["audio/x-mpegurl", "audio/mpegurl"]) {
+      assert.equal(
+        bg.classifyStream("https://cdn.example.com/hls/playlist.m3u8", mime),
+        "manifest",
+        mime,
+      );
+      assert.equal(
+        bg.classifyStream("https://cdn.example.com/hls/playlist", mime),
+        "manifest",
+        mime,
+      );
+    }
+    assert.equal(
+      bg.classifyStream("https://cdn.example.com/audio-only/master.m3u8", "application/vnd.apple.mpegurl"),
+      null,
+    );
+    assert.equal(
+      bg.classifyStream("https://cdn.example.com/hls/audio-track-1.m3u8", "application/vnd.apple.mpegurl"),
+      null,
+    );
+    for (const url of [
+      "https://cdn.example.com/subtitles/captions.vtt",
+      "https://cdn.example.com/thumbnails/storyboard.jpg",
+      "https://cdn.example.com/thumbnails/poster.webp",
+    ]) assert.equal(bg.classifyStream(url, ""), null, url);
   });
 
   test("direct video extensions classify as media", () => {
@@ -469,8 +503,8 @@ describe("per-video menu candidates", () => {
     globalThis.fetch = async (url) => ({
       ok: true,
       text: async () => String(url) === master
-        ? "#EXTM3U\\n#EXT-X-STREAM-INF:BANDWIDTH=100000\\nvariant.m3u8\\n"
-        : "#EXTM3U\\n#EXT-X-TARGETDURATION=6\\n",
+        ? "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000\nvariant.m3u8\n"
+        : "#EXTM3U\n#EXT-X-TARGETDURATION=6\n",
     });
     try {
       const findings = makeFinds(
@@ -512,6 +546,56 @@ describe("per-video menu candidates", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test("a blob video ignores obvious advertisement and preview manifests", async () => {
+    const main = "https://cdn.example.com/hls/master.m3u8";
+    const ad = "https://ads.example.com/pre-roll/master.m3u8";
+    const preview = "https://cdn.example.com/previews/teaser.m3u8";
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/main",
+        elementId: 1, loadStartedAt: 2000,
+      }],
+      [ad, preview, main],
+      new Map([
+        [pathKey(ad), 1900],
+        [pathKey(preview), 1920],
+        [pathKey(main), 1950],
+      ]),
+    );
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [main]);
+  });
+
+  test("equal-rank manifests observed at the same time stay ambiguous", async () => {
+    const first = "https://cdn.example.com/first/master.m3u8";
+    const second = "https://cdn.example.com/second/master.m3u8";
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/player",
+        elementId: 1, loadStartedAt: 2000,
+      }],
+      [first, second],
+      new Map([[pathKey(first), 1900], [pathKey(second), 1900]]),
+    );
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), []);
+  });
+
+  test("a blob video prefers the manifest observed closest before its load start", async () => {
+    const older = "https://cdn.example.com/prefetched/master.m3u8";
+    const current = "https://cdn.example.com/current/master.m3u8";
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/player",
+        elementId: 1, loadStartedAt: 2000,
+      }],
+      [older, current],
+      new Map([[pathKey(older), 1000], [pathKey(current), 1980]]),
+    );
+    assert.deepEqual(
+      await bg.menuVideoCandidatesForFrame(findings, 0),
+      [current],
+    );
   });
 
   test("multiple active elements receive only manifests nearest to their own load start", async () => {
@@ -574,15 +658,165 @@ describe("per-video menu candidates", () => {
     const hls = "https://cdn.example.com/one/master.m3u8";
     const dash = "https://cdn.example.com/one/manifest.mpd";
     const second = "https://cdn.example.com/two/master.m3u8";
+    const completeMedia = "https://cdn.example.com/one/full.mp4";
     const findings = makeFinds(
       [],
       [hls, dash, second],
-      new Map(),
-      ["https://cdn.example.com/one/preview.mp4"],
+      new Map([[pathKey(completeMedia), 1000]]),
+      [completeMedia, "https://cdn.example.com/one/preview.mp4"],
     );
+    findings.wholeMediaByFrame = new Map([[0, [completeMedia]]]);
+    findings.mediaSizesByFrame = new Map([[0, new Map([[pathKey(completeMedia), 8 * 1024 * 1024]])]]);
 
     const candidates = await bg.menuVideoCandidatesForFrame(findings, 0);
     assert.deepEqual(candidates, [hls, second]);
+  });
+
+  test("a blob video falls back only to one complete large MP4 response", async () => {
+    const media = "https://cdn.example.com/video/full-file.mp4?token=ok";
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/full",
+        elementId: 1, loadStartedAt: 2000,
+      }],
+      [],
+      new Map([[pathKey(media), 1900]]),
+      [media],
+    );
+    findings.wholeMediaByFrame = new Map([[0, [media]]]);
+    findings.mediaSizesByFrame = new Map([[0, new Map([[pathKey(media), 8 * 1024 * 1024]])]]);
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [media]);
+  });
+
+  test("blob right-click resolves the same complete-file fallback as the menu", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const tabId = 176;
+    const url = "https://cdn.example.com/video/full.mp4";
+    await chrome._listeners["webRequest.onResponseStarted"]({
+      tabId,
+      frameId: 0,
+      url,
+      statusCode: 200,
+      timeStamp: 1900,
+      responseHeaders: [
+        { name: "content-type", value: "video/mp4" },
+        { name: "content-length", value: "8388608" },
+      ],
+    });
+    await chrome._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{
+          src: null,
+          blob: true,
+          blobUrl: "blob:https://example.com/clicked",
+          elementId: 9,
+          loadStartedAt: 2000,
+        }],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+
+    const findings = bg._videoFinds.get(tabId);
+    const video = findings.frames.get(0)[0];
+    assert.deepEqual(await bg.resolvedVideoUrls(tabId), [url]);
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0, video), url);
+  });
+
+  test("a blob video does not use ordinary or multiple complete media sniffs", async () => {
+    const ordinary = "https://cdn.example.com/video/unknown.mp4";
+    const first = "https://cdn.example.com/video/first.mp4";
+    const second = "https://cdn.example.com/video/second.mp4";
+    const video = [{
+      src: null, blob: true, blobUrl: "blob:https://example.com/player",
+      elementId: 1, loadStartedAt: 2000,
+    }];
+    const ordinaryFinds = makeFinds(
+      video,
+      [],
+      new Map([[pathKey(ordinary), 1900]]),
+      [ordinary],
+    );
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(ordinaryFinds, 0), []);
+
+    const multipleFinds = makeFinds(
+      video,
+      [],
+      new Map([[pathKey(first), 1900], [pathKey(second), 1950]]),
+      [first, second],
+    );
+    multipleFinds.wholeMediaByFrame = new Map([[0, [first, second]]]);
+    multipleFinds.mediaSizesByFrame = new Map([[
+      0,
+      new Map([
+        [pathKey(first), 8 * 1024 * 1024],
+        [pathKey(second), 12 * 1024 * 1024],
+      ]),
+    ]]);
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(multipleFinds, 0), []);
+  });
+
+  test("whole-file fallback rejects small, partial and segment-like responses", () => {
+    const base = "https://cdn.example.com/video/";
+    const details = (url, statusCode, responseHeaders) => ({ url, statusCode, responseHeaders });
+    const full = [{ name: "content-length", value: "8388608" }];
+    assert.equal(bg.wholeVideoMediaSize(details(base + "clip.mp4", 200, full)), 8388608);
+    assert.equal(bg.wholeVideoMediaSize(details(base + "preview.mp4", 200, [
+      { name: "content-length", value: "120000" },
+    ])), null);
+    assert.equal(bg.wholeVideoMediaSize(details(base + "clip.mp4", 206, full)), null);
+    assert.equal(bg.wholeVideoMediaSize(details(base + "clip.mp4", 200, [
+      ...full, { name: "content-range", value: "bytes 0-999/8388608" },
+    ])), null);
+    for (const url of [
+      base + "segment-12.mp4",
+      base + "chunk_001.mp4",
+      base + "preview-720p.mp4",
+      base + "trailer.mp4",
+      base + "ad-video.mp4",
+      base + "promo-clip.mp4",
+      "https://cdn.example.com/segments/0001.mp4",
+      "https://cdn.example.com/previews/preview.mp4",
+    ]) assert.equal(bg.wholeVideoMediaSize(details(url, 200, full)), null, url);
+  });
+
+  test("a whole-file fallback survives session restore", async () => {
+    const shared = {};
+    const first = makeChrome(shared);
+    const bg = loadBackground(first);
+    const tabId = 175;
+    const url = "https://cdn.example.com/video/full.mp4";
+    await first._listeners["webRequest.onResponseStarted"]({
+      tabId,
+      frameId: 0,
+      url,
+      timeStamp: 1000,
+      statusCode: 200,
+      responseHeaders: [
+        { name: "content-type", value: "video/mp4" },
+        { name: "content-length", value: "8388608" },
+      ],
+    });
+    await first._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{
+          src: null, blob: true, blobUrl: "blob:https://example.com/full",
+          elementId: 4, loadStartedAt: 1100,
+        }],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+    await bg._persistVideoFinds(tabId);
+    const saved = shared.session.get("videoFinds:v2:" + tabId);
+    assert.deepEqual(saved.wholeMediaFrames, [[0, [url]]]);
+    assert.deepEqual(saved.mediaSizesFrames, [[0, [[pathKey(url), 8388608]]]]);
+
+    const restarted = makeChrome(shared);
+    const restoredBg = loadBackground(restarted);
+    await restoredBg._restoreVideoFinds(tabId);
+    assert.deepEqual(await restoredBg.resolvedVideoUrls(tabId), [url]);
   });
 });
 
@@ -2945,6 +3179,34 @@ describe("HLS master playlist filtering", () => {
     );
   });
 
+  test("uses chunklist and prog_index filenames as child hints beside one master", async () => {
+    const bg = loadBackground(makeChrome());
+    const master = "https://cdn.example.com/hls/master.m3u8";
+    const chunklist = "https://cdn.example.com/hls/chunklist_b123.m3u8";
+    const progIndex = "https://cdn.example.com/hls/prog_index_123.m3u8";
+    const result = await bg.preferMasterPlaylists(
+      [master, chunklist, progIndex],
+      "https://page.example/watch",
+      [master, chunklist, progIndex],
+      async () => null,
+    );
+    assert.deepEqual(result, [master]);
+  });
+
+  test("rotating master tokens do not disable chunklist filename hints", async () => {
+    const bg = loadBackground(makeChrome());
+    const masterOld = "https://cdn.example.com/hls/master.m3u8?token=old";
+    const masterNew = "https://cdn.example.com/hls/master.m3u8?token=new";
+    const child = "https://cdn.example.com/hls/chunklist_b123.m3u8";
+    const result = await bg.preferMasterPlaylists(
+      [masterOld, masterNew, child],
+      "https://page.example/watch",
+      [masterOld, masterNew, child],
+      async () => null,
+    );
+    assert.deepEqual(result, [masterOld, masterNew]);
+  });
+
   test("does not classify an ordinary non-standard media playlist as a master", async () => {
     const ordinary = "https://cdn.example.com/v/42/720p.m3u8";
     const chunk = "https://cdn.example.com/v/42/chunklist.m3u8";
@@ -2969,16 +3231,16 @@ describe("HLS master playlist filtering", () => {
     );
   });
 
-  test("preserves candidates when playlist fetching fails", async () => {
+  test("uses conservative filename hints when playlist fetching fails", async () => {
     const master = "https://cdn.example.com/v/42/master.m3u8";
     const chunk = "https://cdn.example.com/v/42/chunklist.m3u8";
     assert.deepEqual(
       await filterWithPlaylists([master, chunk], new Map()),
-      [master, chunk],
+      [master],
     );
   });
 
-  test("preserves candidates when the paired Grab inspector rejects a master", async () => {
+  test("uses filename hints when the paired Grab inspector cannot classify a master", async () => {
     const master = "https://cdn.example.com/v/42/master.m3u8";
     const child = "https://cdn.example.com/v/42/chunklist.m3u8";
     const bg = loadBackground(makeChrome());
@@ -2989,7 +3251,7 @@ describe("HLS master playlist filtering", () => {
         [master, child],
         async () => null,
       ),
-      [master, child],
+      [master],
     );
   });
 
