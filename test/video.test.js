@@ -615,6 +615,42 @@ describe("per-video menu candidates", () => {
     assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [media]);
   });
 
+  test("blob right-click resolves the same complete-file fallback as the menu", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const tabId = 176;
+    const url = "https://cdn.example.com/video/full.mp4";
+    await chrome._listeners["webRequest.onResponseStarted"]({
+      tabId,
+      frameId: 0,
+      url,
+      statusCode: 200,
+      timeStamp: 1900,
+      responseHeaders: [
+        { name: "content-type", value: "video/mp4" },
+        { name: "content-length", value: "8388608" },
+      ],
+    });
+    await chrome._listeners["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [{
+          src: null,
+          blob: true,
+          blobUrl: "blob:https://example.com/clicked",
+          elementId: 9,
+          loadStartedAt: 2000,
+        }],
+      },
+      { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
+    );
+
+    const findings = bg._videoFinds.get(tabId);
+    const video = findings.frames.get(0)[0];
+    assert.deepEqual(await bg.resolvedVideoUrls(tabId), [url]);
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0, video), url);
+  });
+
   test("whole-file fallback rejects small, partial and segment-like responses", () => {
     const base = "https://cdn.example.com/video/";
     const details = (url, statusCode, responseHeaders) => ({ url, statusCode, responseHeaders });
