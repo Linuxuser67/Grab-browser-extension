@@ -718,7 +718,7 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
   // in the same directory are protocol alternates of one stream; any other
   // combination stays separate.
   const byFolder = new Map();
-  for (const item of candidates) {
+  for (const item of groupingCandidates) {
     const kind = manifestKind(item.url) || item.kind;
     if (!isManifestKind(kind)) continue;
     const folder = manifestFolderKey(item.url, kind);
