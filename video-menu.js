@@ -597,13 +597,13 @@ function hlsPlaylistNameHints(urls) {
   return hintedChildren;
 }
 
-/// A nested playlist is treated as a child only when its ancestor playlist
-/// was first requested before loadstart and the nested request began after it.
-/// This avoids collapsing separately loaded episode directories.
-function nestedHlsPlaylistChildKeys(urls, firstSeenTimes, loadStartedAt) {
-  if (!Number.isFinite(loadStartedAt) || !(firstSeenTimes instanceof Map)) {
-    return new Set();
-  }
+/// A nested HLS playlist is a child when it is strictly below an
+/// earlier-requested playlist on the same origin. Comparing request order,
+/// rather than loadstart, also handles players that fetch renditions before
+/// attaching their media element. The root-directory guard and path-boundary
+/// check keep sibling episode directories independent.
+function nestedHlsPlaylistChildKeys(urls, firstSeenTimes) {
+  if (!(firstSeenTimes instanceof Map)) return new Set();
   const playlists = [];
   for (const url of urls || []) {
     if (!isHlsPlaylistUrl(url)) continue;
@@ -627,8 +627,7 @@ function nestedHlsPlaylistChildKeys(urls, firstSeenTimes, loadStartedAt) {
   for (const parent of playlists) {
     if (
       parent.directory === "/" ||
-      !Number.isFinite(parent.firstSeenAt) ||
-      parent.firstSeenAt > loadStartedAt
+      !Number.isFinite(parent.firstSeenAt)
     ) continue;
     for (const child of playlists) {
       if (
@@ -637,7 +636,7 @@ function nestedHlsPlaylistChildKeys(urls, firstSeenTimes, loadStartedAt) {
         child.directory.length > parent.directory.length &&
         child.directory.startsWith(parent.directory) &&
         Number.isFinite(child.firstSeenAt) &&
-        child.firstSeenAt > loadStartedAt
+        child.firstSeenAt > parent.firstSeenAt
       ) {
         childKeys.add(child.key);
       }
@@ -2045,7 +2044,6 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVid
   const nestedChildKeys = nestedHlsPlaylistChildKeys(
     resolved,
     firstSeenTimes,
-    loadStartedAt,
   );
   if (nestedChildKeys.size > 0) {
     resolved = resolved.filter((url) => !nestedChildKeys.has(urlPathKey(url)));
@@ -2181,7 +2179,9 @@ const AUTH_QUERY_PARAMETER_NAME =
 
 /// Build a stable request identity while ignoring only recognized auth-token
 /// query parameters. Preserve every other parameter's spelling, encoding and order.
-function videoUrlIdentityKey(url) {
+function videoUrlIdentityKey(url, finds = null) {
+  const kind = manifestKind(url) || detectedKindForUrl(finds, url);
+  if (isManifestKind(kind)) return urlPathKey(url);
   try {
     const parsed = new URL(url);
     const retainedParameters = parsed.search
@@ -2213,7 +2213,7 @@ function dedupeVideoUrlsByPath(urls, finds) {
   const selected = new Map();
   for (const url of urls || []) {
     if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
-    const key = videoUrlIdentityKey(url);
+    const key = videoUrlIdentityKey(url, finds);
     const priority = videoUrlCandidatePriority(finds, url);
     const observedAt = videoUrlCandidateObservedAt(finds, url);
     const previous = selected.get(key);
@@ -2361,13 +2361,13 @@ function isSegmentLikeVideoUrl(url) {
   try {
     const path = new URL(url).pathname.toLowerCase();
     const basename = path.split("/").filter(Boolean).pop() || "";
-    if (/(?:^|\/)(?:segments?|chunks?|fragments?|previews?|pre[-_]rolls?|prerolls?|mid[-_]rolls?|midrolls?|post[-_]rolls?|postrolls?|ads|thumbnails?|storyboards?|sprites?|subtitles?|captions?|audio[-_]only|audioonly|prefetch(?:es)?)(?:\/|$)/.test(path)) {
+    if (/(?:^|\/)(?:segments?|chunks?|fragments?|previews?|pre[-_]rolls?|prerolls?|mid[-_]rolls?|midrolls?|post[-_]rolls?|postrolls?|ad|ads|thumbnails?|storyboards?|sprites?|subtitles?|captions?|audio[-_]only|audioonly|prefetch(?:es)?)(?:\/|$)/.test(path)) {
       return true;
     }
     if (/^(?:preview|trailer|teaser|ad|advert|advertisement|promo|thumbnail|thumb|storyboard|sprite|preroll|midroll|postroll|prefetch)(?:[._-]|$)/.test(basename)) {
       return true;
     }
-    return /^(?:seg(?:ment)?|chunk|frag(?:ment)?)[._-]+\d+(?:[._-]|$)/.test(basename);
+    return /^(?:seg(?:ment)?\d+|(?:chunk|frag(?:ment)?)[._-]+\d+)(?:[._-]|$)/.test(basename);
   } catch {
     return true;
   }
