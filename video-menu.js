@@ -90,7 +90,7 @@ function isAudioOnlyPlaylistUrl(url) {
     const pathname = new URL(url).pathname.toLowerCase();
     const filename = pathname.split("/").filter(Boolean).pop() || "";
     const basename = filename.replace(/\.(?:m3u8|m3u|mpd)$/i, "");
-    return /^(?:audio|audioonly|audio[-_]only|audio[-_]playlist|audioplaylist)(?:[._-].*)?$/.test(basename);
+    return /^(?:audio|audio[-_]track|audioonly|audio[-_]only|audio[-_]playlist|audioplaylist)(?:[._-].*)?$/.test(basename);
   } catch {
     return false;
   }
@@ -754,7 +754,7 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
       const folder = manifestFolderKey(item.url, kind);
       key = hasMultipleDirectSources
         ? directVideoUrlIdentityKey(item.url)
-        : (folder && familyFor.get(`${folder}\\u0000${path}`)) || path;
+        : (folder && familyFor.get(`${folder}\u0000${path}`)) || path;
     } else if (hasMultipleDirectSources) {
       key = directVideoUrlIdentityKey(item.url);
     } else {
