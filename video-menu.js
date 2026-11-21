@@ -1129,8 +1129,12 @@ function resumeRetiredFrame(finds, frameId, videos) {
     videos[0].blob === true &&
     validBlobUrl(videos[0].blobUrl) !== null &&
     validBlobUrl(videos[0].blobUrl) === retired.source;
+  const previousVideos = Array.isArray(retired.previousVideos)
+    ? retired.previousVideos
+    : [];
   const multiplePlayers =
     videos.length > 1 ||
+    previousVideos.length > 1 ||
     (Number.isInteger(retired.videoCount) && retired.videoCount > 1);
   const hasNewManifest = hasManifestSniffedAfter(
     finds,
