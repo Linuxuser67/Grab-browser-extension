@@ -582,6 +582,20 @@ describe("per-video menu candidates", () => {
     assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), []);
   });
 
+  test("equal-rank manifests without usable observation timing preserve first-seen order", async () => {
+    const first = "https://cdn.example.com/first/master.m3u8";
+    const second = "https://cdn.example.com/second/master.m3u8";
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/player",
+        elementId: 1, loadStartedAt: 2000,
+      }],
+      [first, second],
+      new Map(),
+    );
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [first]);
+  });
+
   test("a blob video prefers the manifest observed closest before its load start", async () => {
     const older = "https://cdn.example.com/prefetched/master.m3u8";
     const current = "https://cdn.example.com/current/master.m3u8";
@@ -597,6 +611,24 @@ describe("per-video menu candidates", () => {
       await bg.menuVideoCandidatesForFrame(findings, 0),
       [current],
     );
+  });
+
+  test("a manifest requested a few seconds after loadstart can belong to one of multiple players", async () => {
+    const direct = "https://cdn.example.com/earlier/direct.mp4";
+    const manifest = "https://cdn.example.com/later/master.m3u8";
+    const findings = makeFinds(
+      [
+        { src: direct, blob: false, elementId: 12, loadStartedAt: 1_000 },
+        {
+          src: null, blob: true, blobUrl: "blob:https://example.com/later",
+          elementId: 13, loadStartedAt: 6_000,
+        },
+      ],
+      [manifest],
+      new Map([[pathKey(manifest), 8_000]]),
+    );
+
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [direct]);
   });
 
   test("multiple active elements receive only manifests nearest to their own load start", async () => {
@@ -1774,7 +1806,8 @@ describe("detection wiring", () => {
   });
 
   test("a re-sniff of the same manifest path keeps the first request time and latest URL", async () => {
-    const chrome = makeChrome();
+    const shared = {};
+    const chrome = makeChrome(shared);
     const bg = loadBackground(chrome);
     const L = chrome._listeners;
     const tabId = 188;
@@ -1814,7 +1847,7 @@ describe("detection wiring", () => {
     assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), refreshed);
 
     await bg._persistVideoFinds(tabId);
-    const restoredBg = loadBackground(makeChrome(chrome._shared));
+    const restoredBg = loadBackground(makeChrome(shared));
     await restoredBg._restoreVideoFinds(tabId);
     assert.equal(
       restoredBg._videoFinds.get(tabId).sniffFirstSeenByFrame.get(0).get(key),
