@@ -787,7 +787,7 @@ describe("detection wiring", () => {
     );
   });
 
-  test("the existing menu stays visible while a slow playlist check runs", async () => {
+  test("a direct video remains the only entry when an unrelated manifest is sniffed", async () => {
     const chrome = makeChrome();
     // Private host: playlist inspection is local (no Grab pairing round trip).
     chrome.tabs.get = async (id) => ({ id, url: "http://192.168.1.5/" });
@@ -821,19 +821,18 @@ describe("detection wiring", () => {
       url: "http://192.168.1.5/live/master.m3u8",
       responseHeaders: [],
     });
-    await tick();
-    assert.equal(
-      chrome._calls.some(([n]) => n === "menus.remove"),
-      false,
-      "the old menu must stay until the replacement is ready",
-    );
-
     release();
     await tick();
     await tick();
+
     assert.ok(
       chrome._calls.some(([n]) => n === "menus.remove"),
-      "the menu is rebuilt once the playlist check completes",
+      "the completed refresh replaces the menu",
+    );
+    await L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, { id: tabId });
+    assert.ok(
+      chrome._calls.some(([n, url]) => n === "handoff" && url === "http://192.168.1.5/v/clip.mp4"),
+      "the direct DOM source remains the sole menu candidate",
     );
   });
 
@@ -859,11 +858,11 @@ describe("detection wiring", () => {
     );
     await tick();
     // Right-click lands in tab 5 (window 1 focused again, no onActivated fired).
-    // The menu was built from tab 6: [v.mp4, b.mp4, c.mp4], so index 2 is c.mp4.
-    await L["menus.onClicked"]({ menuItemId: "grabVideo:2" }, { id: 5 });
+    // The direct DOM source is authoritative; sniffed MP4s are not extra menu rows.
+    await L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, { id: 5 });
     assert.ok(
-      chrome._calls.some(([n, url]) => n === "handoff" && url === "https://b.example.com/c.mp4"),
-      "the labelled item (third entry of the menu) is what gets sent"
+      chrome._calls.some(([n, url]) => n === "handoff" && url === "https://b.example.com/v.mp4"),
+      "the sole direct-video entry is what gets sent"
     );
   });
 
@@ -2157,12 +2156,12 @@ describe("detection wiring", () => {
     );
     assert.deepEqual(
       await bg.resolvedVideoUrls(tabId),
-      manifests,
-      "the detection menu exposes the separate network-observed playlist candidates",
+      [],
+      "frame-level manifests are not guessed across multiple active elements without timing metadata",
     );
   });
 
-  test("one blob player with unrelated manifests is not guessed", async () => {
+  test("one blob player collapses unrelated manifests to one best candidate", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);
     const L = chrome._listeners;
@@ -2177,7 +2176,10 @@ describe("detection wiring", () => {
       }] },
       { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
     );
-    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), null);
+    assert.equal(
+      await bg.resolvedBlobVideoUrlForFrame(tabId, 0),
+      "https://cdn.example.com/a/master.m3u8",
+    );
   });
 
   test("blob identity and frame-scoped manifests survive worker restart", async () => {
@@ -2680,7 +2682,6 @@ describe("context menu: one flat submenu, one click to Grab", () => {
     assert.ok(ids.has("grabVideos"));
     assert.deepEqual(rowsOf(items).map((i) => i.title), [
       "clip.mp4 • 1080p",
-      "Example …",
     ]);
     assert.ok(items.every((i) => i.enabled !== false));
   });
@@ -2692,11 +2693,10 @@ describe("context menu: one flat submenu, one click to Grab", () => {
       title: "Example …",
     });
     const rows = rowsOf(items);
+    assert.equal(rows.length, 1);
     await click(chrome, rows[0].id);
-    await click(chrome, rows[1].id);
     assert.deepEqual(sent(chrome), [
       "https://cdn.example.com/v/clip.mp4",
-      "https://cdn.example.com/hls/master.m3u8",
     ]);
   });
 
