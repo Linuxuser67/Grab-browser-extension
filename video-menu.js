@@ -552,21 +552,22 @@ function hlsPlaylistNameHints(urls) {
     const key = urlPathKey(url);
     if (/^(?:master|index|playlist|hlsplaylist|stream)(?:[_-][a-z0-9]+)?\.(?:m3u8|m3u)$/i.test(basename)) {
       let masters = mastersByFolder.get(folder);
-      if (!masters) mastersByFolder.set(folder, masters = []);
-      masters.push(key);
+      if (!masters) mastersByFolder.set(folder, masters = new Set());
+      masters.add(key);
     } else if (/^(?:chunklist|prog_index)(?:[_-].*)?\.(?:m3u8|m3u)$/i.test(basename)) {
       let children = childrenByFolder.get(folder);
-      if (!children) childrenByFolder.set(folder, children = []);
-      children.push(key);
+      if (!children) childrenByFolder.set(folder, children = new Set());
+      children.add(key);
     }
   }
 
   const hintedChildren = new Set();
   for (const [folder, masters] of mastersByFolder) {
     // More than one plausible master in a directory makes the hint ambiguous.
-    if (masters.length !== 1) continue;
+    if (masters.size !== 1) continue;
+    const [master] = masters;
     for (const child of childrenByFolder.get(folder) || []) {
-      if (child !== masters[0]) hintedChildren.add(child);
+      if (child !== master) hintedChildren.add(child);
     }
   }
   return hintedChildren;
