@@ -1627,13 +1627,13 @@ describe("detection wiring", () => {
       src: null, blob: true, blobUrl: "blob:https://example.com/reattached"
     };
     const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+    const resetAt = Date.now();
 
     await L["webRequest.onResponseStarted"]({
       tabId, frameId: 0, url: manifest, timeStamp: resetAt - 100,
       responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
     });
     await L["runtime.onMessage"]({ type: "grab-videos-detected", videos: [oldVideo] }, sender);
-    const resetAt = Date.now();
     await L["runtime.onMessage"](
       {
         type: "grab-videos-detected",
