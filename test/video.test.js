@@ -491,8 +491,8 @@ describe("per-video menu candidates", () => {
     globalThis.fetch = async (url) => ({
       ok: true,
       text: async () => String(url) === master
-        ? "#EXTM3U\\n#EXT-X-STREAM-INF:BANDWIDTH=100000\\nvariant.m3u8\\n"
-        : "#EXTM3U\\n#EXT-X-TARGETDURATION=6\\n",
+        ? "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000\nvariant.m3u8\n"
+        : "#EXTM3U\n#EXT-X-TARGETDURATION=6\n",
     });
     try {
       const findings = makeFinds(
