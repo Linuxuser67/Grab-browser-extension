@@ -1716,26 +1716,35 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) 
   return bestManifestForVideo(tabId, finds, frameId, attributed);
 }
 
-function newestVideoUrlObservation(finds, url) {
+function videoUrlCandidateObservedAt(finds, url) {
   const key = urlPathKey(url);
   let newest = Number.NEGATIVE_INFINITY;
 
-  for (const times of finds.sniffTimesByFrame instanceof Map
-    ? finds.sniffTimesByFrame.values()
-    : []) {
-    const observedAt = times instanceof Map ? times.get(key) : null;
-    if (Number.isFinite(observedAt)) newest = Math.max(newest, observedAt);
-  }
-
-  for (const videos of finds.frames.values()) {
+  for (const [frameId, videos] of finds.frames) {
     for (const video of videos || []) {
       if (
         video &&
-        typeof video.src === "string" &&
-        urlPathKey(video.src) === key &&
+        video.src === url &&
         Number.isFinite(video.loadStartedAt)
       ) newest = Math.max(newest, video.loadStartedAt);
     }
+    const observedUrls = [
+      ...(finds.sniffedByFrame.get(frameId) || []),
+      ...(finds.mediaByFrame.get(frameId) || []),
+    ];
+    if (observedUrls.includes(url)) {
+      const times = finds.sniffTimesByFrame.get(frameId);
+      const observedAt = times instanceof Map ? times.get(key) : null;
+      if (Number.isFinite(observedAt)) newest = Math.max(newest, observedAt);
+    }
+  }
+
+  // A network-only frame can hold a manifest without a DOM report.
+  for (const [frameId, observedUrls] of finds.sniffedByFrame || []) {
+    if (finds.frames.has(frameId) || !observedUrls.includes(url)) continue;
+    const times = finds.sniffTimesByFrame.get(frameId);
+    const observedAt = times instanceof Map ? times.get(key) : null;
+    if (Number.isFinite(observedAt)) newest = Math.max(newest, observedAt);
   }
   return newest;
 }
@@ -1756,7 +1765,7 @@ function dedupeVideoUrlsByPath(urls, finds) {
     if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
     const key = urlPathKey(url);
     const priority = videoUrlCandidatePriority(finds, url);
-    const observedAt = newestVideoUrlObservation(finds, url);
+    const observedAt = videoUrlCandidateObservedAt(finds, url);
     const previous = selected.get(key);
     if (
       !previous ||
