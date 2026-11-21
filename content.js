@@ -143,6 +143,7 @@ if (
   const lastVideoSource = new WeakMap();
   const videoIds = new WeakMap();
   const videoLoadStartedAt = new WeakMap();
+  const videoLoadStartObserved = new WeakSet();
   let nextVideoId = 0;
   const frameLifecyclePriority = { pause: 1, ended: 2, reset: 3 };
 
@@ -161,10 +162,12 @@ if (
     return current || lastVideoSource.get(video) || null;
   }
 
-  function rememberVideoLoadStart(video, replace = false) {
+  function rememberVideoLoadStart(video, replace = false, observed = false) {
     if (!video) return;
     if (replace || !Number.isFinite(videoLoadStartedAt.get(video))) {
       videoLoadStartedAt.set(video, Date.now());
+      videoLoadStartObserved.delete(video);
+      if (observed) videoLoadStartObserved.add(video);
     }
   }
 
@@ -175,10 +178,11 @@ if (
       videoIds.set(video, elementId);
     }
     rememberVideoLoadStart(video);
-    return {
-      elementId,
-      loadStartedAt: videoLoadStartedAt.get(video),
-    };
+    const metadata = { elementId };
+    if (videoLoadStartObserved.has(video)) {
+      metadata.loadStartedAt = videoLoadStartedAt.get(video);
+    }
+    return metadata;
   }
 
   function report(lifecycleOverride = null, lifecycleSourceOverride = null, lifecycleAtOverride = null) {
@@ -272,7 +276,7 @@ if (
     if (!t || t.tagName !== "VIDEO") return;
     rememberVideoSource(t);
     // loadstart begins a new resource timeline for this element.
-    rememberVideoLoadStart(t, true);
+    rememberVideoLoadStart(t, true, true);
     scheduleReport();
   }
 
@@ -294,6 +298,7 @@ if (
     const source = lastVideoSource.get(t) || currentVideoSource(t);
     lastVideoSource.delete(t);
     videoLoadStartedAt.delete(t);
+    videoLoadStartObserved.delete(t);
     // Reset immediately so the old manifest is retired before replacement
     // source requests normally arrive. Pause/end remain debounced.
     if (timer) clearTimeout(timer);

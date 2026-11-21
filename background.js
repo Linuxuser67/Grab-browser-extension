@@ -214,6 +214,7 @@ if (typeof module !== "undefined" && module.exports) {
     isSegmentLikeVideoUrl,
     MIN_WHOLE_VIDEO_MEDIA_BYTES,
     VIDEO_MANIFEST_ATTRIBUTION_WINDOW_MS,
+    VIDEO_MANIFEST_POST_LOAD_WINDOW_MS,
     resolvedVideoUrls,
     preferMasterPlaylists,
     isMasterPlaylist,
