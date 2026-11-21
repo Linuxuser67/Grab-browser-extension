@@ -2375,8 +2375,14 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
   }
 
   const sequences = sniffSequenceMapForFrame(f, sourceFrame, true);
-  const hadPriorObservation = sequences.has(key);
-  sequences.set(key, nextSniffSequence(f));
+  const hadPriorObservation =
+    sequences.has(key) ||
+    (f.sniffedByFrame.get(sourceFrame) || []).some((candidate) => urlPathKey(candidate) === key) ||
+    (f.mediaByFrame.get(sourceFrame) || []).some((candidate) => urlPathKey(candidate) === key);
+  // Sequence numbers describe the first appearance of a path, not every
+  // playlist refresh. Otherwise a live reload can masquerade as a new stream
+  // and trigger retirement cleanup for unrelated pre-existing candidates.
+  if (!hadPriorObservation) sequences.set(key, nextSniffSequence(f));
   const times = sniffTimeMapForFrame(f, sourceFrame, true);
   times.set(key, validLifecycleTime(observedAt));
   const firstSeen = sniffFirstSeenMapForFrame(f, sourceFrame, true);
