@@ -757,6 +757,7 @@ const RETIRED_FRAME_TTL_MS = 5 * 60 * 1000;
 // A manifest must precede an element's resource start and be close enough to
 // that event to be a plausible request for the same playback session.
 const VIDEO_MANIFEST_ATTRIBUTION_WINDOW_MS = 30_000;
+const VIDEO_MANIFEST_POST_LOAD_WINDOW_MS = 5_000;
 const VIDEO_MANIFEST_ATTRIBUTION_TIE_MS = 250;
 const videoFinds = new Map();
 
@@ -770,6 +771,7 @@ function createVideoFinds() {
     kindsByFrame: new Map(),
     sniffSequencesByFrame: new Map(),
     sniffTimesByFrame: new Map(),
+    sniffFirstSeenByFrame: new Map(),
     retiredFrames: new Map(),
     sniffSequence: 0,
     title: "",
@@ -788,6 +790,7 @@ function trackedFrameIds(f) {
   for (const id of f.kindsByFrame.keys()) ids.add(id);
   for (const id of f.sniffSequencesByFrame.keys()) ids.add(id);
   for (const id of f.sniffTimesByFrame.keys()) ids.add(id);
+  for (const id of f.sniffFirstSeenByFrame.keys()) ids.add(id);
   for (const id of f.retiredFrames.keys()) ids.add(id);
   return ids;
 }
@@ -803,6 +806,7 @@ function dropFrame(f, frameId) {
   f.kindsByFrame.delete(frameId);
   f.sniffSequencesByFrame.delete(frameId);
   f.sniffTimesByFrame.delete(frameId);
+  f.sniffFirstSeenByFrame.delete(frameId);
   f.retiredFrames.delete(frameId);
 }
 
@@ -1781,6 +1785,12 @@ function sniffTimesForFrame(finds, frameId) {
     : new Map();
 }
 
+function sniffFirstSeenTimesForFrame(finds, frameId) {
+  return finds.sniffFirstSeenByFrame instanceof Map
+    ? finds.sniffFirstSeenByFrame.get(frameId) || new Map()
+    : sniffTimesForFrame(finds, frameId);
+}
+
 function sniffedManifestsForFrame(finds, frameId) {
   const kinds = kindsForFrame(finds, frameId);
   return sniffedUrlsForFrame(finds, frameId).filter((url) => {
@@ -1794,56 +1804,52 @@ function videoManifestPriority(url, kinds) {
   return kind === "hls" ? 30 : kind === "manifest" ? 25 : kind === "dash" ? 20 : 0;
 }
 
-/// Attribute each manifest to the nearest element resource start that follows
-/// the request. When several active videos cannot be distinguished in time,
-/// the manifest is deliberately dropped instead of being guessed.
-function attributedManifestUrlsForVideo(videos, targetVideo, manifests, sniffTimes) {
+/// A lone active player owns every manifest observed in its frame. With
+/// concurrent players, use each path's first request time to disambiguate.
+function attributedManifestUrlsForVideo(
+  videos,
+  targetVideo,
+  manifests,
+  sniffTimes,
+  firstSeenTimes = sniffTimes,
+) {
   if (!Array.isArray(videos) || !videos.includes(targetVideo)) return [];
-  const multipleVideos = videos.length > 1;
+  if (videos.length === 1) return Array.isArray(manifests) ? manifests : [];
 
-  if (multipleVideos) {
-    const elementIds = new Set();
-    for (const video of videos) {
-      if (
-        !video ||
-        !Number.isSafeInteger(video.elementId) ||
-        video.elementId <= 0 ||
-        !Number.isFinite(video.loadStartedAt) ||
-        video.loadStartedAt < 0 ||
-        elementIds.has(video.elementId)
-      ) return [];
-      elementIds.add(video.elementId);
-    }
+  const elementIds = new Set();
+  for (const video of videos) {
+    if (
+      !video ||
+      !Number.isSafeInteger(video.elementId) ||
+      video.elementId <= 0 ||
+      !Number.isFinite(video.loadStartedAt) ||
+      video.loadStartedAt < 0 ||
+      elementIds.has(video.elementId)
+    ) return [];
+    elementIds.add(video.elementId);
   }
 
   const attributed = [];
-  for (const url of manifests) {
-    const observedAt = sniffTimes.get(urlPathKey(url));
-    // Old v2 reports have no element timing. Preserve their single-player
-    // fallback even when the corresponding sniff timestamp was persisted.
-    if (!multipleVideos && !Number.isFinite(targetVideo.loadStartedAt)) {
-      attributed.push(url);
-      continue;
-    }
-    // A single active player owns its frame's manifests, but timestamped
-    // requests must still belong to that player's current resource load.
+  for (const url of manifests || []) {
+    const observedAt = firstSeenTimes instanceof Map
+      ? firstSeenTimes.get(urlPathKey(url))
+      : null;
     if (!Number.isFinite(observedAt) || observedAt < 0) continue;
-
     const possibleOwners = videos
-      .map((video) => ({
-        video,
-        gap: video.loadStartedAt - observedAt,
-      }))
+      .map((video) => {
+        const gap = video.loadStartedAt - observedAt;
+        return { video, gap, distance: Math.abs(gap) };
+      })
       .filter(({ gap }) =>
         Number.isFinite(gap) &&
-        gap >= 0 &&
+        gap >= -VIDEO_MANIFEST_POST_LOAD_WINDOW_MS &&
         gap <= VIDEO_MANIFEST_ATTRIBUTION_WINDOW_MS
       )
-      .sort((a, b) => a.gap - b.gap);
+      .sort((a, b) => a.distance - b.distance);
     if (possibleOwners.length === 0) continue;
     if (
       possibleOwners.length > 1 &&
-      possibleOwners[1].gap - possibleOwners[0].gap <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
+      possibleOwners[1].distance - possibleOwners[0].distance <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
     ) continue;
     if (possibleOwners[0].video === targetVideo) attributed.push(url);
   }
@@ -1875,11 +1881,13 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVid
     if (rankDifference !== 0) return rankDifference;
     return gapToLoadStart(a) - gapToLoadStart(b);
   });
+  const firstGap = merged.length > 1 ? gapToLoadStart(merged[0]) : null;
+  const secondGap = merged.length > 1 ? gapToLoadStart(merged[1]) : null;
   if (
-    Number.isFinite(loadStartedAt) &&
-    merged.length > 1 &&
+    Number.isFinite(firstGap) &&
+    Number.isFinite(secondGap) &&
     videoManifestPriority(merged[0], kinds) === videoManifestPriority(merged[1], kinds) &&
-    gapToLoadStart(merged[0]) === gapToLoadStart(merged[1])
+    Math.abs(firstGap - secondGap) <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
   ) return null;
   return merged[0] || null;
 }
@@ -1897,11 +1905,13 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) 
   if (!video || video.blob !== true || !videos.includes(video)) return null;
   const manifests = sniffedManifestsForFrame(finds, frameId);
   const sniffTimes = sniffTimesForFrame(finds, frameId);
+  const firstSeenTimes = sniffFirstSeenTimesForFrame(finds, frameId);
   const attributed = attributedManifestUrlsForVideo(
     videos,
     video,
     manifests,
     sniffTimes,
+    firstSeenTimes,
   );
   const best = await bestManifestForVideo(tabId, finds, frameId, attributed, video);
   if (best) return best;
@@ -1912,6 +1922,7 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) 
     video,
     wholeMedia,
     sniffTimes,
+      firstSeenTimes,
   );
   const uniqueMedia = dedupeVideoUrlsByPath(attributedMedia, finds);
   return uniqueMedia.length === 1 ? uniqueMedia[0] : null;
@@ -2020,6 +2031,7 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
 
   const urls = [];
   const sniffTimes = sniffTimesForFrame(finds, frameId);
+  const firstSeenTimes = sniffFirstSeenTimesForFrame(finds, frameId);
   for (const video of videos) {
     if (video && typeof video.src === "string" && fitsGrabUrl(video.src)) {
       urls.push(video.src);
@@ -2031,6 +2043,7 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
       video,
       manifests,
       sniffTimes,
+      firstSeenTimes,
     );
     const best = await bestManifestForVideo(tabId, finds, frameId, attributed, video);
     if (best) {
@@ -2044,6 +2057,7 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
       video,
       wholeMedia,
       sniffTimes,
+      firstSeenTimes,
     );
     const uniqueMedia = dedupeVideoUrlsByPath(attributedMedia, finds);
     if (uniqueMedia.length === 1) urls.push(uniqueMedia[0]);
