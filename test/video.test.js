@@ -274,6 +274,18 @@ describe("classifyStream", () => {
       bg.classifyStream("https://cdn.example.com/audio/playlist", "audio/mpegurl"),
       null,
     );
+    for (const mime of ["audio/x-mpegurl", "audio/mpegurl"]) {
+      assert.equal(
+        bg.classifyStream("https://cdn.example.com/hls/playlist.m3u8", mime),
+        "manifest",
+        mime,
+      );
+      assert.equal(
+        bg.classifyStream("https://cdn.example.com/hls/playlist", mime),
+        "manifest",
+        mime,
+      );
+    }
     assert.equal(
       bg.classifyStream("https://cdn.example.com/audio-only/master.m3u8", "application/vnd.apple.mpegurl"),
       null,
