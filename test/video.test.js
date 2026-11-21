@@ -2061,9 +2061,15 @@ describe("detection wiring", () => {
     const L = chrome._listeners;
     const tabId = 166;
     const manifest = "https://cdn.example.com/old/master.m3u8";
-    const video = { src: null, blob: true, blobUrl: "blob:https://example.com/old" };
-    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
     const sniffAt = Date.now() - 100;
+    const video = {
+      src: null,
+      blob: true,
+      blobUrl: "blob:https://example.com/old",
+      elementId: 7,
+      loadStartedAt: sniffAt + 25,
+    };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
     const pauseAt = Date.now();
 
     await L["webRequest.onResponseStarted"]({
@@ -2095,6 +2101,8 @@ describe("detection wiring", () => {
     assert.deepEqual(saved.sniffTimes, [[0, [[
       "https://cdn.example.com/old/master.m3u8", sniffAt,
     ]]]]);
+    assert.equal(saved.frames[0][1][0].elementId, 7);
+    assert.equal(saved.frames[0][1][0].loadStartedAt, video.loadStartedAt);
 
     const restoredChrome = makeChrome(shared);
     const restoredBg = loadBackground(restoredChrome);
@@ -2103,6 +2111,8 @@ describe("detection wiring", () => {
     assert.equal(restored.sniffSequence, 1);
     assert.equal(restored.retiredFrames.get(0).retiredAtSeq, 1);
     assert.equal(restored.sniffTimesByFrame.get(0).get("https://cdn.example.com/old/master.m3u8"), sniffAt);
+    assert.equal(restored.frames.get(0)[0].elementId, 7);
+    assert.equal(restored.frames.get(0)[0].loadStartedAt, video.loadStartedAt);
     assert.deepEqual(await restoredBg.resolvedVideoUrls(tabId), []);
     await restoredChrome._listeners["runtime.onMessage"](
       { type: "grab-videos-detected", videos: [video] }, sender,
