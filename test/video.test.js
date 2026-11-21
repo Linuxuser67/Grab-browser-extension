@@ -477,6 +477,7 @@ describe("per-video menu candidates", () => {
     mediaByFrame: new Map([[0, media]]),
     kindsByFrame: new Map([[0, new Map()]]),
     sniffTimesByFrame: new Map([[0, times]]),
+    sniffFirstSeenByFrame: new Map([[0, new Map(times)]]),
     retiredFrames: new Map(),
   });
 
@@ -640,7 +641,7 @@ describe("per-video menu candidates", () => {
     assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), []);
   });
 
-  test("manifests observed after an element load start are not attributed to it", async () => {
+  test("manifest requests shortly after loadstart are attributed within the tolerance", async () => {
     const ad = "https://ads.example.com/ad/master.m3u8";
     const findings = makeFinds(
       [{
@@ -651,6 +652,19 @@ describe("per-video menu candidates", () => {
       new Map([[pathKey(ad), 2100]]),
     );
 
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [ad]);
+  });
+
+  test("manifest requests more than five seconds after loadstart remain unattributed", async () => {
+    const manifest = "https://cdn.example.com/late/master.m3u8";
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/late",
+        elementId: 1, loadStartedAt: 2000,
+      }],
+      [manifest],
+      new Map([[pathKey(manifest), 8_000]]),
+    );
     assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), []);
   });
 
@@ -4110,9 +4124,10 @@ describe("warned tabs survive a worker restart", () => {
       responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
     });
 
-    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0, videoA), refreshed,
+    const [reportedA, reportedB] = bg._videoFinds.get(tabId).frames.get(0);
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0, reportedA), refreshed,
       "the original request timing still attributes a refreshed URL to player A");
-    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0, videoB), null,
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0, reportedB), null,
       "the refresh timestamp is not used to reassign player A's manifest to player B");
 
     await bg._persistVideoFinds(tabId);
