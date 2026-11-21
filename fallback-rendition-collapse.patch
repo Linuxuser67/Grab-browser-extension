@@ -19,8 +19,8 @@ index b0534c1..07e16e7 100644
 +  // No active <video>: the manifest-only fallback collapses renditions too.
 +  async function fallbackPlaylists(requests) {
 +    chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
-+    const urls = requests.map(([path]) => \`http://192.168.1.20\${path}\`);
-+    const firstSeen = new Map(requests.map(([path, at]) => [pathKey(\`http://192.168.1.20\${path}\`), at]));
++    const urls = requests.map(([path]) => `http://192.168.1.20${path}`);
++    const firstSeen = new Map(requests.map(([path, at]) => [pathKey(`http://192.168.1.20${path}`), at]));
 +    const findings = makeFinds([], urls, new Map(firstSeen));
 +    findings.sniffFirstSeenByFrame.set(0, firstSeen);
 +    return bg.menuVideoCandidatesForFrame(findings, 0);
