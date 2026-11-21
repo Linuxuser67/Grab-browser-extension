@@ -518,6 +518,18 @@ describe("per-video menu candidates", () => {
     assert.deepEqual(await bg.resolvedVideoUrls(190), [first, second]);
   });
 
+  test("direct-source dedupe preserves the exact order of non-auth query parameters", async () => {
+    const first = "https://cdn.example.com/get_video.php?id=1&format=mp4";
+    const second = "https://cdn.example.com/get_video.php?format=mp4&id=1";
+    const findings = makeFinds([
+      { src: first, blob: false, elementId: 1, loadStartedAt: 1000 },
+      { src: second, blob: false, elementId: 2, loadStartedAt: 2000 },
+    ]);
+    bg._videoFinds.set(193, findings);
+
+    assert.deepEqual(await bg.resolvedVideoUrls(193), [first, second]);
+  });
+
   test("direct-source dedupe still ignores rotating auth-token values", async () => {
     const oldUrl = "https://cdn.example.com/get_video.php?token=old";
     const newUrl = "https://cdn.example.com/get_video.php?token=new";
