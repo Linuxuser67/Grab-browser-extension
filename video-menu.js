@@ -1837,9 +1837,11 @@ function attributedManifestUrlsForVideo(videos, targetVideo, manifests, sniffTim
   return attributed;
 }
 
-async function bestManifestForVideo(tabId, finds, frameId, candidates) {
+async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVideo = null) {
   if (!candidates || candidates.length === 0) return null;
   const kinds = kindsForFrame(finds, frameId);
+  const sniffTimes = sniffTimesForFrame(finds, frameId);
+  const loadStartedAt = targetVideo && targetVideo.loadStartedAt;
   let resolved = [...candidates];
   if (resolved.length > 1) {
     resolved = await preferMasterPlaylists(
@@ -1849,9 +1851,17 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates) {
     );
   }
   const merged = mergeVideoFinds([], resolved, kinds);
-  merged.sort((a, b) =>
-    videoManifestPriority(b, kinds) - videoManifestPriority(a, kinds)
-  );
+  const gapToLoadStart = (url) => {
+    const observedAt = sniffTimes.get(urlPathKey(url));
+    return Number.isFinite(loadStartedAt) && Number.isFinite(observedAt)
+      ? loadStartedAt - observedAt
+      : Number.POSITIVE_INFINITY;
+  };
+  merged.sort((a, b) => {
+    const rankDifference = videoManifestPriority(b, kinds) - videoManifestPriority(a, kinds);
+    if (rankDifference !== 0) return rankDifference;
+    return gapToLoadStart(a) - gapToLoadStart(b);
+  });
   return merged[0] || null;
 }
 
@@ -1874,7 +1884,7 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) 
     manifests,
     sniffTimes,
   );
-  const best = await bestManifestForVideo(tabId, finds, frameId, attributed);
+  const best = await bestManifestForVideo(tabId, finds, frameId, attributed, video);
   if (best) return best;
 
   const wholeMedia = wholeMediaUrlsForFrame(finds, frameId);
@@ -2003,7 +2013,7 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
       manifests,
       sniffTimes,
     );
-    const best = await bestManifestForVideo(tabId, finds, frameId, attributed);
+    const best = await bestManifestForVideo(tabId, finds, frameId, attributed, video);
     if (best) {
       urls.push(best);
       continue;
