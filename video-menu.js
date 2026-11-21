@@ -1728,12 +1728,17 @@ function videoUrlCandidateObservedAt(finds, url) {
         Number.isFinite(video.loadStartedAt)
       ) newest = Math.max(newest, video.loadStartedAt);
     }
-    const observedUrls = [
-      ...(finds.sniffedByFrame.get(frameId) || []),
-      ...(finds.mediaByFrame.get(frameId) || []),
-    ];
+    const sniffed = finds.sniffedByFrame instanceof Map
+      ? finds.sniffedByFrame.get(frameId) || []
+      : [];
+    const media = finds.mediaByFrame instanceof Map
+      ? finds.mediaByFrame.get(frameId) || []
+      : [];
+    const observedUrls = [...sniffed, ...media];
     if (observedUrls.includes(url)) {
-      const times = finds.sniffTimesByFrame.get(frameId);
+      const times = finds.sniffTimesByFrame instanceof Map
+        ? finds.sniffTimesByFrame.get(frameId)
+        : null;
       const observedAt = times instanceof Map ? times.get(key) : null;
       if (Number.isFinite(observedAt)) newest = Math.max(newest, observedAt);
     }
@@ -1742,7 +1747,9 @@ function videoUrlCandidateObservedAt(finds, url) {
   // A network-only frame can hold a manifest without a DOM report.
   for (const [frameId, observedUrls] of finds.sniffedByFrame || []) {
     if (finds.frames.has(frameId) || !observedUrls.includes(url)) continue;
-    const times = finds.sniffTimesByFrame.get(frameId);
+    const times = finds.sniffTimesByFrame instanceof Map
+      ? finds.sniffTimesByFrame.get(frameId)
+      : null;
     const observedAt = times instanceof Map ? times.get(key) : null;
     if (Number.isFinite(observedAt)) newest = Math.max(newest, observedAt);
   }
