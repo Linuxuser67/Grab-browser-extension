@@ -178,6 +178,7 @@ describe("shadow-root video detection (jsdom)", () => {
       assert.equal(last.replaceFrame, true, "empty pause report replaces the frame snapshot");
       assert.equal(last.lifecycle, "pause", "pause is distinct from a source reset");
       assert.equal(last.lifecycleSource, "https://example.com/v.mp4");
+      assert.ok(Number.isFinite(last.lifecycleAt), "pause includes its event timestamp");
       await new Promise((r) => setTimeout(r, 500));
     } finally {
       cleanup();
@@ -201,6 +202,7 @@ describe("shadow-root video detection (jsdom)", () => {
       assert.ok(immediateReports.length > 0, "source reset is reported synchronously");
       assert.equal(immediateReports.at(-1).lifecycle, "reset");
       assert.equal(immediateReports.at(-1).lifecycleSource, "https://example.com/v.mp4");
+      assert.ok(Number.isFinite(immediateReports.at(-1).lifecycleAt), "reset includes its event timestamp");
 
       await new Promise((r) => setTimeout(r, 500));
       const reports = messages.filter((m) => m.type === "grab-videos-detected");
