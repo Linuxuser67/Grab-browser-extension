@@ -746,7 +746,6 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
   const groups = new Map();
   groupingCandidates.forEach((item, order) => {
     const kind = manifestKind(item.url) || item.kind;
-    let key;
     const path = urlPathKey(item.url);
     const directKeys = directSourceKeysByPath.get(path);
     const hasMultipleDirectSources = directKeys instanceof Set && directKeys.size > 1;
