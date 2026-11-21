@@ -2154,24 +2154,31 @@ function videoUrlCandidatePriority(finds, url) {
 }
 
 const AUTH_QUERY_PARAMETER_NAME =
-  /^(?:access_token|auth|authorization|bearer|exp|expires|expiry|hdnts|hmac|jwt|policy|session_token|sig|signature|token|x-amz-(?:credential|date|expires|security-token|signature)|x-goog-(?:algorithm|credential|date|expires|signature))$/i;
+  /^(?:access[-_]?token|api[-_]?token|auth|auth[-_]?key|auth[-_]?token|authorization|bearer|exp|expires|expiry|hdnea|hdnts|hmac|jwt|policy|session[-_]?token|sig|signature|x-amz-(?:credential|date|expires|security-token|signature)|x-goog-(?:algorithm|credential|date|expires|signature))$/i;
 
 /// Build a stable request identity while ignoring only recognized auth-token
-/// query parameters. Resource selectors such as ?id=1 remain significant.
+/// query parameters. Preserve every other parameter's spelling, encoding and order.
 function videoUrlIdentityKey(url) {
   try {
     const parsed = new URL(url);
-    const entries = [...parsed.searchParams.entries()]
-      .filter(([name]) => !AUTH_QUERY_PARAMETER_NAME.test(name))
-      .sort(([aName, aValue], [bName, bValue]) => {
-        if (aName !== bName) return aName < bName ? -1 : 1;
-        if (aValue === bValue) return 0;
-        return aValue < bValue ? -1 : 1;
-      });
-    const params = new URLSearchParams();
-    for (const [name, value] of entries) params.append(name, value);
-    const query = params.toString();
-    return parsed.origin + parsed.pathname + (query ? `?${query}` : "");
+    const retainedParameters = parsed.search
+      .slice(1)
+      .split("&")
+      .filter((parameter) => {
+        if (!parameter) return true;
+        const separator = parameter.indexOf("=");
+        const rawName = separator < 0 ? parameter : parameter.slice(0, separator);
+        let name;
+        try {
+          name = decodeURIComponent(rawName.replace(/\+/g, " "));
+        } catch {
+          return true;
+        }
+        return !AUTH_QUERY_PARAMETER_NAME.test(name);
+      })
+      .join("&");
+    return parsed.origin + parsed.pathname +
+      (retainedParameters ? `?${retainedParameters}` : "");
   } catch {
     return url;
   }
