@@ -654,11 +654,11 @@ async function preferMasterPlaylists(
 /// DASH URLs are not merged because they may represent different videos.
 function crossProtocolManifestRootKey(url, kind) {
   if (kind !== "hls" && kind !== "dash") return null;
-  const folder = manifestFolderKey(url, kind);
-  if (!folder) return null;
   try {
-    const parsed = new URL(folder);
-    const parts = parsed.pathname.split("/").filter(Boolean);
+    const parsed = new URL(url);
+    const slash = parsed.pathname.lastIndexOf("/");
+    const parent = slash > 0 ? parsed.pathname.slice(0, slash) : "/";
+    const parts = parent.split("/").filter(Boolean);
     const protocolFolder = parts[parts.length - 1] || "";
     const isHlsFolder = kind === "hls" &&
       /^(?:hls|m3u8|hls[-_].+|.+[-_]hls)$/i.test(protocolFolder);
