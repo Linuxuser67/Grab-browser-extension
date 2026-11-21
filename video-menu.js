@@ -967,7 +967,7 @@ function nextSniffSequence(finds) {
   return finds.sniffSequence;
 }
 
-function removeFrameSniffsAtOrBefore(finds, frameId, sequence) {
+function removeFrameSniffsAtOrBefore(finds, frameId, sequence, preserveKeys = new Set()) {
   const cutoff = Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : 0;
   const sequences = sniffSequenceMapForFrame(finds, frameId);
   const times = sniffTimeMapForFrame(finds, frameId);
@@ -987,7 +987,10 @@ function removeFrameSniffsAtOrBefore(finds, frameId, sequence) {
     for (const url of urls) {
       const key = urlPathKey(url);
       const observedSequence = sequences && sequences.get(key);
-      if (Number.isSafeInteger(observedSequence) && observedSequence > cutoff) {
+      if (
+        (Number.isSafeInteger(observedSequence) && observedSequence > cutoff) ||
+        preserveKeys.has(key)
+      ) {
         kept.push(url);
         keptKeys.add(key);
       } else {
@@ -1033,17 +1036,18 @@ function hasManifestSniffedAfter(finds, frameId, sequence) {
 function pruneExpiredRetiredFrames(finds, now = Date.now()) {
   if (!(finds.retiredFrames instanceof Map)) return false;
   let changed = false;
-  for (const [frameId, retired] of finds.retiredFrames) {
+  for (const retired of finds.retiredFrames.values()) {
     if (
       !retired ||
       !Number.isFinite(retired.retiredAt) ||
       retired.retiredAt > now + 60_000 ||
-      now - retired.retiredAt < RETIRED_FRAME_TTL_MS
+      now - retired.retiredAt < RETIRED_FRAME_TTL_MS ||
+      retired.expired === true
     ) continue;
-    // Once the grace period expires, the stream can no longer be safely
-    // attributed. Drop the entire retired frame rather than resurfacing any
-    // post-retirement observations as no-DOM fallback candidates.
-    dropFrame(finds, frameId);
+    // Mark the lifecycle marker expired, but retain the hidden frame's
+    // observations until the next report can distinguish same-blob resume
+    // from a different source. Deleting now breaks long pauses.
+    retired.expired = true;
     changed = true;
   }
   return changed;
@@ -1053,11 +1057,12 @@ function recordRetiredFrame(
   finds,
   frameId,
   source,
-  previousVideoCount,
+  previousVideos,
   lifecycleAt = Date.now(),
 ) {
   if (!(finds.retiredFrames instanceof Map)) finds.retiredFrames = new Map();
   const validSource = validLifecycleSource(source);
+  const normalizedPreviousVideos = normalizeVideoReport(previousVideos, MAX_VIDEO_ITEMS);
   const existing = finds.retiredFrames.get(frameId);
   // Repeated pause/end reports must not move the sequence boundary forward:
   // manifests observed after the first retirement belong to the next stream.
@@ -1065,8 +1070,11 @@ function recordRetiredFrame(
     existing.source = existing.source || validSource;
     existing.videoCount = Math.max(
       Number.isInteger(existing.videoCount) ? existing.videoCount : 0,
-      Number.isInteger(previousVideoCount) ? previousVideoCount : 0,
+      normalizedPreviousVideos.length,
     );
+    if (!Array.isArray(existing.previousVideos) || existing.previousVideos.length === 0) {
+      existing.previousVideos = normalizedPreviousVideos;
+    }
     return false;
   }
   const eventTime = validLifecycleTime(lifecycleAt);
@@ -1074,9 +1082,47 @@ function recordRetiredFrame(
     source: validSource,
     retiredAtSeq: retiredSequenceAt(finds, frameId, eventTime),
     retiredAt: Date.now(),
-    videoCount: Number.isInteger(previousVideoCount) ? previousVideoCount : 0,
+    videoCount: normalizedPreviousVideos.length,
+    previousVideos: normalizedPreviousVideos,
+    expired: false,
   });
   return true;
+}
+
+function preservedSniffsForOtherPlayers(finds, frameId, retired) {
+  const previousVideos = Array.isArray(retired.previousVideos)
+    ? retired.previousVideos
+    : [];
+  if (previousVideos.length < 2) return null;
+  const retiredVideo = previousVideos.find((video) => {
+    const source = video && video.blob === true
+      ? validBlobUrl(video.blobUrl)
+      : (video && typeof video.src === "string" ? video.src : null);
+    return source === retired.source;
+  });
+  if (!retiredVideo) return null;
+
+  const firstSeenTimes = sniffFirstSeenTimesForFrame(finds, frameId);
+  const candidates = [
+    ...sniffedUrlsForFrame(finds, frameId),
+    ...mediaUrlsForFrame(finds, frameId),
+  ];
+  const preserve = new Set();
+  for (const url of candidates) {
+    const owners = previousVideos.filter((video) =>
+      attributedManifestUrlsForVideo(
+        previousVideos,
+        video,
+        [url],
+        null,
+        firstSeenTimes,
+      ).length === 1
+    );
+    if (owners.length === 1 && owners[0] !== retiredVideo) {
+      preserve.add(urlPathKey(url));
+    }
+  }
+  return preserve;
 }
 
 function resumeRetiredFrame(finds, frameId, videos) {
@@ -1100,12 +1146,25 @@ function resumeRetiredFrame(finds, frameId, videos) {
     retired.retiredAtSeq,
   );
 
-  // A same-blob resume keeps its observations. Otherwise, a newly observed
-  // manifest proves that a new stream started: discard only pre-retirement
-  // URLs. Multiple players remain conservative because frame-wide sniffing
-  // cannot prove which element owns a retained manifest.
-  if (!sameBlobResumed && (hasNewManifest || multiplePlayers)) {
-    removeFrameSniffsAtOrBefore(finds, frameId, retired.retiredAtSeq);
+  const expired = retired.expired === true || (
+    Number.isFinite(retired.retiredAt) &&
+    retired.retiredAt <= Date.now() + 60_000 &&
+    Date.now() - retired.retiredAt >= RETIRED_FRAME_TTL_MS
+  );
+  // Same-blob resumes retain their manifests even after a long pause. A
+  // different source discards the retired player's old observations; when
+  // multiple prior players have reliable timing, preserve only manifests
+  // uniquely attributable to the other elements.
+  if (!sameBlobResumed && (expired || hasNewManifest || multiplePlayers)) {
+    const preserveKeys = multiplePlayers
+      ? preservedSniffsForOtherPlayers(finds, frameId, retired)
+      : null;
+    removeFrameSniffsAtOrBefore(
+      finds,
+      frameId,
+      retired.retiredAtSeq,
+      preserveKeys || new Set(),
+    );
   }
   finds.retiredFrames.delete(frameId);
   return true;
@@ -1331,6 +1390,8 @@ function snapshotVideoFinds(finds) {
       videoCount: Number.isInteger(retired.videoCount) && retired.videoCount >= 0
         ? Math.min(retired.videoCount, MAX_VIDEO_ITEMS)
         : 0,
+      previousVideos: normalizeVideoReport(retired.previousVideos, MAX_VIDEO_ITEMS),
+      expired: retired.expired === true,
     }]);
   }
 
@@ -1688,6 +1749,8 @@ async function restoreVideoFinds(tabId) {
             videoCount: Number.isInteger(pair[1].videoCount) && pair[1].videoCount >= 0
               ? Math.min(pair[1].videoCount, MAX_VIDEO_ITEMS)
               : 0,
+            previousVideos: normalizeVideoReport(pair[1].previousVideos, MAX_VIDEO_ITEMS),
+            expired: pair[1].expired === true,
           });
         }
         // PR #86 snapshots stored pausedFrames as [frameId, blobUrl]. Convert
@@ -1707,6 +1770,8 @@ async function restoreVideoFinds(tabId) {
             retiredAtSeq: sniffSequence,
             retiredAt: Date.now(),
             videoCount: 1,
+            previousVideos: [],
+            expired: false,
           });
         }
 
@@ -2774,7 +2839,7 @@ async function onVideoReport(msg, sender) {
       f,
       frameId,
       retirementSource,
-      previousVideos.length,
+      previousVideos,
       msg.lifecycleAt,
     );
     if (retiredChanged) changed = true;

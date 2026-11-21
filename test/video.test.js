@@ -2319,8 +2319,21 @@ describe("detection wiring", () => {
       tabId, frameId: 0, url: newManifest,
       responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
     });
+    assert.equal(finds.retiredFrames.has(0), true,
+      "expiry marks the retired state but waits for a video report before discarding it");
+    assert.equal(finds.retiredFrames.get(0).expired, true);
+    assert.deepEqual(finds.sniffedByFrame.get(0), [oldManifest, newManifest]);
+
+    const replacement = {
+      src: null, blob: true, blobUrl: "blob:https://example.com/replacement",
+    };
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [replacement] },
+      sender,
+    );
     assert.equal(finds.retiredFrames.has(0), false);
-    assert.deepEqual(finds.sniffedByFrame.get(0), [newManifest]);
+    assert.deepEqual(finds.sniffedByFrame.get(0), [newManifest],
+      "the source comparison removes the old candidate while keeping the post-retirement manifest");
   });
 
   test("expired retired state is cleared by frame-specific URL resolution", async () => {
@@ -2353,10 +2366,19 @@ describe("detection wiring", () => {
 
     const finds = bg._videoFinds.get(tabId);
     finds.retiredFrames.get(0).retiredAt = Date.now() - 6 * 60 * 1000;
-    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), null);
-    assert.equal(finds.retiredFrames.has(0), false);
-    assert.equal(finds.sniffedByFrame.has(0), false);
-    assert.equal(finds.frames.has(0), false);
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), null,
+      "expired retired frames remain hidden while waiting for a report");
+    assert.equal(finds.retiredFrames.has(0), true);
+    assert.equal(finds.retiredFrames.get(0).expired, true);
+    assert.deepEqual(finds.sniffedByFrame.get(0), [manifest]);
+
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [video] },
+      sender,
+    );
+    assert.equal(finds.retiredFrames.has(0), false,
+      "same-blob resume is checked before expired observations can be pruned");
+    assert.deepEqual(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), manifest);
   });
 
   test("pause with multiple active videos deliberately drops ambiguous retained manifests", async () => {
@@ -4173,5 +4195,99 @@ describe("warned tabs survive a worker restart", () => {
       { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
     );
     assert.deepEqual(await bg.resolvedVideoUrls(tabId), []);
+  });
+
+  test("long-pause resume keeps the same blob manifest after the retired TTL", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 185;
+    const manifest = "https://cdn.example.com/live/master.m3u8";
+    const video = {
+      src: null, blob: true, blobUrl: "blob:https://example.com/long-pause",
+    };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifest,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [video] },
+      sender,
+    );
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [],
+        replaceFrame: true,
+        lifecycle: "pause",
+        lifecycleSource: video.blobUrl,
+      },
+      sender,
+    );
+
+    const finds = bg._videoFinds.get(tabId);
+    finds.retiredFrames.get(0).retiredAt = Date.now() - 6 * 60 * 1000;
+    assert.deepEqual(await bg.resolvedVideoUrls(tabId), [],
+      "the paused video remains hidden after TTL");
+    assert.deepEqual(finds.sniffedByFrame.get(0), [manifest]);
+
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [video] },
+      sender,
+    );
+    assert.equal(finds.retiredFrames.has(0), false);
+    assert.deepEqual(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), manifest);
+  });
+
+  test("retiring one player preserves a uniquely attributed manifest for the other player", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 186;
+    const now = Date.now();
+    const manifestA = "https://cdn.example.com/player-a/master.m3u8";
+    const manifestB = "https://cdn.example.com/player-b/master.m3u8";
+    const videoA = {
+      src: null, blob: true, blobUrl: "blob:https://example.com/player-a",
+      elementId: 21, loadStartedAt: now - 3_000,
+    };
+    const videoB = {
+      src: null, blob: true, blobUrl: "blob:https://example.com/player-b",
+      elementId: 22, loadStartedAt: now - 1_000,
+    };
+    const sender = { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 };
+
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifestA, timeStamp: now - 2_900,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["webRequest.onResponseStarted"]({
+      tabId, frameId: 0, url: manifestB, timeStamp: now - 900,
+      responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+    });
+    await L["runtime.onMessage"](
+      { type: "grab-videos-detected", videos: [videoA, videoB] },
+      sender,
+    );
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [videoB],
+        replaceFrame: true,
+        lifecycle: "pause",
+        lifecycleSource: videoA.blobUrl,
+        lifecycleAt: now,
+      },
+      sender,
+    );
+
+    const finds = bg._videoFinds.get(tabId);
+    assert.deepEqual(finds.frames.get(0), [videoB]);
+    assert.equal(finds.retiredFrames.has(0), false);
+    assert.deepEqual(finds.sniffedByFrame.get(0), [manifestB],
+      "the paused player's manifest is discarded without evicting the active player's manifest");
+    assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0, finds.frames.get(0)[0]), manifestB);
   });
 });
