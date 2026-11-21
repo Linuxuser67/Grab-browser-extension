@@ -2061,8 +2061,8 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVid
   if (
     firstTiming &&
     secondTiming &&
-    firstTiming.phase < 2 &&
-    firstTiming.phase === secondTiming.phase &&
+    firstTiming.phase === 0 &&
+    secondTiming.phase === 0 &&
     videoManifestPriority(merged[0], kinds) === videoManifestPriority(merged[1], kinds) &&
     Math.abs(firstTiming.distance - secondTiming.distance) <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
   ) return null;
@@ -2197,6 +2197,7 @@ function dedupeVideoUrlsByPath(urls, finds) {
   }
   return [...selected.values()].map((candidate) => candidate.url);
 }
+
 async function resolvedVideoUrlsForFrame(tabId, frameId) {
   const finds = videoFinds.get(tabId);
   if (!finds) return [];
@@ -2342,6 +2343,8 @@ function isSegmentLikeVideoUrl(url) {
   }
 }
 
+/// Return Content-Length only for a whole-object response suitable for a
+/// conservative blob-player fallback. Partial responses are never candidates.
 function wholeVideoMediaSize(details) {
   if (
     !details ||
