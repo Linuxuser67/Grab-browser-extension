@@ -641,27 +641,40 @@ describe("per-video menu candidates", () => {
     assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), []);
   });
 
-  test("manifest requests shortly after loadstart are attributed within the tolerance", async () => {
-    const ad = "https://ads.example.com/ad/master.m3u8";
+  test("manifest requests shortly after loadstart are attributed within the multi-player tolerance", async () => {
+    const direct = "https://cdn.example.com/direct.mp4";
+    const manifest = "https://cdn.example.com/main/master.m3u8";
     const findings = makeFinds(
-      [{
-        src: null, blob: true, blobUrl: "blob:https://example.com/main",
-        elementId: 1, loadStartedAt: 2000,
-      }],
-      [ad],
-      new Map([[pathKey(ad), 2100]]),
+      [
+        { src: direct, blob: false, elementId: 1, loadStartedAt: 1000 },
+        {
+          src: null, blob: true, blobUrl: "blob:https://example.com/main",
+          elementId: 2, loadStartedAt: 2000,
+        },
+      ],
+      [manifest],
+      new Map([[pathKey(manifest), 2100]]),
     );
 
-    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [ad]);
+    assert.deepEqual(
+      await bg.menuVideoCandidatesForFrame(findings, 0),
+      [direct, manifest],
+    );
   });
 
-  test("manifest requests more than five seconds after loadstart remain unattributed", async () => {
+  test("manifest requests more than five seconds after every loadstart remain unattributed", async () => {
     const manifest = "https://cdn.example.com/late/master.m3u8";
     const findings = makeFinds(
-      [{
-        src: null, blob: true, blobUrl: "blob:https://example.com/late",
-        elementId: 1, loadStartedAt: 2000,
-      }],
+      [
+        {
+          src: null, blob: true, blobUrl: "blob:https://example.com/late-a",
+          elementId: 1, loadStartedAt: 1000,
+        },
+        {
+          src: null, blob: true, blobUrl: "blob:https://example.com/late-b",
+          elementId: 2, loadStartedAt: 2000,
+        },
+      ],
       [manifest],
       new Map([[pathKey(manifest), 8_000]]),
     );
