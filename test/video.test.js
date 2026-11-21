@@ -541,7 +541,8 @@ describe("per-video menu candidates", () => {
       sniffTimesByFrame: new Map([[0, new Map()]]),
       retiredFrames: new Map(),
     };
-    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [audioFolder, adFolder]);
+    assert.deepEqual(bg.sniffedManifestsForFrame(findings, 0), [audioFolder, adFolder]);
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [audioFolder]);
   });
 
   test("a blob video chooses its HLS master and ignores sniffed media files", async () => {
