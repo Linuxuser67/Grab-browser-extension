@@ -536,6 +536,25 @@ describe("per-video menu candidates", () => {
     }
   });
 
+  test("a blob video ignores obvious advertisement and preview manifests", async () => {
+    const main = "https://cdn.example.com/hls/master.m3u8";
+    const ad = "https://ads.example.com/pre-roll/master.m3u8";
+    const preview = "https://cdn.example.com/previews/teaser.m3u8";
+    const findings = makeFinds(
+      [{
+        src: null, blob: true, blobUrl: "blob:https://example.com/main",
+        elementId: 1, loadStartedAt: 2000,
+      }],
+      [ad, preview, main],
+      new Map([
+        [pathKey(ad), 1900],
+        [pathKey(preview), 1920],
+        [pathKey(main), 1950],
+      ]),
+    );
+    assert.deepEqual(await bg.menuVideoCandidatesForFrame(findings, 0), [main]);
+  });
+
   test("multiple active elements receive only manifests nearest to their own load start", async () => {
     const direct = "https://cdn.example.com/main/direct.mp4";
     const adManifest = "https://ads.example.com/ad/master.m3u8";
