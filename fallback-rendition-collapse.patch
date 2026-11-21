@@ -15,7 +15,7 @@ index b0534c1..07e16e7 100644
 @@ -827,6 +827,43 @@ describe("per-video menu candidates", () => {
      ]) assert.equal(bg.isHlsRenditionPlaylistPath(path), false, path);
    });
-
+ 
 +  // No active <video>: the manifest-only fallback collapses renditions too.
 +  async function fallbackPlaylists(requests) {
 +    chrome.tabs.get = async (id) => ({ id, url: "https://page.example/watch" });
@@ -25,7 +25,7 @@ index b0534c1..07e16e7 100644
 +    findings.sniffFirstSeenByFrame.set(0, firstSeen);
 +    return bg.menuVideoCandidatesForFrame(findings, 0);
 +  }
-
++
 +  test("the no-video fallback collapses renditions into their earlier master", async () => {
 +    assert.deepEqual(
 +      await fallbackPlaylists([
@@ -36,7 +36,7 @@ index b0534c1..07e16e7 100644
 +      ["http://192.168.1.20/v/master.m3u8"],
 +    );
 +  });
-
++
 +  test("the no-video fallback keeps unrelated manifests and renditions requested before their parent", async () => {
 +    assert.deepEqual(
 +      await fallbackPlaylists([
@@ -52,7 +52,7 @@ index b0534c1..07e16e7 100644
 +    ]);
 +    assert.ok(early.includes("http://192.168.1.20/v/master.m3u8"));
 +  });
-
++
    test("a rendition marker in the parent directory does not classify a nested master as a child", async () => {
      const earlier = "http://192.168.1.20/vod/1080/a.m3u8";
      const current = "http://192.168.1.20/vod/1080/b/master.m3u8";
