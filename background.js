@@ -146,21 +146,29 @@ class PersistedTabSet extends Set {
 const warnedTabs = new PersistedTabSet();
 const warnedTabsReady = warnedTabs.restore();
 
-/// True when the URL's file extension is on the user's skip list.
-function isSkipped(url, skipTypes) {
+/// True when the URL path or the server-provided filename ends in a skipped
+/// extension. Download endpoints often name the file only in the latter
+/// (`/download?id=5` -> `report.pdf`), so both decide.
+function isSkipped(url, skipTypes, filename = "") {
   if (!skipTypes) return false;
-  let ext = "";
+  const extensionOf = (value) => {
+    const base = String(value).split(/[\\/]/).pop();
+    const dot = base.lastIndexOf(".");
+    return dot >= 0 ? base.slice(dot + 1).toLowerCase() : "";
+  };
+  const extensions = [];
   try {
-    const path = new URL(url).pathname;
-    const dot = path.lastIndexOf(".");
-    if (dot >= 0) ext = path.slice(dot + 1).toLowerCase();
+    extensions.push(extensionOf(new URL(url).pathname));
   } catch {
-    return false;
+    // An unparseable URL can still be identified by its filename.
+  }
+  if (typeof filename === "string" && filename) {
+    extensions.push(extensionOf(filename));
   }
   return skipTypes
     .split(",")
     .map((s) => s.trim().toLowerCase().replace(/^\./, ""))
-    .some((s) => s !== "" && s === ext);
+    .some((s) => s !== "" && extensions.includes(s));
 }
 
 async function getSettings() {

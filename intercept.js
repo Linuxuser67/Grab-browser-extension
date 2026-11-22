@@ -164,8 +164,8 @@ async function decidePending(id) {
     // The user may have changed their mind while we waited.
     if (
       !settings.interceptDownloads ||
-      isSkipped(item.url, settings.skipTypes) ||
-      isSkipped(item.finalUrl, settings.skipTypes) ||
+      isSkipped(item.url, settings.skipTypes, item.filename) ||
+      isSkipped(item.finalUrl, settings.skipTypes, item.filename) ||
       !toGrabUrl(item.url)
     ) {
       await dropPending(id);
@@ -223,7 +223,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
   }
   // Extension installs/updates must never be intercepted.
   if (item.mime === "application/x-chrome-extension") return;
-  if (isSkipped(item.url, settings.skipTypes) || isSkipped(item.finalUrl, settings.skipTypes)) return;
+  if (isSkipped(item.url, settings.skipTypes, item.filename) || isSkipped(item.finalUrl, settings.skipTypes, item.filename)) return;
   // Non-http(s) downloads (blob:, data:) have no server URL to hand over.
   if (!toGrabUrl(item.url)) return;
 
