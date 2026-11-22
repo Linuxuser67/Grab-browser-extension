@@ -2498,20 +2498,18 @@ describe("P2/P3 regression tests", () => {
 
 
 describe("video detection bounds and cookie-priority names", () => {
-  test("keeps more than eight videos but caps menu results at the backstop", () => {
+  test("keeps more than eight videos but caps persisted detections at the backstop", () => {
     const bg = loadBackground(makeChrome());
     const videos = Array.from({ length: bg.MAX_VIDEO_ITEMS + 10 }, (_, i) => ({
       src: `https://cdn.example.com/files/video-${i}.mp4`,
       blob: false,
     }));
-    bg._videoFinds.set(17, {
+    const urls = bg.snapshotVideoFinds({
       frames: new Map([[0, videos]]),
       sniffed: [],
       kinds: new Map(),
       title: "Multiple videos",
-    });
-
-    const urls = bg.mergedVideoUrls(17);
+    }).frames.flatMap(([, entries]) => entries.map((video) => video.src));
     assert.equal(bg.MAX_VIDEO_ITEMS, 50);
     assert.equal(urls.length, bg.MAX_VIDEO_ITEMS);
     assert.ok(urls.includes("https://cdn.example.com/files/video-9.mp4"));
