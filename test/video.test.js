@@ -1475,6 +1475,22 @@ describe("collectVideos (content script)", () => {
     assert.deepEqual(content.collectVideos(null, () => true), []);
   });
 
+  test("a shallow scan reads the document and only the supplied shadow roots", () => {
+    const light = fakeVideo({ src: "https://cdn.example.com/light.mp4", w: 640, h: 360 });
+    const wired = fakeVideo({ src: "https://cdn.example.com/wired.mp4", w: 640, h: 360 });
+    const doc = {
+      querySelectorAll: (sel) => (sel === "video" ? [light] : []),
+    };
+    const root = {
+      querySelectorAll: (sel) => (sel === "video" ? [wired] : []),
+    };
+    const videos = content.collectVideos(doc, () => true, null, null, null, [root]);
+    assert.deepEqual(videos.map((v) => v.src), [
+      "https://cdn.example.com/light.mp4",
+      "https://cdn.example.com/wired.mp4",
+    ]);
+  });
+
   test("includes active user-started and autoplay videos but excludes idle videos", () => {
     const userStarted = fakeVideo({
       src: "https://cdn.example.com/user.mp4", w: 640, h: 360, paused: false,
@@ -1593,6 +1609,61 @@ describe("detection wiring", () => {
     );
   });
 
+  test("a repeated identical sniff does not rewrite state or rebuild the menu", async () => {
+    const chrome = makeChrome();
+    loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 51;
+    const manifest = "https://cdn.example.com/s/live.m3u8";
+    let writes = 0;
+    const set = chrome.storage.session.set;
+    chrome.storage.session.set = async (obj) => {
+      writes += 1;
+      return set(obj);
+    };
+    await L["tabs.onActivated"]({ tabId });
+    const sniff = () => L["webRequest.onResponseStarted"]({
+      tabId,
+      frameId: 0,
+      url: manifest,
+      responseHeaders: [],
+    });
+
+    await sniff();
+    await tick();
+    await tick();
+    const createdAfterFirst = chrome._calls.filter(([n]) => n === "menus.create").length;
+    const removedAfterFirst = chrome._calls.filter(([n]) => n === "menus.remove").length;
+    const writesAfterFirst = writes;
+    assert.ok(createdAfterFirst > 0, "the first sniff builds the menu");
+    assert.ok(writesAfterFirst > 0, "the first sniff persists state");
+
+    await sniff();
+    await tick();
+    await tick();
+    assert.equal(
+      chrome._calls.filter(([n]) => n === "menus.create").length,
+      createdAfterFirst,
+      "a repeat sniff does not create menu items",
+    );
+    assert.equal(
+      chrome._calls.filter(([n]) => n === "menus.remove").length,
+      removedAfterFirst,
+      "a repeat sniff does not remove the menu",
+    );
+    assert.equal(writes, writesAfterFirst, "a repeat sniff does not persist state again");
+
+    // Re-rendering the same active tab is also a no-op.
+    await L["tabs.onActivated"]({ tabId });
+    await tick();
+    await tick();
+    assert.equal(
+      chrome._calls.filter(([n]) => n === "menus.create").length,
+      createdAfterFirst,
+      "an unchanged tab activation does not rebuild the menu",
+    );
+  });
+
   test("a direct video remains the only entry when an unrelated manifest is sniffed", async () => {
     const chrome = makeChrome();
     // Private host: playlist inspection is local (no Grab pairing round trip).
@@ -1631,9 +1702,10 @@ describe("detection wiring", () => {
     await tick();
     await tick();
 
-    assert.ok(
+    assert.equal(
       chrome._calls.some(([n]) => n === "menus.remove"),
-      "the completed refresh replaces the menu",
+      false,
+      "an unchanged candidate list keeps the existing menu",
     );
     await L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, { id: tabId });
     assert.ok(

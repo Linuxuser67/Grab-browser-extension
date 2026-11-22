@@ -2554,7 +2554,7 @@ function wholeMediaUrlsForFrame(finds, frameId) {
 }
 
 function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMediaSize = null) {
-  if (!fitsGrabUrl(url) || (kind !== "manifest" && kind !== "media")) return;
+  if (!fitsGrabUrl(url) || (kind !== "manifest" && kind !== "media")) return false;
   let f = videoFinds.get(tabId);
   if (!f) {
     f = createVideoFinds();
@@ -2564,8 +2564,11 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
   const sourceFrame = Number.isInteger(frameId) && frameId >= 0 ? frameId : 0;
   const tracked = trackedFrameIds(f);
   if (!tracked.has(sourceFrame) && tracked.size >= MAX_VIDEO_FRAMES) {
-    if (!evictOldestFrame(f, sourceFrame)) return;
+    if (!evictOldestFrame(f, sourceFrame)) return false;
   }
+  // Whether the menu-visible state changed. Repeat observations of the same
+  // URL still refresh their last-seen time below, but no save or rebuild.
+  let changed = false;
 
   let kinds = f.kindsByFrame.get(sourceFrame);
   if (!kinds) {
@@ -2573,7 +2576,10 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
     f.kindsByFrame.set(sourceFrame, kinds);
   }
   const key = urlPathKey(url);
-  kinds.set(key, kind);
+  if (kinds.get(key) !== kind) {
+    kinds.set(key, kind);
+    changed = true;
+  }
   const sequences = sniffSequenceMapForFrame(f, sourceFrame, true);
   const hadPriorObservation =
     sequences.has(key) ||
@@ -2587,8 +2593,15 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
     listMap.set(sourceFrame, urls);
   }
   const idx = urls.findIndex((candidate) => urlPathKey(candidate) === key);
-  if (idx >= 0) urls[idx] = url;
-  else urls.push(url);
+  if (idx >= 0) {
+    if (urls[idx] !== url) {
+      urls[idx] = url;
+      changed = true;
+    }
+  } else {
+    urls.push(url);
+    changed = true;
+  }
 
   if (kind === "media") {
     let wholeUrls = f.wholeMediaByFrame.get(sourceFrame);
@@ -2607,18 +2620,32 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
       !isSegmentLikeVideoUrl(url)
     ) {
       const wholeIndex = wholeUrls.findIndex((candidate) => urlPathKey(candidate) === key);
-      if (wholeIndex >= 0) wholeUrls[wholeIndex] = url;
-      else wholeUrls.push(url);
-      sizes.set(key, wholeMediaSize);
+      if (wholeIndex >= 0) {
+        if (wholeUrls[wholeIndex] !== url) {
+          wholeUrls[wholeIndex] = url;
+          changed = true;
+        }
+      } else {
+        wholeUrls.push(url);
+        changed = true;
+      }
+      if (sizes.get(key) !== wholeMediaSize) {
+        sizes.set(key, wholeMediaSize);
+        changed = true;
+      }
     } else {
       for (let i = wholeUrls.length - 1; i >= 0; i--) {
-        if (urlPathKey(wholeUrls[i]) === key) wholeUrls.splice(i, 1);
+        if (urlPathKey(wholeUrls[i]) === key) {
+          wholeUrls.splice(i, 1);
+          changed = true;
+        }
       }
-      sizes.delete(key);
+      if (sizes.delete(key)) changed = true;
     }
     while (wholeUrls.length > MAX_MEDIA_SNIFFS_PER_FRAME) {
       const removed = wholeUrls.shift();
       sizes.delete(urlPathKey(removed));
+      changed = true;
     }
     if (wholeUrls.length === 0) f.wholeMediaByFrame.delete(sourceFrame);
     if (sizes.size === 0) f.mediaSizesByFrame.delete(sourceFrame);
@@ -2644,6 +2671,7 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
     ? MAX_MANIFESTS_PER_FRAME
     : MAX_MEDIA_SNIFFS_PER_FRAME;
   while (urls.length > limit) {
+    changed = true;
     const removed = urls.shift();
     const removedKey = urlPathKey(removed);
     if (kind === "media") {
@@ -2673,11 +2701,16 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
   if (times.size === 0) f.sniffTimesByFrame.delete(sourceFrame);
   if (firstSeen.size === 0) f.sniffFirstSeenByFrame.delete(sourceFrame);
   if (kinds.size === 0) f.kindsByFrame.delete(sourceFrame);
+  return changed;
 }
 
 // Refreshes are serialized through a promise chain: burst manifest traffic
 // could otherwise interleave remove/create and hit duplicate menu ids.
 let menuChain = Promise.resolve();
+// The last menu rendered for the active tab. Repeated refreshes with the same
+// rows (live playlists, tab switches) must not remove and recreate them.
+let lastMenuSignature = null;
+let lastMenuSignatureTabId = null;
 
 /// Rebuild the video submenu for the active tab. Menus are global, so this
 /// only renders the tab the menu would open on.
@@ -2703,6 +2736,8 @@ async function doRefreshVideoMenu(tabId) {
     if (!videoUi.detectVideosOn) {
       await removeContextMenu(VIDEO_PARENT_ID);
       videoUi.menuUrls = [];
+      lastMenuSignature = null;
+      lastMenuSignatureTabId = null;
       chrome.storage.session.set({ menuUrls: [] }).catch(() => {});
       if (Number.isInteger(tabId) && tabId >= 0 && !warnedTabs.has(tabId)) {
         const cleared = chrome.action.setBadgeText({ tabId, text: "" });
@@ -2738,12 +2773,24 @@ async function doRefreshVideoMenu(tabId) {
         videoName(e.url, i, finds && finds.title, e.kind),
       ),
     );
+    const signature = JSON.stringify([
+      tabId,
+      names,
+      entries.map((e) => [
+        e.url,
+        e.kind,
+        e.rows.map((row) => [row.url, row.quality]),
+      ]),
+    ]);
+    if (lastMenuSignatureTabId === tabId && lastMenuSignature === signature) return;
     // Replace the menu only once the replacement is ready: candidate
     // resolution can await a playlist check, and removing the old menu first
     // would leave right-click with nothing while it runs.
     await removeContextMenu(VIDEO_PARENT_ID);
     videoUi.menuUrls = [];
     if (entries.length === 0) {
+      lastMenuSignatureTabId = tabId;
+      lastMenuSignature = signature;
       chrome.storage.session.set({ menuUrls: [] }).catch(() => {});
       if (Number.isInteger(tabId) && tabId >= 0 && !warnedTabs.has(tabId)) {
         const result = chrome.action.setBadgeText({ tabId, text: "" });
@@ -2788,6 +2835,8 @@ async function doRefreshVideoMenu(tabId) {
       text: String(entries.length),
     });
     if (badged && typeof badged.catch === "function") badged.catch(() => {});
+    lastMenuSignatureTabId = tabId;
+    lastMenuSignature = signature;
   };
   await rebuild();
 }
@@ -2796,6 +2845,8 @@ function clearVideoUi(tabId) {
   videoFinds.delete(tabId);
   forgetVideoFinds(tabId);
   warnedTabs.delete(tabId);
+  lastMenuSignature = null;
+  lastMenuSignatureTabId = null;
   if (tabId === videoUi.activeTabId) {
     refreshVideoMenu(tabId); // rebuild sees no finds: drops the menu
     const badged = chrome.action.setBadgeText({ tabId, text: "" });
@@ -2809,6 +2860,8 @@ function clearAllVideoUi() {
   const tabIds = [...new Set([...videoFinds.keys(), videoUi.activeTabId])]
     .filter((id) => Number.isInteger(id) && id >= 0);
   videoFinds.clear();
+  lastMenuSignature = null;
+  lastMenuSignatureTabId = null;
   for (const id of tabIds) forgetVideoFinds(id);
   // Clear records for inactive tabs restored by a previous worker instance.
   chrome.storage.session.get(null).then((stored) => {
@@ -2875,7 +2928,7 @@ async function onSniffedResponse(details) {
   );
   if (kind === null) return;
   await restoreVideoFinds(details.tabId);
-  noteSniffed(
+  const changed = noteSniffed(
     details.tabId,
     details.frameId,
     details.url,
@@ -2883,6 +2936,9 @@ async function onSniffedResponse(details) {
     Number.isFinite(details.timeStamp) ? details.timeStamp : Date.now(),
     kind === "media" ? wholeVideoMediaSize(details) : null,
   );
+  // A live stream re-fetches the same playlist every few seconds. The
+  // observation time was refreshed above; nothing else needs to happen.
+  if (!changed) return;
   await persistVideoFinds(details.tabId);
   onVideoEvent(details.tabId);
   // A sniffed manifest may belong to a shadow-root player whose play
