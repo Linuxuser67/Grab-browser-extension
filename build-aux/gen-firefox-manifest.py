@@ -22,6 +22,7 @@ def generate():
             "shared.js",
             "handoff.js",
             "intercept.js",
+            "video-state.js",
             "video-menu.js",
             "background.js",
         ]
