@@ -10,12 +10,20 @@ const BG_PATH = path.join(__dirname, "..", "background.js");
 const SHARED_PATH = path.join(__dirname, "..", "shared.js");
 const HANDOFF_PATH = path.join(__dirname, "..", "handoff.js");
 const INTERCEPT_PATH = path.join(__dirname, "..", "intercept.js");
+const VIDEO_STATE_PATH = path.join(__dirname, "..", "video-state.js");
 const VIDEO_PATH = path.join(__dirname, "..", "video-menu.js");
 
 // Scripts share one global scope in the browser. Concatenating them into one
 // function reproduces that, including the final `module.exports` hook, without
 // leaking top-level consts across reloads.
-const BG_SOURCE = [SHARED_PATH, HANDOFF_PATH, INTERCEPT_PATH, VIDEO_PATH, BG_PATH]
+const BG_SOURCE = [
+  SHARED_PATH,
+  HANDOFF_PATH,
+  INTERCEPT_PATH,
+  VIDEO_STATE_PATH,
+  VIDEO_PATH,
+  BG_PATH,
+]
   .map((file) => fs.readFileSync(file, "utf8"))
   .join("\n");
 
