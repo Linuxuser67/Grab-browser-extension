@@ -2478,6 +2478,24 @@ function urlPathKey(u) {
   }
 }
 
+/// True for a URL that asks the server for part of a file: "bytestart" /
+/// "byteend" / "byte_range" parameters (Facebook-style CDNs) or a numeric
+/// "range=0-999" (googlevideo). Such a URL is a slice, not the video. Applied
+/// to whole-media candidates only, never to manifests.
+function isByteRangeSliceUrl(url) {
+  try {
+    const { searchParams } = new URL(url);
+    for (const [key, value] of searchParams) {
+      const name = key.toLowerCase();
+      if (name === "bytestart" || name === "byteend" || /^byte_?range$/.test(name)) return true;
+      if (name === "range" && /^\d+-\d*$/.test(value)) return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 function isSegmentLikeVideoUrl(url) {
   try {
     const path = new URL(url).pathname.toLowerCase();
@@ -2505,7 +2523,8 @@ function wholeVideoMediaSize(details) {
       sniffedHeader(details.responseHeaders, "content-type"),
     ) !== "media" ||
     sniffedHeader(details.responseHeaders, "content-range") ||
-    isSegmentLikeVideoUrl(details.url)
+    isSegmentLikeVideoUrl(details.url) ||
+    isByteRangeSliceUrl(details.url)
   ) return null;
   const rawLength = sniffedHeader(details.responseHeaders, "content-length");
   if (!/^\d+$/.test(rawLength)) return null;
@@ -2527,6 +2546,7 @@ function wholeMediaUrlsForFrame(finds, frameId) {
     media.includes(url) &&
     classifyStream(url, "") === "media" &&
     !isSegmentLikeVideoUrl(url) &&
+    !isByteRangeSliceUrl(url) &&
     sizes instanceof Map &&
     Number.isSafeInteger(sizes.get(urlPathKey(url))) &&
     sizes.get(urlPathKey(url)) >= MIN_WHOLE_VIDEO_MEDIA_BYTES

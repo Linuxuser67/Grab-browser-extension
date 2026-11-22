@@ -864,6 +864,35 @@ describe("per-video menu candidates", () => {
     assert.ok(early.includes("http://192.168.1.20/v/master.m3u8"));
   });
 
+  test("byte-range slice URLs are never whole-file candidates", () => {
+    for (const url of [
+      "https://video.fbcdn.net/o1/v/abc.mp4?bytestart=0&byteend=2999999&sig=1",
+      "https://rr1---sn-abc.googlevideo.com/videoplayback?itag=137&range=0-4999999",
+      "https://cdn.example.com/v/clip.mp4?byte_range=0-1048575",
+    ]) assert.equal(bg.isByteRangeSliceUrl(url), true, url);
+    for (const url of [
+      "https://cdn.example.com/v/clip.mp4?token=abc&expires=1",
+      "https://cdn.example.com/v/clip.mp4?rangefinder=1",
+      "https://cdn.example.com/v/clip.mp4?range=high",
+      "https://cdn.example.com/v/clip.mp4?rn=4",
+      "https://cdn.example.com/v/clip.mp4",
+    ]) assert.equal(bg.isByteRangeSliceUrl(url), false, url);
+    // Manifests are never judged by this rule.
+    assert.equal(bg.isSegmentLikeVideoUrl("https://cdn.example.com/v/master.m3u8?range=0-5&rn=1"), false);
+  });
+
+  test("a sniffed 200 response for a byte-range slice is not recorded as whole media", () => {
+    const details = (url) => ({
+      url, statusCode: 200,
+      responseHeaders: [
+        { name: "content-type", value: "video/mp4" },
+        { name: "content-length", value: String(3 * 1024 * 1024) },
+      ],
+    });
+    assert.equal(bg.wholeVideoMediaSize(details("https://video.fbcdn.net/o1/v/abc.mp4?bytestart=0&byteend=2999999")), null);
+    assert.equal(bg.wholeVideoMediaSize(details("https://cdn.example.com/v/clip.mp4")), 3 * 1024 * 1024);
+  });
+
   test("a rendition marker in the parent directory does not classify a nested master as a child", async () => {
     const earlier = "http://192.168.1.20/vod/1080/a.m3u8";
     const current = "http://192.168.1.20/vod/1080/b/master.m3u8";
