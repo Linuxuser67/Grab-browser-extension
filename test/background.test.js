@@ -252,6 +252,23 @@ describe("isSkipped", () => {
     assert.equal(bg.isSkipped("https://example.com/a.zip", ""), false);
     assert.equal(bg.isSkipped("not a url", "zip"), false);
   });
+
+  test("matches the server-provided filename when the URL has no extension", () => {
+    assert.equal(bg.isSkipped("https://example.com/download?id=5", "pdf"), false);
+    assert.equal(
+      bg.isSkipped("https://example.com/download?id=5", "pdf", "report.pdf"),
+      true,
+    );
+    assert.equal(
+      bg.isSkipped("https://example.com/download?id=5", "pdf", "/home/u/report.PDF"),
+      true,
+    );
+    assert.equal(
+      bg.isSkipped("https://example.com/download?id=5", "zip", "report.pdf"),
+      false,
+    );
+    assert.equal(bg.isSkipped("not a url", "zip", "report.zip"), true);
+  });
 });
 
 describe("minSizeBytes", () => {
@@ -296,6 +313,63 @@ describe("size-wait interception", () => {
     );
   const cancelled = (id) =>
     chrome._calls.some(([name, arg]) => name === "cancel" && arg === id);
+
+  test("leaves a skipped download alone when only its filename shows the type", async () => {
+    const shared = {
+      localSettings: pairedLocal(),
+      syncSettings: { interceptDownloads: true, minSizeMB: 100, skipTypes: "zip" },
+    };
+    const skippedChrome = makeChrome(shared);
+    loadBackground(skippedChrome);
+    const download = {
+      id: 8,
+      url: "https://example.com/download?id=8",
+      filename: "/home/user/Downloads/report.zip",
+      fileSize: 200 * MiB,
+    };
+    skippedChrome._downloads.set(8, { ...download, state: "in_progress" });
+    await skippedChrome._listeners["downloads.onCreated"](download);
+    assert.equal(
+      skippedChrome._calls.some(([name]) => name === "handoff" || name === "cancel"),
+      false,
+      "the browser keeps the skipped file",
+    );
+  });
+
+  test("the size-wait decision honours a filename that arrives after parking", async () => {
+    const shared = {
+      localSettings: pairedLocal(),
+      syncSettings: { interceptDownloads: true, minSizeMB: 100, skipTypes: "zip" },
+    };
+    const skippedChrome = makeChrome(shared);
+    loadBackground(skippedChrome);
+    const download = {
+      id: 8,
+      url: "https://example.com/download?id=8",
+      fileSize: -1,
+    };
+    skippedChrome._downloads.set(8, { ...download, state: "in_progress" });
+    await skippedChrome._listeners["downloads.onCreated"](download);
+    assert.equal(skippedChrome._session.has("pendingSize:8"), true);
+
+    // The server names the file while the size is still unknown.
+    skippedChrome._downloads.set(8, {
+      ...download,
+      fileSize: 200 * MiB,
+      filename: "/home/user/Downloads/report.zip",
+      state: "in_progress",
+    });
+    await skippedChrome._listeners["downloads.onChanged"]({
+      id: 8,
+      fileSize: { current: 200 * MiB },
+    });
+    assert.equal(
+      skippedChrome._calls.some(([name]) => name === "handoff" || name === "cancel"),
+      false,
+      "the browser keeps the skipped file",
+    );
+    assert.equal(skippedChrome._session.has("pendingSize:8"), false);
+  });
 
   test("parks an unknown-size download in session storage with an alarm", async () => {
     chrome._downloads.set(7, { ...bigItem(7), state: "in_progress" });
