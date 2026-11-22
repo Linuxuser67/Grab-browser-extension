@@ -157,6 +157,30 @@ describe("shadow-root video detection (jsdom)", () => {
     }
   });
 
+  test("media events do not walk every element on the page", async () => {
+    const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
+    const { messages, document, window, cleanup } = loadContent(dom);
+    try {
+      messages.length = 0;
+      let wildcardQueries = 0;
+      const original = document.querySelectorAll.bind(document);
+      document.querySelectorAll = (selector) => {
+        if (selector === "*") wildcardQueries++;
+        return original(selector);
+      };
+      const video = makeVideo(document, { muted: false });
+      document.body.appendChild(video);
+      video.dispatchEvent(new window.Event("play", { bubbles: false }));
+      await new Promise((r) => setTimeout(r, 500));
+      const reports = messages.filter((m) => m.type === "grab-videos-detected");
+      assert.equal(wildcardQueries, 0, "a play event uses the shallow scan");
+      assert.equal(reports[reports.length - 1].videos.length, 1, "the playing video is still reported");
+      await new Promise((r) => setTimeout(r, 500));
+    } finally {
+      cleanup();
+    }
+  });
+
   test("pausing immediately reports no active video with a pause lifecycle", async () => {
     const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
     const { messages, document, window, cleanup } = loadContent(dom);

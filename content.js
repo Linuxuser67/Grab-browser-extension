@@ -66,9 +66,20 @@ function allVideos(root, onShadowRoot) {
 /// Pure over a document-like: [{src, blob, height?}] for each qualifying <video>.
 /// `isActive` decides which videos count as active; the live wiring passes
 /// `isActiveVideo`. Tests pass explicit predicates. Pierces shadow roots via allVideos.
-function collectVideos(doc, isActive, onShadowRoot, onVideo, getVideoMetadata) {
+/// `knownRoots` switches to a shallow scan: the document plus those roots only
+/// (already wired during an earlier deep walk). Null means a deep walk.
+function collectVideos(doc, isActive, onShadowRoot, onVideo, getVideoMetadata, knownRoots = null) {
   const out = [];
-  for (const v of allVideos(doc, onShadowRoot)) {
+  const videos = knownRoots === null
+    ? allVideos(doc, onShadowRoot)
+    : (doc && doc.querySelectorAll ? [...doc.querySelectorAll("video")] : []);
+  if (knownRoots !== null) {
+    for (const root of knownRoots) {
+      if (!root || !root.querySelectorAll) continue;
+      videos.push(...root.querySelectorAll("video"));
+    }
+  }
+  for (const v of videos) {
     if (onVideo) onVideo(v);
     if (!isBigEnough(v)) continue;
     if (isActive && !isActive(v)) continue;
@@ -170,15 +181,17 @@ if (
     };
   }
 
-  function report(lifecycleOverride = null, lifecycleSourceOverride = null, lifecycleAtOverride = null) {
-    // Full scans happen on startup, media events, and worker rescan requests,
-    // not on every pointer/click interaction.
+  function report(lifecycleOverride = null, lifecycleSourceOverride = null, lifecycleAtOverride = null, deep = false) {
+    // Deep scans happen on startup and when the worker asks after a new
+    // playlist path; ordinary media events read the document and already
+    // wired shadow roots instead of walking every element on the page.
     const videos = collectVideos(
       document,
       isActiveVideo,
       wireShadowRoot,
       rememberVideoSource,
       videoReportMetadata,
+      deep ? null : knownShadowRoots(),
     );
     const title = pageVideoTitle(document);
     // Keep the strongest lifecycle event when media events coalesce during
@@ -303,9 +316,21 @@ if (
   // shadow root. Attach the same capture listeners to each open shadow root
   // found during a sweep; events fired inside a root are visible there.
   const shadowRootsWired = new WeakSet();
+  // Strong list of the roots wired so far: a shallow scan must still see
+  // videos inside open shadow roots. Disconnected roots are dropped because
+  // a video removed from the page must not stay in the menu.
+  const wiredShadowRoots = [];
+  function knownShadowRoots() {
+    for (let i = wiredShadowRoots.length - 1; i >= 0; i--) {
+      const root = wiredShadowRoots[i];
+      if (!root || !root.host || !root.host.isConnected) wiredShadowRoots.splice(i, 1);
+    }
+    return wiredShadowRoots;
+  }
   function wireShadowRoot(sr) {
     if (!sr || shadowRootsWired.has(sr)) return;
     shadowRootsWired.add(sr);
+    wiredShadowRoots.push(sr);
     sr.addEventListener("loadstart", onLoadStart, true);
     sr.addEventListener("play", onPlay, true);
     sr.addEventListener("playing", onPlay, true);
@@ -343,11 +368,13 @@ if (
     // tabs to report again after a restart or a tab switch.
     if (msg && msg.type === "grab-rescan") {
       lastSent = "";
-      report();
+      // The worker only rescans after a new playlist path or a worker restart:
+      // look for shadow roots that mounted since the last deep walk.
+      report(null, null, null, true);
     }
   });
 
-  report();
+  report(null, null, null, true);
 }
 
 // Test hook for node:test.
