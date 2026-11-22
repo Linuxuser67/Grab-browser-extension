@@ -2198,7 +2198,6 @@ describe("detection wiring", () => {
       }] },
       { tab: { id: tabId, url: "https://example.com/" }, frameId: 0 },
     );
-    assert.deepEqual(bg.mergedVideoUrlsForFrame(tabId, 0), []);
     assert.deepEqual(await bg.resolvedVideoUrlsForFrame(tabId, 0), []);
     await L["runtime.onMessage"](
       { type: "grab-videos-detected", videos: [{
@@ -4383,9 +4382,9 @@ describe("HLS master playlist filtering", () => {
 
   test("rejects loopback and credential-bearing playlist fetches", async () => {
     const bg = loadBackground(makeChrome());
-    assert.equal(await bg.isMasterPlaylist("http://127.0.0.1/master.m3u8"), null);
-    assert.equal(await bg.isMasterPlaylist("http://localhost/master.m3u8"), null);
-    assert.equal(await bg.isMasterPlaylist("https://user:pass@example.com/master.m3u8"), null);
+    assert.equal(await bg.inspectHlsPlaylist("http://127.0.0.1/master.m3u8"), null);
+    assert.equal(await bg.inspectHlsPlaylist("http://localhost/master.m3u8"), null);
+    assert.equal(await bg.inspectHlsPlaylist("https://user:pass@example.com/master.m3u8"), null);
   });
 
   test("rejects private, carrier-grade NAT, and IPv6 ULA playlist targets from public tabs", async () => {
@@ -4409,7 +4408,7 @@ describe("HLS master playlist filtering", () => {
       "http://[fef0::1]/master.m3u8",
     ];
     for (const target of targets) {
-      assert.equal(await bg.isMasterPlaylist(target), null, target);
+      assert.equal(await bg.inspectHlsPlaylist(target), null, target);
     }
   });
 
@@ -4426,7 +4425,8 @@ describe("HLS master playlist filtering", () => {
       return { is_master: true, child_keys: [] };
     };
     for (const target of targets) {
-      assert.equal(await bg.isMasterPlaylist(target, null, inspector), true, target);
+      const result = await bg.inspectHlsPlaylist(target, null, inspector);
+      assert.equal(result && result.is_master, true, target);
     }
     assert.deepEqual(inspected, targets);
   });
@@ -4446,10 +4446,14 @@ describe("HLS master playlist filtering", () => {
       const sameHost = "http://192.168.1.20/master.m3u8";
       const anotherLanHost = "http://192.168.1.21/master.m3u8";
       const privateTab = "http://192.168.1.20/watch";
-      assert.equal(await bg.isMasterPlaylist(sameHost, privateTab), true);
-      assert.equal(await bg.isMasterPlaylist(anotherLanHost, privateTab), true);
+      const isMaster = async (value, origin) => {
+        const result = await bg.inspectHlsPlaylist(value, origin);
+        return result === null ? null : result.is_master;
+      };
+      assert.equal(await isMaster(sameHost, privateTab), true);
+      assert.equal(await isMaster(anotherLanHost, privateTab), true);
       assert.equal(
-        await bg.isMasterPlaylist(anotherLanHost, "https://public.example/watch"),
+        await isMaster(anotherLanHost, "https://public.example/watch"),
         null,
       );
       assert.deepEqual(requests, [sameHost, anotherLanHost]);

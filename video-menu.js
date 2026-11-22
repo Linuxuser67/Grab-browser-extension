@@ -572,13 +572,6 @@ async function inspectHlsPlaylist(value, tabOrigin = null, inspectPublic = inspe
   return inspectPublicHlsPlaylistCached(value, inspectPublic);
 }
 
-/// True only for a playlist confirmed as a multivariant master.
-/// Null represents an unreadable or unverified playlist and must not filter it.
-async function isMasterPlaylist(value, tabOrigin = null, inspectPublic = inspectHlsPlaylistWithGrab) {
-  const result = await inspectHlsPlaylist(value, tabOrigin, inspectPublic);
-  return result === null ? null : result.is_master;
-}
-
 /// Resolve playlist references against the master URL. Only explicit
 /// variant and EXT-X-MEDIA references belong to this content-based helper;
 /// the timing-aware nested-directory heuristic is applied during attribution.
@@ -1575,6 +1568,60 @@ function snapshotVideoFinds(finds) {
   };
 }
 
+/// Restores one snapshot list of [frameId, payload] pairs into a Map,
+/// skipping malformed or duplicate frames and stopping at the frame budget.
+/// `parse` returns the value to store, or null to drop the frame.
+function restoreFrameMap(saved, key, parse) {
+  const out = new Map();
+  for (const pair of Array.isArray(saved[key]) ? saved[key] : []) {
+    if (out.size >= MAX_VIDEO_FRAMES) break;
+    if (
+      !Array.isArray(pair) ||
+      pair.length !== 2 ||
+      !Number.isInteger(pair[0]) ||
+      pair[0] < 0 ||
+      !Array.isArray(pair[1]) ||
+      out.has(pair[0])
+    ) continue;
+    const value = parse(pair[0], pair[1]);
+    if (value !== null) out.set(pair[0], value);
+  }
+  return out;
+}
+
+/// Restores a stored URL list, keeping valid unique paths up to `limit`.
+function restoreUrls(candidates, limit, accept = () => true) {
+  const urls = [];
+  const seen = new Set();
+  for (const url of candidates) {
+    if (urls.length >= limit) break;
+    if (typeof url !== "string" || !fitsGrabUrl(url) || !accept(url)) continue;
+    const identity = urlPathKey(url);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    urls.push(url);
+  }
+  return urls;
+}
+
+/// Restores [urlPathKey, value] entries into a Map, keeping up to `limit`
+/// entries whose value passes `valid`.
+function restoreKeyedValues(candidates, limit, valid) {
+  const out = new Map();
+  for (const entry of candidates) {
+    if (out.size >= limit) break;
+    if (
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      typeof entry[0] !== "string" ||
+      entry[0].length > MAX_GRAB_URL_BYTES ||
+      !valid(entry[1], entry[0])
+    ) continue;
+    out.set(entry[0], entry[1]);
+  }
+  return out;
+}
+
 async function restoreVideoFinds(tabId) {
   if (!Number.isInteger(tabId) || tabId < 0 || restoredVideoFinds.has(tabId)) return;
   const current = restoringVideoFinds.get(tabId);
@@ -1647,162 +1694,74 @@ async function restoreVideoFinds(tabId) {
           if (videos.length) frames.set(frameId, videos);
         }
 
-        const sniffedByFrame = new Map();
         let remainingSniffed = MAX_VIDEO_ITEMS;
-        for (const pair of Array.isArray(saved.sniffedFrames) ? saved.sniffedFrames : []) {
-          if (!Array.isArray(pair) || pair.length !== 2 ||
-              !Number.isInteger(pair[0]) || pair[0] < 0 ||
-              !Array.isArray(pair[1]) || sniffedByFrame.has(pair[0]) ||
-              sniffedByFrame.size >= MAX_VIDEO_FRAMES || remainingSniffed <= 0) continue;
-          const urls = [];
-          const seen = new Set();
-          for (const url of pair[1].slice(0, MAX_VIDEO_ITEMS)) {
-            if (remainingSniffed <= 0) break;
-            if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
-            const identity = urlPathKey(url);
-            if (seen.has(identity)) continue;
-            seen.add(identity);
-            urls.push(url);
-            remainingSniffed -= 1;
-          }
-          if (urls.length) sniffedByFrame.set(pair[0], urls);
-        }
+        const sniffedByFrame = restoreFrameMap(saved, "sniffedFrames", (frameId, entries) => {
+          const urls = restoreUrls(entries.slice(0, MAX_VIDEO_ITEMS), remainingSniffed);
+          remainingSniffed -= urls.length;
+          return urls.length ? urls : null;
+        });
 
-        const kindsByFrame = new Map();
         let remainingKinds = 200;
-        for (const pair of Array.isArray(saved.kindsFrames) ? saved.kindsFrames : []) {
-          if (!Array.isArray(pair) || pair.length !== 2 ||
-              !Number.isInteger(pair[0]) || pair[0] < 0 ||
-              !Array.isArray(pair[1]) || kindsByFrame.has(pair[0]) ||
-              kindsByFrame.size >= MAX_VIDEO_FRAMES || remainingKinds <= 0) continue;
-          const kinds = new Map();
-          for (const entry of pair[1].slice(0, 200)) {
-            if (remainingKinds <= 0 || !Array.isArray(entry) || entry.length !== 2 ||
-                typeof entry[0] !== "string" ||
-                (entry[1] !== "manifest" && entry[1] !== "media")) continue;
-            kinds.set(entry[0], entry[1]);
-            remainingKinds -= 1;
-          }
-          if (kinds.size) kindsByFrame.set(pair[0], kinds);
-        }
+        const kindsByFrame = restoreFrameMap(saved, "kindsFrames", (frameId, entries) => {
+          const kinds = restoreKeyedValues(
+            entries.slice(0, 200),
+            remainingKinds,
+            (value) => value === "manifest" || value === "media",
+          );
+          remainingKinds -= kinds.size;
+          return kinds.size ? kinds : null;
+        });
 
-        const mediaByFrame = new Map();
         let remainingMedia = MAX_VIDEO_FRAMES * MAX_MEDIA_SNIFFS_PER_FRAME;
-        for (const pair of Array.isArray(saved.mediaFrames) ? saved.mediaFrames : []) {
-          if (
-            !Array.isArray(pair) ||
-            pair.length !== 2 ||
-            !Number.isInteger(pair[0]) ||
-            pair[0] < 0 ||
-            !Array.isArray(pair[1]) ||
-            mediaByFrame.has(pair[0]) ||
-            mediaByFrame.size >= MAX_VIDEO_FRAMES ||
-            remainingMedia <= 0
-          ) continue;
-          const urls = [];
-          const seen = new Set();
-          for (const url of pair[1].slice(0, MAX_MEDIA_SNIFFS_PER_FRAME)) {
-            if (remainingMedia <= 0 || typeof url !== "string" || !fitsGrabUrl(url)) continue;
-            const identity = urlPathKey(url);
-            if (seen.has(identity)) continue;
-            seen.add(identity);
-            urls.push(url);
-            remainingMedia -= 1;
-          }
-          if (urls.length) mediaByFrame.set(pair[0], urls);
-        }
+        const mediaByFrame = restoreFrameMap(saved, "mediaFrames", (frameId, entries) => {
+          const urls = restoreUrls(entries.slice(0, MAX_MEDIA_SNIFFS_PER_FRAME), remainingMedia);
+          remainingMedia -= urls.length;
+          return urls.length ? urls : null;
+        });
 
-        const wholeMediaByFrame = new Map();
         let remainingWholeMedia = MAX_VIDEO_FRAMES * MAX_MEDIA_SNIFFS_PER_FRAME;
-        for (const pair of Array.isArray(saved.wholeMediaFrames) ? saved.wholeMediaFrames : []) {
-          if (
-            !Array.isArray(pair) ||
-            pair.length !== 2 ||
-            !Number.isInteger(pair[0]) ||
-            pair[0] < 0 ||
-            !Array.isArray(pair[1]) ||
-            wholeMediaByFrame.has(pair[0]) ||
-            wholeMediaByFrame.size >= MAX_VIDEO_FRAMES ||
-            remainingWholeMedia <= 0
-          ) continue;
-          const available = mediaByFrame.get(pair[0]) || [];
-          const urls = [];
-          const seen = new Set();
-          for (const url of pair[1].slice(0, MAX_MEDIA_SNIFFS_PER_FRAME)) {
-            if (
-              remainingWholeMedia <= 0 ||
-              typeof url !== "string" ||
-              !fitsGrabUrl(url) ||
-              !available.includes(url) ||
-              classifyStream(url, "") !== "media" ||
-              isSegmentLikeVideoUrl(url)
-            ) continue;
-            const key = urlPathKey(url);
-            if (seen.has(key)) continue;
-            seen.add(key);
-            urls.push(url);
-            remainingWholeMedia -= 1;
-          }
-          if (urls.length) wholeMediaByFrame.set(pair[0], urls);
-        }
+        const wholeMediaByFrame = restoreFrameMap(saved, "wholeMediaFrames", (frameId, entries) => {
+          const available = new Set(mediaByFrame.get(frameId) || []);
+          const urls = restoreUrls(
+            entries.slice(0, MAX_MEDIA_SNIFFS_PER_FRAME),
+            remainingWholeMedia,
+            (url) =>
+              available.has(url) &&
+              classifyStream(url, "") === "media" &&
+              !isSegmentLikeVideoUrl(url),
+          );
+          remainingWholeMedia -= urls.length;
+          return urls.length ? urls : null;
+        });
 
-        const mediaSizesByFrame = new Map();
-        for (const pair of Array.isArray(saved.mediaSizesFrames) ? saved.mediaSizesFrames : []) {
-          if (
-            !Array.isArray(pair) ||
-            pair.length !== 2 ||
-            !Number.isInteger(pair[0]) ||
-            pair[0] < 0 ||
-            !Array.isArray(pair[1]) ||
-            mediaSizesByFrame.has(pair[0]) ||
-            mediaSizesByFrame.size >= MAX_VIDEO_FRAMES
-          ) continue;
-          const wholeUrls = wholeMediaByFrame.get(pair[0]) || [];
-          const sizes = new Map();
-          for (const entry of pair[1].slice(0, MAX_MEDIA_SNIFFS_PER_FRAME)) {
-            if (
-              !Array.isArray(entry) ||
-              entry.length !== 2 ||
-              typeof entry[0] !== "string" ||
-              entry[0].length > MAX_GRAB_URL_BYTES ||
-              !Number.isSafeInteger(entry[1]) ||
-              entry[1] < MIN_WHOLE_VIDEO_MEDIA_BYTES ||
-              !wholeUrls.some((url) => urlPathKey(url) === entry[0])
-            ) continue;
-            sizes.set(entry[0], entry[1]);
-          }
-          if (sizes.size) mediaSizesByFrame.set(pair[0], sizes);
-        }
+        const mediaSizesByFrame = restoreFrameMap(saved, "mediaSizesFrames", (frameId, entries) => {
+          const wholeKeys = new Set((wholeMediaByFrame.get(frameId) || []).map(urlPathKey));
+          const sizes = restoreKeyedValues(
+            entries.slice(0, MAX_MEDIA_SNIFFS_PER_FRAME),
+            MAX_MEDIA_SNIFFS_PER_FRAME,
+            (value, key) =>
+              Number.isSafeInteger(value) &&
+              value >= MIN_WHOLE_VIDEO_MEDIA_BYTES &&
+              wholeKeys.has(key),
+          );
+          return sizes.size ? sizes : null;
+        });
 
         let sniffSequence =
           Number.isSafeInteger(saved.sniffSequence) && saved.sniffSequence >= 0
             ? saved.sniffSequence
             : 0;
-        const sniffSequencesByFrame = new Map();
-        for (const pair of Array.isArray(saved.sniffSequences) ? saved.sniffSequences : []) {
-          if (
-            !Array.isArray(pair) ||
-            pair.length !== 2 ||
-            !Number.isInteger(pair[0]) ||
-            pair[0] < 0 ||
-            !Array.isArray(pair[1]) ||
-            sniffSequencesByFrame.size >= MAX_VIDEO_FRAMES
-          ) continue;
-          const sequences = new Map();
-          for (const entry of pair[1].slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME)) {
-            if (
-              !Array.isArray(entry) ||
-              entry.length !== 2 ||
-              typeof entry[0] !== "string" ||
-              entry[0].length > MAX_GRAB_URL_BYTES ||
-              !Number.isSafeInteger(entry[1]) ||
-              entry[1] < 0
-            ) continue;
-            sequences.set(entry[0], entry[1]);
-            sniffSequence = Math.max(sniffSequence, entry[1]);
+        const sniffSequencesByFrame = restoreFrameMap(saved, "sniffSequences", (frameId, entries) => {
+          const sequences = restoreKeyedValues(
+            entries.slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME),
+            MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME,
+            (value) => Number.isSafeInteger(value) && value >= 0,
+          );
+          for (const value of sequences.values()) {
+            sniffSequence = Math.max(sniffSequence, value);
           }
-          if (sequences.size) sniffSequencesByFrame.set(pair[0], sequences);
-        }
+          return sequences.size ? sequences : null;
+        });
         // Older v2 snapshots only stored URL arrays. Give those observations
         // stable sequence numbers so subsequent sniffs always compare newer.
         for (const [frameId, urls] of sniffedByFrame) {
@@ -1828,30 +1787,14 @@ async function restoreVideoFinds(tabId) {
           }
         }
 
-        const sniffTimesByFrame = new Map();
-        for (const pair of Array.isArray(saved.sniffTimes) ? saved.sniffTimes : []) {
-          if (
-            !Array.isArray(pair) ||
-            pair.length !== 2 ||
-            !Number.isInteger(pair[0]) ||
-            pair[0] < 0 ||
-            !Array.isArray(pair[1]) ||
-            sniffTimesByFrame.size >= MAX_VIDEO_FRAMES
-          ) continue;
-          const times = new Map();
-          for (const entry of pair[1].slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME)) {
-            if (
-              !Array.isArray(entry) ||
-              entry.length !== 2 ||
-              typeof entry[0] !== "string" ||
-              entry[0].length > MAX_GRAB_URL_BYTES ||
-              !Number.isFinite(entry[1]) ||
-              entry[1] < 0
-            ) continue;
-            times.set(entry[0], entry[1]);
-          }
-          if (times.size) sniffTimesByFrame.set(pair[0], times);
-        }
+        const sniffTimesByFrame = restoreFrameMap(saved, "sniffTimes", (frameId, entries) => {
+          const times = restoreKeyedValues(
+            entries.slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME),
+            MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME,
+            (value) => Number.isFinite(value) && value >= 0,
+          );
+          return times.size ? times : null;
+        });
         // Older v2 snapshots have no observation times. Treat those sniffed
         // entries as older than future lifecycle events.
         for (const [frameId, sequences] of sniffSequencesByFrame) {
@@ -1865,35 +1808,18 @@ async function restoreVideoFinds(tabId) {
           }
         }
 
-        const sniffFirstSeenByFrame = new Map();
-        for (const pair of Array.isArray(saved.sniffFirstSeen) ? saved.sniffFirstSeen : []) {
-          if (
-            !Array.isArray(pair) ||
-            pair.length !== 2 ||
-            !Number.isInteger(pair[0]) ||
-            pair[0] < 0 ||
-            !Array.isArray(pair[1]) ||
-            sniffFirstSeenByFrame.size >= MAX_VIDEO_FRAMES
-          ) continue;
+        const sniffFirstSeenByFrame = restoreFrameMap(saved, "sniffFirstSeen", (frameId, entries) => {
           const available = new Set([
-            ...(sniffedByFrame.get(pair[0]) || []),
-            ...(mediaByFrame.get(pair[0]) || []),
+            ...(sniffedByFrame.get(frameId) || []),
+            ...(mediaByFrame.get(frameId) || []),
           ].map(urlPathKey));
-          const times = new Map();
-          for (const entry of pair[1].slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME)) {
-            if (
-              !Array.isArray(entry) ||
-              entry.length !== 2 ||
-              typeof entry[0] !== "string" ||
-              entry[0].length > MAX_GRAB_URL_BYTES ||
-              !available.has(entry[0]) ||
-              !Number.isFinite(entry[1]) ||
-              entry[1] < 0
-            ) continue;
-            times.set(entry[0], entry[1]);
-          }
-          if (times.size) sniffFirstSeenByFrame.set(pair[0], times);
-        }
+          const times = restoreKeyedValues(
+            entries.slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME),
+            MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME,
+            (value, key) => available.has(key) && Number.isFinite(value) && value >= 0,
+          );
+          return times.size ? times : null;
+        });
 
         const retiredFrames = new Map();
         for (const pair of Array.isArray(saved.retiredFrames) ? saved.retiredFrames : []) {
@@ -2013,29 +1939,6 @@ function mediaUrlsForFrame(finds, frameId) {
 function kindsForFrame(finds, frameId) {
   if (finds.kindsByFrame instanceof Map) return finds.kindsByFrame.get(frameId) || new Map();
   return frameId === 0 && finds.kinds instanceof Map ? finds.kinds : new Map();
-}
-
-/// Merge only observations from the same frame. With multiple active players,
-/// network requests cannot be attributed to one element, so only direct media
-/// URLs reported by the elements themselves are exposed.
-function mergedVideoUrlsForFrame(tabId, frameId) {
-  const finds = videoFinds.get(tabId);
-  if (!finds) return [];
-  const videos = finds.frames.get(frameId) || [];
-  if (videos.length === 0) return [];
-  if (videos.length > 1) {
-    return [...new Set(videos
-      .filter((video) => video && typeof video.src === "string" && video.src && fitsGrabUrl(video.src))
-      .map((video) => video.src))];
-  }
-  const video = videos[0];
-  const sniffed = sniffedUrlsForFrame(finds, frameId);
-  const kinds = kindsForFrame(finds, frameId);
-  if (video && typeof video.src === "string" && video.src) {
-    return mergeVideoFinds([video], sniffed, kinds);
-  }
-  if (video && video.blob === true) return mergeVideoFinds([], sniffed, kinds);
-  return [];
 }
 
 function findVideoForSource(tabId, srcUrl, frameId) {
@@ -2436,14 +2339,6 @@ async function resolvedVideoUrls(tabId) {
     const candidates = await menuVideoCandidatesForFrame(finds, frameId, tabId);
     urls.push(...candidates);
   }
-  return dedupeVideoUrlsByPath(urls, finds).slice(0, MAX_VIDEO_ITEMS);
-}
-
-function mergedVideoUrls(tabId) {
-  const finds = videoFinds.get(tabId);
-  if (!finds) return [];
-  const urls = [];
-  for (const frameId of finds.frames.keys()) urls.push(...mergedVideoUrlsForFrame(tabId, frameId));
   return dedupeVideoUrlsByPath(urls, finds).slice(0, MAX_VIDEO_ITEMS);
 }
 
