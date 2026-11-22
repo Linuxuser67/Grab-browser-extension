@@ -65,9 +65,11 @@ Grab must be installed with its desktop entry (it registers as the
   discoverable active `<video>` element; it groups known playlist variants
   conservatively.
   Picking a menu entry opens its URL in Grab, which probes it like any other link.
-  Skipped on video platforms yt-dlp handles itself (YouTube, TikTok,
-  Instagram, Facebook, X, Twitch, Vimeo, …) — a detected media URL can't
-  work there, so sending the page goes through yt-dlp the usual way.
+  Detection runs on every permitted site, including video platforms. On
+  platforms whose players use short-lived, signed or DRM-protected URLs, a
+  detected link may not download; sending the page itself goes through yt-dlp
+  the usual way. Byte-range slice URLs (for example `bytestart`/`byteend` or
+  `range=` queries) are never offered as a whole video.
 - **Options page**: same settings as the popup, in a full page (via the
   gear button in the popup header or right-click → Options).
 
