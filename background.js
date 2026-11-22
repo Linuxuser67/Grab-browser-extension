@@ -3,6 +3,7 @@
 // The worker's code is split by job:
 //   - handoff.js: pairing, cookies, HTTP/grab:// handoff, explicit sends.
 //   - intercept.js: automatic download interception.
+//   - video-state.js: per-tab video detections and their session persistence.
 //   - video-menu.js: video detection and the right-click menu.
 // This file holds the shared helpers and the runtime message dispatcher.
 //
@@ -27,7 +28,13 @@ if (
   typeof SHARED_DEFAULTS === "undefined" &&
   typeof importScripts === "function"
 ) {
-  importScripts("shared.js", "handoff.js", "intercept.js", "video-menu.js");
+  importScripts(
+    "shared.js",
+    "handoff.js",
+    "intercept.js",
+    "video-state.js",
+    "video-menu.js",
+  );
 }
 
 const GRAB_SCHEME = "grab://";
