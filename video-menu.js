@@ -210,28 +210,22 @@ function descriptiveFolderOf(url) {
   return "";
 }
 
-/// Name shown for a detected video, preferring useful labels over generic
-/// stream entry points and machine-generated file names.
-///
-/// Direct file: descriptive file name; otherwise page title; otherwise the
-/// original file name. Streams: page title; descriptive file name; nearest
-/// descriptive folder; original file name. "Video N" is the last resort.
-function videoName(url, index, pageTitle, kind) {
+/// Prefer a title attached to the player, then a descriptive source name.
+/// The shared page title is only a fallback when the source carries no name.
+function videoName(url, index, pageTitle, kind, playerTitle = "") {
   const file = fileNameOf(url);
   const title = String(pageTitle || "").replace(/\s+/g, " ").trim();
+  const ownTitle = String(playerTitle || "").replace(/\s+/g, " ").trim();
   const informativeFile = file && !isUninformativeName(file);
 
-  if (kind) {
-    if (title) return shortenTitle(title);
-    if (informativeFile) return shorten(file);
+  if (ownTitle) return shortenTitle(ownTitle);
+  if (informativeFile) return shorten(file);
+  if (isManifestKind(kind)) {
     const folder = descriptiveFolderOf(url);
     if (folder) return shorten(folder);
-    return file ? shorten(file) : `Video ${index + 1}`;
   }
-
-  if (informativeFile) return shorten(file);
   if (title) return shortenTitle(title);
-  return file ? shorten(file) : `Video ${index + 1}`;
+  return file ? shorten(file) : "Video " + (index + 1);
 }
 
 /// One row for an HLS master or DASH manifest: hand it to Grab, whose
@@ -1344,6 +1338,46 @@ function detectedKindForUrl(finds, url) {
   return finds && finds.kinds instanceof Map ? finds.kinds.get(key) || null : null;
 }
 
+/// Resolve a player-specific title for a menu URL. Direct sources match by
+/// origin/path; blob players use the same timing attribution as their manifest
+/// selection, so labels cannot leak across simultaneous players.
+function videoTitleForUrl(finds, url) {
+  if (!finds || !(finds.frames instanceof Map)) return "";
+  const key = urlPathKey(url);
+  const labels = new Set();
+
+  for (const [frameId, videos] of finds.frames) {
+    if (!Array.isArray(videos) || videos.length === 0) continue;
+    const sniffed = sniffedManifestsForFrame(finds, frameId);
+    const wholeMedia = wholeMediaUrlsForFrame(finds, frameId);
+    const candidates = sniffed.concat(wholeMedia);
+    const sniffTimes = sniffTimesForFrame(finds, frameId);
+    const firstSeenTimes = sniffFirstSeenTimesForFrame(finds, frameId);
+
+    for (const video of videos) {
+      const title = typeof video?.title === "string"
+        ? video.title.replace(/\s+/g, " ").trim()
+        : "";
+      if (!title) continue;
+
+      let matches = typeof video.src === "string" &&
+        video.src && urlPathKey(video.src) === key;
+      if (!matches && video.blob === true && candidates.length > 0) {
+        matches = attributedManifestUrlsForVideo(
+          videos,
+          video,
+          candidates,
+          sniffTimes,
+          firstSeenTimes,
+        ).some((candidate) => urlPathKey(candidate) === key);
+      }
+      if (matches) labels.add(title);
+    }
+  }
+
+  return labels.size === 1 ? labels.values().next().value : "";
+}
+
 function sniffedHeader(headers, name) {
   for (const h of headers || []) {
     if (h.name && h.name.toLowerCase() === name) return h.value || "";
@@ -1656,7 +1690,7 @@ async function doRefreshVideoMenu(tabId) {
     }
     const names = uniqueLabels(
       entries.map((e, i) =>
-        videoName(e.url, i, finds && finds.title, e.kind),
+        videoName(e.url, i, finds && finds.title, e.kind, videoTitleForUrl(finds, e.url)),
       ),
     );
     // Menu item IDs and labels depend on the visible shape, not URL query

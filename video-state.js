@@ -12,6 +12,11 @@ const MIN_WHOLE_VIDEO_MEDIA_BYTES = 1024 * 1024;
 const RETIRED_FRAME_TTL_MS = 5 * 60 * 1000;
 const videoFinds = new Map();
 
+function boundedVideoTitle(value) {
+  if (typeof value !== "string") return "";
+  return value.replace(/\s+/g, " ").trim().slice(0, MAX_VIDEO_TITLE_LENGTH);
+}
+
 function createVideoFinds() {
   return {
     frames: new Map(),
@@ -436,6 +441,8 @@ function normalizeVideoReport(rawVideos, maximum) {
     if (key && seen.has(key)) continue;
     if (key) seen.add(key);
     const item = { src, blob: video.blob === true };
+    const title = boundedVideoTitle(video.title);
+    if (title) item.title = title;
     if (blobUrl) item.blobUrl = blobUrl;
     if (Number.isFinite(video.height) && video.height > 0) item.height = video.height;
     if (Number.isSafeInteger(video.elementId) && video.elementId > 0 && video.elementId <= 1_000_000_000) {
@@ -468,6 +475,8 @@ function snapshotVideoFinds(finds) {
       if (identity && seen.has(identity)) continue;
       if (identity) seen.add(identity);
       const saved = { src, blob: video.blob === true };
+      const title = boundedVideoTitle(video.title);
+      if (title) saved.title = title;
       if (blobUrl) saved.blobUrl = blobUrl;
       if (Number.isFinite(video.height) && video.height > 0) saved.height = video.height;
       if (Number.isSafeInteger(video.elementId) && video.elementId > 0 && video.elementId <= 1_000_000_000) {
