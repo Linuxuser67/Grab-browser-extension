@@ -20,6 +20,11 @@ const SHARED_DEFAULTS = {
 /// (pairing) permissions it is the only broad access the extension asks for.
 const SHARED_PAGE_ORIGINS = ["http://*/*", "https://*/*"];
 
+/// Scope an action API call to a real tab; null means use the global default.
+function tabScope(tabId) {
+  return Number.isInteger(tabId) && tabId >= 0 ? { tabId } : null;
+}
+
 /// 64 hex chars (a SHA-256, shown by Grab when pairing).
 const SHARED_PAIRING_CODE_RE = /^[0-9a-f]{64}$/;
 

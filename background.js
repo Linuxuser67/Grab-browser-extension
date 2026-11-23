@@ -274,6 +274,8 @@ if (typeof module !== "undefined" && module.exports) {
     // Test hook: inspect per-tab detections.
     _videoFinds: videoFinds,
     _warnedTabs: warnedTabs,
+    // Test hook: run and await one video-menu refresh.
+    _doRefreshVideoMenu: doRefreshVideoMenu,
     _restoreVideoFinds: restoreVideoFinds,
     _persistVideoFinds: persistVideoFinds,
   };

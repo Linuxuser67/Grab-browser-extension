@@ -1625,7 +1625,7 @@ async function doRefreshVideoMenu(tabId) {
       lastMenuSignature = null;
       lastMenuSignatureTabId = null;
       chrome.storage.session.set({ menuUrls: [] }).catch(() => {});
-      if (Number.isInteger(tabId) && tabId >= 0 && !warnedTabs.has(tabId)) {
+      if (tabScope(tabId) && !warnedTabs.has(tabId)) {
         const cleared = chrome.action.setBadgeText({ tabId, text: "" });
         if (cleared && typeof cleared.catch === "function") cleared.catch(() => {});
       }
@@ -1678,7 +1678,7 @@ async function doRefreshVideoMenu(tabId) {
       lastMenuSignatureTabId = tabId;
       lastMenuSignature = signature;
       chrome.storage.session.set({ menuUrls: [] }).catch(() => {});
-      if (Number.isInteger(tabId) && tabId >= 0 && !warnedTabs.has(tabId)) {
+      if (tabScope(tabId) && !warnedTabs.has(tabId)) {
         const result = chrome.action.setBadgeText({ tabId, text: "" });
         if (result && typeof result.catch === "function") {
           result.catch(() => {});
