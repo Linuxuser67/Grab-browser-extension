@@ -12,6 +12,7 @@ const HANDOFF_PATH = path.join(__dirname, "..", "handoff.js");
 const INTERCEPT_PATH = path.join(__dirname, "..", "intercept.js");
 const VIDEO_STATE_PATH = path.join(__dirname, "..", "video-state.js");
 const VIDEO_PATH = path.join(__dirname, "..", "video-menu.js");
+const FIREFOX_MANIFEST_PATH = path.join(__dirname, "..", "manifest.firefox.json");
 
 // Scripts share one global scope in the browser. Concatenating them into one
 // function reproduces that, including the final `module.exports` hook, without
@@ -26,6 +27,20 @@ const BG_SOURCE = [
 ]
   .map((file) => fs.readFileSync(file, "utf8"))
   .join("\n");
+
+test("Chromium and Firefox background scripts use the same load order", () => {
+  const background = fs.readFileSync(BG_PATH, "utf8");
+  const importStart = background.indexOf("importScripts(");
+  const importEnd = background.indexOf(");", importStart);
+  assert.ok(importStart >= 0 && importEnd > importStart, "Chrome must declare importScripts");
+  const chromeScripts = [...background.slice(importStart, importEnd).matchAll(/"([^"]+)"/g)].map(([, file]) => file);
+  const firefoxManifest = JSON.parse(fs.readFileSync(FIREFOX_MANIFEST_PATH, "utf8"));
+  assert.deepEqual(
+    firefoxManifest.background.scripts,
+    [...chromeScripts, "background.js"],
+    "Firefox's scripts must match Chrome's imports, followed by background.js",
+  );
+});
 
 /// Minimal chrome mock: captures listeners, records calls, backs
 /// chrome.storage.session with a Map. Pass a shared `shared` object to
@@ -1331,6 +1346,34 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(ctx.preparedCookies, undefined, "the stale snapshot is dropped");
   });
 
+  test("a forwarding toggle turned off after body construction strips and re-signs cookies", async () => {
+    mockPairedGrab();
+    await pair();
+    chrome.permissions = { contains: async () => true };
+    const originalGet = chrome.storage.local.get;
+    let toggleReads = 0;
+    chrome.storage.local.get = async (defaults) => {
+      if (defaults && Object.hasOwn(defaults, "forwardCookies")) {
+        toggleReads += 1;
+        return { ...defaults, forwardCookies: toggleReads === 1 };
+      }
+      return originalGet(defaults);
+    };
+
+    const ctx = {
+      preparedCookies: [{ name: "sid", value: "v", domain: "example.com" }],
+    };
+    assert.equal(await bg.postToGrab("https://example.com/f.zip", ctx), 200);
+    assert.equal(toggleReads, 2, "the final privacy check observed the toggle changing off");
+    const post = posts()[0];
+    assert.deepEqual(JSON.parse(post.opts.body).cookies, []);
+    assert.equal(
+      post.opts.headers["X-Grab-Token"],
+      hmac("grab-client\u0000", post.opts.body),
+      "the URL-only replacement body is re-signed",
+    );
+  });
+
   test("a toggle storage read failure fails closed", async () => {
     mockPairedGrab();
     await pair();
@@ -1589,6 +1632,32 @@ describe("HTTP handoff to Grab", () => {
     const body = JSON.parse(post.opts.body);
     assert.deepEqual(body.cookies, [], "incognito with no store sends no cookies");
     delete chrome.cookies.getAllCookieStores;
+  });
+
+  test("tabs.get detects a private tab when the handoff context omits incognito", async () => {
+    await pair();
+    mockPairedGrab();
+    chrome.permissions = { contains: async () => true };
+    chrome.tabs.get = async (id) => ({ id, incognito: true });
+    let cookieReads = 0;
+    chrome.cookies.getAll = async () => {
+      cookieReads += 1;
+      return [{ name: "sid", value: "v", domain: "example.com" }];
+    };
+
+    await bg.explicitSend("https://example.com/f.zip", 7, undefined);
+
+    assert.equal(cookieReads, 0, "no cookie API read occurs for a private tab");
+    const post = posts().find((call) => call.opts.method === "POST");
+    assert.ok(post);
+    assert.deepEqual(JSON.parse(post.opts.body).cookies, []);
+    assert.ok(bg._warnedTabs.has(7), "the privacy warning is persisted for this tab");
+    assert.ok(
+      chrome._calls.some(
+        ([name, args]) => name === "action.setTitle" && /Incognito cookie forwarding is disabled/.test(args.title),
+      ),
+      "the toolbar explains why cookies were omitted",
+    );
   });
 
   test("resolveStoreId: non-incognito with no tab uses the default store", async () => {
@@ -2309,6 +2378,32 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(sent.referer, "https://example.com/");
     assert.deepEqual(sent.cookies, []);
     assert.equal(reads, 1, "an empty snapshot is reused instead of querying after navigation");
+  });
+
+  test("an HTTP rejection warning survives the next video-menu refresh", async () => {
+    await pair();
+    mockPairedGrab({ addStatus: 429 });
+    bg._setSleep(async () => {});
+
+    try {
+      await bg.explicitSend("https://example.com/f.zip", 7, false);
+      assert.ok(bg._warnedTabs.has(7), "the HTTP error is recorded as a persistent tab warning");
+      await bg._doRefreshVideoMenu(7);
+
+      const badgeTexts = chrome._calls
+        .filter(([name]) => name === "action.setBadgeText")
+        .map(([, args]) => args.text);
+      assert.ok(badgeTexts.includes("!"), "the error badge was written");
+      assert.equal(badgeTexts.includes(""), false, "video refresh did not erase the error badge");
+      assert.ok(
+        chrome._calls.some(
+          ([name, args]) => name === "action.setTitle" && /HTTP 429/.test(args.title),
+        ),
+        "the queue-full reason remains available in the toolbar title",
+      );
+    } finally {
+      bg._setSleep((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    }
   });
 
   test("a warned tab keeps its badge through the wake", async () => {

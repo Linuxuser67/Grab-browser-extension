@@ -65,6 +65,17 @@ function _setWakeTimeout(ms) {
 const MAX_HANDOFF_COOKIES = 100;
 const MAX_HANDOFF_BODY_BYTES = 32 * 1024;
 
+/// Keep repeated cookie-omission explanations consistent across warm and cold sends.
+const COOKIE_WARNINGS = Object.freeze({
+  permission:
+    "Cookie access is not granted. Grant the extension's optional Cookies permission in Options to forward site authentication.",
+  incognito: "Incognito cookie forwarding is disabled; Grab received the URL without cookies.",
+  readFailure:
+    "Grab could not read this site's cookies. Check the extension's optional Cookies permission or browser first-party isolation settings; the URL was sent without cookies.",
+  startup:
+    "Grab did not finish starting in time to receive the browser cookies. It was opened without them; retry after Grab is ready.",
+});
+
 let sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Test hook: swap the sleep implementation to observe retry delays.
@@ -536,7 +547,7 @@ async function resolveStoreId(ctx) {
   }
 
   const tabId = ctx && ctx.tabId;
-  if (Number.isInteger(tabId) && tabId >= 0) {
+  if (tabScope(tabId)) {
     let tab;
     try {
       tab = await chrome.tabs.get(tabId);
@@ -607,7 +618,7 @@ async function postToGrab(url, ctx) {
       cookies = [];
       if (ctx && typeof ctx === "object") {
         ctx.cookieWarning =
-          "Cookie access is not granted. Grant the extension's optional Cookies permission in Options to forward site authentication.";
+          COOKIE_WARNINGS.permission;
       }
     } else if (!(await loadForwardCookies())) {
       // The user turned cookie forwarding off in Options: the paired request
@@ -626,7 +637,7 @@ async function postToGrab(url, ctx) {
       if (storeId === null) {
         cookies = [];
         if (ctx && typeof ctx === "object") {
-          ctx.cookieWarning = "Incognito cookie forwarding is disabled; Grab received the URL without cookies.";
+          ctx.cookieWarning = COOKIE_WARNINGS.incognito;
         }
       } else {
         cookies = await readCookies(url, storeId, ctx);
@@ -634,7 +645,7 @@ async function postToGrab(url, ctx) {
     } catch {
       cookies = [];
       if (ctx && typeof ctx === "object") {
-        ctx.cookieWarning = "Grab could not read this site's cookies. Check the extension's optional Cookies permission or browser first-party isolation settings; the URL was sent without cookies.";
+        ctx.cookieWarning = COOKIE_WARNINGS.readFailure;
       }
     }
   }
@@ -741,7 +752,7 @@ async function prepareHandoffCookies(url, ctx, resolvedStoreId = resolveStoreId(
       if (ctx && typeof ctx === "object") {
         ctx.preparedCookies = [];
         ctx.cookieWarning =
-          "Incognito cookie forwarding is disabled; Grab received the URL without cookies.";
+          COOKIE_WARNINGS.incognito;
       }
       return false;
     }
@@ -753,7 +764,7 @@ async function prepareHandoffCookies(url, ctx, resolvedStoreId = resolveStoreId(
     if (ctx && typeof ctx === "object") {
       ctx.preparedCookies = [];
       ctx.cookieWarning =
-        "Grab could not read this site's cookies. Check the extension's optional Cookies permission or browser first-party isolation settings; the URL was sent without cookies.";
+        COOKIE_WARNINGS.readFailure;
     }
     return false;
   }
@@ -775,7 +786,7 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
     if (!(await hasCookiePermission())) {
       if (ctx && typeof ctx === "object") {
         ctx.cookieWarning =
-          "Cookie access is not granted. Grant the extension's optional Cookies permission in Options to forward site authentication.";
+          COOKIE_WARNINGS.permission;
       }
     } else if (await loadForwardCookies()) {
       try {
@@ -808,15 +819,15 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
       !ctx.cookieWarning
     ) {
       ctx.cookieWarning =
-        "Grab did not finish starting in time to receive the browser cookies. It was opened without them; retry after Grab is ready.";
+        COOKIE_WARNINGS.startup;
     }
     return ready;
   }
-  const tabArg = Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
+  const tabArg = tabScope(tabId) || {};
   // A warned tab keeps its "!" until a handoff verifies: overwriting it here
   // would clear the visible warning without clearing warnedTabs.
   const keepWarning =
-    Number.isInteger(tabId) && tabId >= 0 && warnedTabs.has(tabId);
+    tabScope(tabId) && warnedTabs.has(tabId);
   const run = (async () => {
     try {
       // Launch through the tab the user acted on before waiting for the cookie
@@ -862,12 +873,24 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
       !ctx.cookieWarning
     ) {
       ctx.cookieWarning =
-        "Grab did not finish starting in time to receive the browser cookies. It was opened without them; retry after Grab is ready.";
+        COOKIE_WARNINGS.startup;
     }
     return ready;
   } finally {
     if (wakeInFlight === run) wakeInFlight = null;
   }
+}
+
+/// Put a persistent warning on the originating tab. Video-menu refreshes must not erase it.
+async function flagTab(tabId, title) {
+  if (!title) return;
+  const scope = tabScope(tabId);
+  if (scope) warnedTabs.add(tabId);
+  try {
+    await chrome.action.setBadgeText({ ...(scope || {}), text: "!" });
+    await chrome.action.setBadgeBackgroundColor({ ...(scope || {}), color: "#cc0000" });
+    await chrome.action.setTitle({ ...(scope || {}), title });
+  } catch {}
 }
 
 /// Explicit user action (context menu, video menu, Alt+G): try the HTTP
@@ -893,37 +916,32 @@ async function explicitSend(url, tabId, incognito, sourceReferer) {
     status = await postToGrabWithRetry(url, ctx);
   }
   const tabArg =
-    Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
+    tabScope(tabId) ? { tabId } : {};
   if (status === 0) {
     // Grab never came up: the OS launches it with the grab:// URL. That
     // fallback cannot carry the source-page Referer or browser cookies, so
     // surface any reason cookie forwarding was unavailable.
     sendToGrab(url, tabId);
     const alreadyWarned =
-      Number.isInteger(tabId) && tabId >= 0 && warnedTabs.has(tabId);
+      tabScope(tabId) && warnedTabs.has(tabId);
     if (ctx.cookieWarning && !alreadyWarned) await showCookieWarning(ctx);
   } else if (status === STATUS_UNVERIFIED) {
     // Something else answers on Grab's port. Don't hand the URL to a
     // stranger; flag it on the toolbar instead.
-    try {
-      await chrome.action.setBadgeText({ ...tabArg, text: "!" });
-      await chrome.action.setBadgeBackgroundColor({ ...tabArg, color: "#cc0000" });
-      await chrome.action.setTitle({ ...tabArg, title: "Grab not recognised. Pair again in Options." });
-      if (Number.isInteger(tabId) && tabId >= 0) warnedTabs.add(tabId);
-    } catch {}
+    await flagTab(tabId, "Grab not recognised. Pair again in Options.");
   } else if (status >= 200 && status < 300) {
     if (ctx.cookieWarning) {
       // A pre-existing warning already carries useful information. Do not
       // replace or clear its badge while this handoff starts or completes.
       const alreadyWarned =
-        Number.isInteger(tabId) && tabId >= 0 && warnedTabs.has(tabId);
+        tabScope(tabId) && warnedTabs.has(tabId);
       if (!alreadyWarned) await showCookieWarning(ctx);
     } else {
       // Success: clear any earlier warning.
       try {
         await chrome.action.setBadgeText({ ...tabArg, text: "" });
         await chrome.action.setTitle({ ...tabArg, title: "" });
-        if (Number.isInteger(tabId) && tabId >= 0) warnedTabs.delete(tabId);
+        if (tabScope(tabId)) warnedTabs.delete(tabId);
       } catch {}
     }
   } else if (status !== STATUS_MAYBE_SENT) {
@@ -938,11 +956,7 @@ async function explicitSend(url, tabId, incognito, sourceReferer) {
           : status === 429
             ? "Grab's queue is full after retries (HTTP 429). Try again after a download finishes."
             : `Grab could not accept this URL (HTTP ${status}).`;
-    try {
-      await chrome.action.setBadgeText({ ...tabArg, text: "!" });
-      await chrome.action.setBadgeBackgroundColor({ ...tabArg, color: "#cc0000" });
-      await chrome.action.setTitle({ ...tabArg, title });
-    } catch {}
+    await flagTab(tabId, title);
   }
   // STATUS_MAYBE_SENT may have been accepted; never fall back because that
   // risks a duplicate download.
@@ -950,16 +964,7 @@ async function explicitSend(url, tabId, incognito, sourceReferer) {
 
 /// Show why a handoff was accepted without a fully usable cookie jar.
 async function showCookieWarning(ctx) {
-  const tabId = ctx && ctx.tabId;
-  const tabArg = Number.isInteger(tabId) && tabId >= 0 ? { tabId } : {};
-  const title = ctx && ctx.cookieWarning;
-  if (!title) return;
-  try {
-    await chrome.action.setBadgeText({ ...tabArg, text: "!" });
-    await chrome.action.setBadgeBackgroundColor({ ...tabArg, color: "#cc0000" });
-    await chrome.action.setTitle({ ...tabArg, title });
-    if (Number.isInteger(tabId) && tabId >= 0) warnedTabs.add(tabId);
-  } catch {}
+  await flagTab(ctx && ctx.tabId, ctx && ctx.cookieWarning);
 }
 
 /// True when the URL's file extension is on the user's skip list.

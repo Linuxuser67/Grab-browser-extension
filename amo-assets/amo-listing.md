@@ -26,7 +26,7 @@ Send browser downloads straight to the [Grab download manager](https://github.co
 **How it works:**
 The extension talks to Grab over a local HTTP endpoint (`127.0.0.1:9412`) — no setup, no native messaging host, works from Flatpak. If Grab isn't running, downloads stay in the browser.
 
-**Permissions:** nothing broad is granted at install. Video detection asks for access to web pages and network requests only when you turn it on; pairing with Grab asks for access to cookies and web pages only when you pair, so a logged-in download can carry your session. Each is dropped again when the feature is turned off. No data leaves your computer: the extension only talks to Grab on 127.0.0.1.
+**Permissions:** the `downloads` permission supports automatic download interception, which is off by default and only takes over when enabled and paired with Grab. Video detection requests the optional `webRequest` permission and optional site access when enabled. Cookie forwarding requests the optional `cookies` permission and optional site access when paired. The only host permission granted at install is limited to the local Grab endpoint (`http://127.0.0.1/*`).
 
 **Requires:** Grab 5.7.0+ for automatic interception. Alt+G and context menu work with Grab 4.7.1+.
 
@@ -44,19 +44,22 @@ The extension talks to Grab over a local HTTP endpoint (`127.0.0.1:9412`) — no
 
 ## Review notes (for the AMO reviewer)
 
-Why the broad permissions: content scripts run on all frames to detect
-playable videos (HLS/DASH manifest sniffing) for the context menu; host
-permissions `http://*/*`/`https://*/*` plus webRequest support the optional
-automatic download interception (downloads are cancelled and re-routed to
-Grab, only when the user enables it — it is off by default). All network
-traffic stays on the user's own machine: URLs are POSTed to Grab's local
-HTTP endpoint (`127.0.0.1:9412`) or handed to the `grab://` OS scheme
-handler. No data leaves the user's computer; no analytics, no remote
-servers.
+Why the permissions: the `downloads` permission lets the extension observe
+and cancel browser downloads for automatic interception. Interception is off
+by default and a browser download is cancelled only after the paired Grab
+instance accepts it. The optional `webRequest` permission and optional
+`http://*/*`/`https://*/*` host access support video detection by allowing
+frame content scripts and HLS/DASH response observation. The optional
+`cookies` permission plus optional site access allow the extension to read
+unpartitioned site cookies for a paired handoff when cookie forwarding is
+enabled. The only host permission granted at install is `http://127.0.0.1/*`,
+used for the local Grab handshake and handoff. URLs are POSTed to Grab's local
+HTTP endpoint (`127.0.0.1:9412`) or handed to the `grab://` OS scheme handler;
+no analytics or remote extension service is used.
 
 ## Checklist
 
-- [ ] Upload `grab-extension-firefox-v1.3.8.zip` as the new version
+- [ ] Upload `grab-extension-firefox-<tag>.zip` as the new version
 - [ ] Upload `grab-icon-128.png` as custom icon
 - [ ] Upload both screenshots
 - [ ] Paste Summary + Description + Version notes
