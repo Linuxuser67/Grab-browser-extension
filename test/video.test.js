@@ -3676,6 +3676,67 @@ describe("pageVideoTitle", () => {
   });
 });
 
+describe("videoElementTitle", () => {
+  let content;
+  beforeEach(() => {
+    content = loadContent();
+  });
+
+  test("collectVideos carries a player-specific title into the report", () => {
+    const video = {
+      currentSrc: "https://cdn.example.com/player-a/master.m3u8",
+      videoWidth: 640,
+      videoHeight: 360,
+      paused: false,
+      ended: false,
+      querySelectorAll: () => [],
+      getAttribute: (name) => name === "aria-label" ? "Episode One" : null,
+    };
+    const doc = {
+      querySelectorAll: (selector) => selector === "video" ? [video] : [],
+    };
+
+    assert.deepEqual(
+      content.collectVideos(doc, () => true).map((entry) => entry.title),
+      ["Episode One"],
+    );
+  });
+
+  test("uses a labelled-by title and ignores generic player labels", () => {
+    const labelled = {
+      currentSrc: "https://cdn.example.com/player-b/master.m3u8",
+      videoWidth: 640,
+      paused: false,
+      ended: false,
+      querySelectorAll: () => [],
+      getAttribute: (name) => name === "aria-labelledby" ? "episode-title" : null,
+      ownerDocument: {
+        getElementById: (id) => id === "episode-title" ? { textContent: "  Episode   Two " } : null,
+      },
+    };
+    const labelledDoc = {
+      querySelectorAll: (selector) => selector === "video" ? [labelled] : [],
+    };
+    assert.deepEqual(
+      content.collectVideos(labelledDoc, () => true).map((entry) => entry.title),
+      ["Episode Two"],
+    );
+
+    const generic = {
+      currentSrc: "https://cdn.example.com/player-c/master.m3u8",
+      videoWidth: 640,
+      paused: false,
+      ended: false,
+      querySelectorAll: () => [],
+      getAttribute: (name) => name === "aria-label" ? "Video player" : null,
+    };
+    const genericDoc = {
+      querySelectorAll: (selector) => selector === "video" ? [generic] : [],
+    };
+    assert.equal(content.collectVideos(genericDoc, () => true)[0].title, undefined);
+  });
+});
+
 describe("videoName", () => {
   let bg;
   beforeEach(() => {
@@ -3687,10 +3748,28 @@ describe("videoName", () => {
     assert.equal(bg.videoName("https://cdn.example.com/v/clip.mp4", 0, "", null), "clip.mp4");
   });
 
-  test("a stream is named by the whole page video title", () => {
+  test("a stream falls back to the page title when its URL has no descriptive name", () => {
     assert.equal(
       bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, "  Example   Video Title ", "hls"),
       "Example Video Title"
+    );
+  });
+
+  test("player-specific titles take priority for manifests and direct media", () => {
+    assert.equal(
+      bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, "Shared page title", "hls", "Episode One"),
+      "Episode One",
+    );
+    assert.equal(
+      bg.videoName("https://cdn.example.com/video.mp4", 0, "Shared page title", null, "Episode Two"),
+      "Episode Two",
+    );
+  });
+
+  test("a descriptive manifest path is preferred over the shared page title", () => {
+    assert.equal(
+      bg.videoName("https://cdn.example.com/series/episode-two/master.m3u8", 0, "Shared page title", "hls"),
+      "episode-two",
     );
   });
 
@@ -3733,9 +3812,9 @@ describe("videoName", () => {
     assert.equal(bg.videoName("https://cdn.example.com/hls/master.m3u8", 0, "", "hls"), "master.m3u8");
   });
 
-  test("a descriptive stream file name is used only when no page title exists", () => {
+  test("a descriptive stream file name is preferred over the shared page title", () => {
     assert.equal(bg.videoName("https://cdn.example.com/hls/my-talk.m3u8", 0, "", "hls"), "my-talk.m3u8");
-    assert.equal(bg.videoName("https://cdn.example.com/hls/my-talk.m3u8", 0, "Page Title", "hls"), "Page Title");
+    assert.equal(bg.videoName("https://cdn.example.com/hls/my-talk.m3u8", 0, "Page Title", "hls"), "my-talk.m3u8");
   });
 
   test("a generic or machine-generated direct file name yields to the page title", () => {
@@ -3825,6 +3904,19 @@ describe("context menu: one flat submenu, one click to Grab", () => {
     assert.ok(items.every((i) => i.enabled !== false));
   });
 
+  test("a direct media row uses its player title instead of the URL basename", async () => {
+    const { items } = await build({
+      manifestUrl: null,
+      videos: [{
+        src: "https://cdn.example.com/media/opaque-file.mp4",
+        blob: false,
+        title: "Lecture Two",
+      }],
+      title: "Shared page title",
+    });
+    assert.deepEqual(rowsOf(items).map((item) => item.title), ["Lecture Two"]);
+  });
+
   test("a click on a row sends that row's URL to Grab", async () => {
     const { chrome, items } = await build({
       manifestUrl: "https://cdn.example.com/hls/master.m3u8",
@@ -3896,6 +3988,71 @@ describe("context menu: one flat submenu, one click to Grab", () => {
     });
     assert.deepEqual(rowsOf(items).map((i) => i.title), ["x.mp4", "x.mp4 (2)"]);
     assert.equal(items.filter((i) => i.type === "separator").length, 1);
+  });
+
+  test("two HLS players use their own titles instead of the shared page title", async () => {
+    const shared = {};
+    const chrome = makeChrome(shared);
+    const created = new Map();
+    const originalCreate = chrome.contextMenus.create;
+    chrome.contextMenus.create = (props) => {
+      created.set(props.id, props);
+      return originalCreate(props);
+    };
+    loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 57;
+    const now = Date.now();
+    const first = "https://cdn.example.com/player-a/master.m3u8";
+    const second = "https://cdn.example.com/player-b/master.m3u8";
+    await L["tabs.onActivated"]({ tabId });
+
+    for (const [url, timeStamp] of [
+      [first, now - 4_000],
+      [second, now - 1_000],
+    ]) {
+      await L["webRequest.onResponseStarted"]({
+        tabId,
+        frameId: 0,
+        url,
+        timeStamp,
+        responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+      });
+    }
+
+    await L["runtime.onMessage"](
+      {
+        type: "grab-videos-detected",
+        videos: [
+          {
+            src: null, blob: true, blobUrl: "blob:https://example.com/player-a",
+            title: "Episode One", elementId: 1, loadStartedAt: now - 3_900,
+          },
+          {
+            src: null, blob: true, blobUrl: "blob:https://example.com/player-b",
+            title: "Episode Two", elementId: 2, loadStartedAt: now - 900,
+          },
+        ],
+        title: "Shared page title",
+      },
+      { tab: { id: tabId, url: "https://example.com/watch" }, frameId: 0 },
+    );
+
+    for (let i = 0; i < 12; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    const rows = [...created.values()].filter((item) => item.parentId === "grabVideos" && item.type !== "separator");
+    assert.deepEqual(rows.map((item) => item.title), ["Episode One", "Episode Two"]);
+    const saved = shared.session.get("videoFinds:v2:" + tabId);
+    assert.deepEqual(
+      saved.frames[0][1].map((video) => video.title),
+      ["Episode One", "Episode Two"],
+      "player titles survive the session snapshot",
+    );
+
+    await L["menus.onClicked"]({ menuItemId: rows[1].id }, { id: tabId });
+    assert.ok(
+      chrome._calls.some(([name, url]) => name === "handoff" && url === second),
+      "the second label still targets the second player's manifest",
+    );
   });
 
   test("requestRescan sends grab-rescan and debounces", async () => {

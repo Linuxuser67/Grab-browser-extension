@@ -68,6 +68,48 @@ function allVideos(root, onShadowRoot) {
 /// `isActiveVideo`. Tests pass explicit predicates. Pierces shadow roots via allVideos.
 /// `knownRoots` switches to a shallow scan: the document plus those roots only
 /// (already wired during an earlier deep walk). Null means a deep walk.
+function videoElementTitle(video) {
+  if (!video || typeof video.getAttribute !== "function") return "";
+  const clean = (value) => {
+    const title = String(value || "").replace(/\s+/g, " ").trim();
+    if (!title || /^(?:(?:video|media|player)(?:\s+(?:\d+|player|controls))?)$/i.test(title)) return "";
+    return title.slice(0, 512);
+  };
+  const fromAttributes = (element, names) => {
+    if (!element || typeof element.getAttribute !== "function") return "";
+    for (const name of names) {
+      const title = clean(element.getAttribute(name));
+      if (title) return title;
+    }
+    return "";
+  };
+
+  const direct = fromAttributes(video, ["data-video-title", "data-title", "title", "aria-label"]);
+  if (direct) return direct;
+
+  const labelledBy = video.getAttribute("aria-labelledby");
+  const doc = video.ownerDocument;
+  if (labelledBy && doc && typeof doc.getElementById === "function") {
+    const title = clean(labelledBy.split(/\s+/)
+      .map((id) => doc.getElementById(id))
+      .filter(Boolean)
+      .map((element) => element.textContent || "")
+      .join(" "));
+    if (title) return title;
+  }
+
+  // Some players put the media title on a small wrapper instead of <video>.
+  let parent = video.parentElement;
+  for (let depth = 0; parent && depth < 3; depth += 1, parent = parent.parentElement) {
+    const title = fromAttributes(parent, ["data-video-title", "data-title"]);
+    if (title) return title;
+  }
+
+  const figure = typeof video.closest === "function" ? video.closest("figure") : null;
+  const caption = figure && figure.querySelector ? figure.querySelector("figcaption") : null;
+  return clean(caption && caption.textContent);
+}
+
 function collectVideos(doc, isActive, onShadowRoot, onVideo, getVideoMetadata, knownRoots = null) {
   const out = [];
   const videos = knownRoots === null
@@ -86,6 +128,8 @@ function collectVideos(doc, isActive, onShadowRoot, onVideo, getVideoMetadata, k
     const src = usableVideoSrc(v);
     const blob = !src && isBlobVideo(v);
     const entry = { src, blob };
+    const title = videoElementTitle(v);
+    if (title) entry.title = title;
     // Preserve the clicked element identity for the background context-menu
     // handler. This opaque URL is never used as the URL handed to Grab.
     if (isBlobVideo(v)) entry.blobUrl = v.currentSrc || v.src;
