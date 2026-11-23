@@ -1672,6 +1672,51 @@ describe("detection wiring", () => {
     );
   });
 
+  test("rotating playlist query tokens update click targets without rebuilding menu rows", async () => {
+    const shared = {};
+    const chrome = makeChrome(shared);
+    loadBackground(chrome);
+    const L = chrome._listeners;
+    const tabId = 176;
+    const menuUrlWrites = [];
+    const originalSet = chrome.storage.session.set;
+    chrome.storage.session.set = async (obj) => {
+      if (Object.hasOwn(obj, "menuUrls")) menuUrlWrites.push(obj.menuUrls);
+      return originalSet(obj);
+    };
+
+    await L["tabs.onActivated"]({ tabId });
+    const playlistUrl = (sequence) =>
+      `https://cdn.example.com/live/master.m3u8?_HLS_msn=${sequence}&_HLS_part=0`;
+    let latestUrl = "";
+    for (let sequence = 0; sequence < 30; sequence += 1) {
+      latestUrl = playlistUrl(sequence);
+      await L["webRequest.onResponseStarted"]({
+        tabId,
+        frameId: 0,
+        url: latestUrl,
+        timeStamp: 1000 + sequence,
+        responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
+      });
+      await tick();
+      await tick();
+    }
+
+    const creates = chrome._calls.filter(([name]) => name === "menus.create");
+    const removes = chrome._calls.filter(([name]) => name === "menus.remove");
+    assert.equal(creates.filter(([, id]) => id === "grabVideos").length, 1);
+    assert.equal(creates.filter(([, id]) => id === "grabVideo:0").length, 1);
+    assert.equal(removes.filter(([, id]) => id === "grabVideos").length, 1);
+    assert.deepEqual(shared.session.get("menuUrls"), [latestUrl]);
+    assert.deepEqual(menuUrlWrites.at(-1), [latestUrl]);
+
+    await L["menus.onClicked"]({ menuItemId: "grabVideo:0" }, { id: tabId });
+    assert.ok(
+      chrome._calls.some(([name, url]) => name === "handoff" && url === latestUrl),
+      "the unchanged menu row hands off the newest playlist URL",
+    );
+  });
+
   test("a direct video remains the only entry when an unrelated manifest is sniffed", async () => {
     const chrome = makeChrome();
     // Private host: playlist inspection is local (no Grab pairing round trip).
