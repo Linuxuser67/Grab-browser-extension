@@ -320,24 +320,77 @@ if (
   // videos inside open shadow roots. Disconnected roots are dropped because
   // a video removed from the page must not stay in the menu.
   const wiredShadowRoots = [];
+  const shadowRootObservers = new Map();
+  const MutationObserverCtor = document.defaultView && document.defaultView.MutationObserver;
+
   function knownShadowRoots() {
     for (let i = wiredShadowRoots.length - 1; i >= 0; i--) {
       const root = wiredShadowRoots[i];
-      if (!root || !root.host || !root.host.isConnected) wiredShadowRoots.splice(i, 1);
+      if (!root || !root.host || !root.host.isConnected) {
+        const observer = shadowRootObservers.get(root);
+        if (observer) observer.disconnect();
+        shadowRootObservers.delete(root);
+        wiredShadowRoots.splice(i, 1);
+      }
     }
     return wiredShadowRoots;
   }
+
+  /// Inspect only a newly inserted subtree for open shadow roots. This catches
+  /// players mounted after startup without returning to page-wide scans on
+  /// ordinary media events. Each discovered root gets its own child observer.
+  function wireShadowRootsInSubtree(node) {
+    if (!node || (node.nodeType !== 1 && node.nodeType !== 11)) return false;
+    let discovered = false;
+    const inspectHost = (host) => {
+      if (!host || !host.shadowRoot) return;
+      const root = host.shadowRoot;
+      if (!shadowRootsWired.has(root)) discovered = true;
+      wireShadowRoot(root);
+      if (wireShadowRootsInSubtree(root)) discovered = true;
+    };
+    if (node.nodeType === 1) inspectHost(node);
+    if (typeof node.querySelectorAll === "function") {
+      for (const host of node.querySelectorAll("*")) {
+        if (host.shadowRoot) inspectHost(host);
+      }
+    }
+    return discovered;
+  }
+
+  function observeShadowTree(root) {
+    if (!MutationObserverCtor || !root || shadowRootObservers.has(root)) return;
+    const observer = new MutationObserverCtor((mutations) => {
+      let discovered = false;
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (wireShadowRootsInSubtree(node)) discovered = true;
+        }
+      }
+      // A root may already contain a playing direct-source video when it is
+      // attached. A shallow report sees it through the newly wired root list.
+      if (discovered) scheduleReport();
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    shadowRootObservers.set(root, observer);
+  }
+
   function wireShadowRoot(sr) {
-    if (!sr || shadowRootsWired.has(sr)) return;
-    shadowRootsWired.add(sr);
-    wiredShadowRoots.push(sr);
-    sr.addEventListener("loadstart", onLoadStart, true);
-    sr.addEventListener("play", onPlay, true);
-    sr.addEventListener("playing", onPlay, true);
-    sr.addEventListener("pause", onStopped, true);
-    sr.addEventListener("ended", onStopped, true);
-    sr.addEventListener("emptied", onEmptied, true);
-    sr.addEventListener("loadedmetadata", onLoadedMetadata, true);
+    if (!sr) return;
+    if (!shadowRootsWired.has(sr)) {
+      shadowRootsWired.add(sr);
+      sr.addEventListener("loadstart", onLoadStart, true);
+      sr.addEventListener("play", onPlay, true);
+      sr.addEventListener("playing", onPlay, true);
+      sr.addEventListener("pause", onStopped, true);
+      sr.addEventListener("ended", onStopped, true);
+      sr.addEventListener("emptied", onEmptied, true);
+      sr.addEventListener("loadedmetadata", onLoadedMetadata, true);
+    }
+    // A previously detached root may be reattached; restore it to shallow
+    // scans and reconnect its observer after knownShadowRoots pruned it.
+    if (!wiredShadowRoots.includes(sr)) wiredShadowRoots.push(sr);
+    observeShadowTree(sr);
   }
 
   // play/playing don't bubble; capture at the document.
@@ -362,6 +415,9 @@ if (
   }
   document.addEventListener("click", wireShadowRootsOnPath, true);
   document.addEventListener("pointerdown", wireShadowRootsOnPath, true);
+  // Observe future additions at the document boundary. Shadow-root observers
+  // are added by wireShadowRoot, so nested custom players are covered too.
+  if (document.documentElement) observeShadowTree(document.documentElement);
 
   chrome.runtime.onMessage.addListener((msg) => {
     // The worker is ephemeral; its in-memory finds die with it, so it asks
