@@ -1689,6 +1689,8 @@ describe("detection wiring", () => {
     const playlistUrl = (sequence) =>
       `https://cdn.example.com/live/master.m3u8?_HLS_msn=${sequence}&_HLS_part=0`;
     let latestUrl = "";
+    let initialCreateCount = 0;
+    let initialRemoveCount = 0;
     for (let sequence = 0; sequence < 30; sequence += 1) {
       latestUrl = playlistUrl(sequence);
       await L["webRequest.onResponseStarted"]({
@@ -1698,15 +1700,21 @@ describe("detection wiring", () => {
         timeStamp: 1000 + sequence,
         responseHeaders: [{ name: "content-type", value: "application/vnd.apple.mpegurl" }],
       });
-      await tick();
-      await tick();
+      // Drain the first refresh fully before recording the baseline: it may
+      // remove a previously empty submenu as part of initial population.
+      for (let turn = 0; turn < (sequence === 0 ? 8 : 2); turn += 1) await tick();
+      if (sequence === 0) {
+        initialCreateCount = chrome._calls.filter(([name]) => name === "menus.create").length;
+        initialRemoveCount = chrome._calls.filter(([name]) => name === "menus.remove").length;
+      }
     }
 
     const creates = chrome._calls.filter(([name]) => name === "menus.create");
     const removes = chrome._calls.filter(([name]) => name === "menus.remove");
     assert.equal(creates.filter(([, id]) => id === "grabVideos").length, 1);
     assert.equal(creates.filter(([, id]) => id === "grabVideo:0").length, 1);
-    assert.equal(removes.filter(([, id]) => id === "grabVideos").length, 1);
+    assert.equal(creates.length, initialCreateCount, "query-token rotations do not recreate menu items");
+    assert.equal(removes.length, initialRemoveCount, "query-token rotations do not remove the populated menu");
     assert.deepEqual(shared.session.get("menuUrls"), [latestUrl]);
     assert.deepEqual(menuUrlWrites.at(-1), [latestUrl]);
 
