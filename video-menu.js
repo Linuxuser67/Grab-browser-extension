@@ -1659,21 +1659,33 @@ async function doRefreshVideoMenu(tabId) {
         videoName(e.url, i, finds && finds.title, e.kind),
       ),
     );
+    // Menu item IDs and labels depend on the visible shape, not URL query
+    // tokens. Live playlists often rotate those tokens on every request; keep
+    // the menu nodes and update only the index-to-URL map in that case.
+    const menuUrls = entries.flatMap((entry) => entry.rows.map((row) => row.url));
     const signature = JSON.stringify([
       tabId,
       names,
-      entries.map((e) => [
-        e.url,
-        e.kind,
-        e.rows.map((row) => [row.url, row.quality]),
-      ]),
+      entries.map((entry) => entry.rows.map((row) => row.quality)),
     ]);
-    if (lastMenuSignatureTabId === tabId && lastMenuSignature === signature) return;
+    if (lastMenuSignatureTabId === tabId && lastMenuSignature === signature) {
+      const currentUrls = videoUi.menuUrls;
+      const urlsChanged =
+        currentUrls.length !== menuUrls.length ||
+        menuUrls.some((url, index) => url !== currentUrls[index]);
+      if (urlsChanged) {
+        videoUi.menuUrls = menuUrls;
+        // A worker restart restores click targets from session storage. Persist
+        // the latest rotating URL even though the visible menu did not change.
+        chrome.storage.session.set({ menuUrls }).catch(() => {});
+      }
+      return;
+    }
     // Replace the menu only once the replacement is ready: candidate
     // resolution can await a playlist check, and removing the old menu first
     // would leave right-click with nothing while it runs.
     await removeContextMenu(VIDEO_PARENT_ID);
-    videoUi.menuUrls = [];
+    videoUi.menuUrls = menuUrls;
     if (entries.length === 0) {
       lastMenuSignatureTabId = tabId;
       lastMenuSignature = signature;
@@ -1692,6 +1704,7 @@ async function doRefreshVideoMenu(tabId) {
       title: "Videos detected by Grab",
       contexts,
     });
+    let menuUrlIndex = 0;
     entries.forEach((entry, ei) => {
       if (ei > 0) {
         safeMenuCreate({
@@ -1703,8 +1716,8 @@ async function doRefreshVideoMenu(tabId) {
       }
       for (const row of entry.rows) {
         // The id is the index into videoUi.menuUrls, so a click resolves
-        // against the list this menu was built from.
-        const idx = videoUi.menuUrls.push(row.url) - 1;
+        // against the latest list even when only the source URL changed.
+        const idx = menuUrlIndex++;
         safeMenuCreate({
           id: `${VIDEO_ITEM_PREFIX}${idx}`,
           parentId: VIDEO_PARENT_ID,
