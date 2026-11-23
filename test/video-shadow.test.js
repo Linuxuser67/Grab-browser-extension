@@ -106,6 +106,60 @@ describe("shadow-root video detection (jsdom)", () => {
     }
   });
 
+  test("a video in a late-mounted open shadow root is detected without rescan or interaction", async () => {
+    const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
+    const { messages, document, cleanup } = loadContent(dom);
+    try {
+      messages.length = 0;
+      const host = document.createElement("custom-video-player");
+      const root = host.attachShadow({ mode: "open" });
+      const video = makeVideo(document, { src: "https://cdn.example.com/late.mp4" });
+      root.appendChild(video);
+      // The player is mounted after content.js completed its initial deep scan.
+      // No click, pointer event, playlist rescan, or media event is sent.
+      document.body.appendChild(host);
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const reports = messages.filter((message) => message.type === "grab-videos-detected");
+      assert.ok(reports.length > 0, "mounting the host wires its open root and schedules a report");
+      assert.ok(
+        reports.at(-1).videos.some((entry) => entry.src === "https://cdn.example.com/late.mp4"),
+        "the already-playing direct source is included",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("a new shadow-root host inside an observed root is discovered incrementally", async () => {
+    const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
+    const { messages, document, cleanup } = loadContent(dom);
+    try {
+      messages.length = 0;
+      const outerHost = document.createElement("custom-player-shell");
+      const outerRoot = outerHost.attachShadow({ mode: "open" });
+      document.body.appendChild(outerHost);
+      // Let the document observer discover and begin observing the outer root.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const innerHost = document.createElement("custom-video-player");
+      const innerRoot = innerHost.attachShadow({ mode: "open" });
+      innerRoot.appendChild(makeVideo(document, { src: "https://cdn.example.com/nested.mp4" }));
+      outerRoot.appendChild(innerHost);
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const reports = messages.filter((message) => message.type === "grab-videos-detected");
+      assert.ok(
+        reports.some((report) => report.videos.some((entry) => entry.src === "https://cdn.example.com/nested.mp4")),
+        "the mutation observer on the outer root discovers nested open roots",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    } finally {
+      cleanup();
+    }
+  });
+
   test("initial scan detects a video already playing before content-script injection", () => {
     const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
     const video = makeVideo(dom.window.document);
