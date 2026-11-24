@@ -220,6 +220,15 @@ describe("shadow-root video detection (jsdom)", () => {
 
       await new Promise((resolve) => setTimeout(resolve, 350));
       assert.equal(wildcardQueries, 1, "the subtree is scanned once when the batch flushes");
+
+      wildcardQueries = 0;
+      const wrapper = document.createElement("div");
+      document.body.appendChild(wrapper);
+      const nested = document.createElement("section");
+      nested.appendChild(document.createElement("span"));
+      wrapper.appendChild(nested);
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      assert.equal(wildcardQueries, 1, "a queued ancestor covers its nested addition");
       window.Element.prototype.querySelectorAll = original;
     } finally {
       cleanup();

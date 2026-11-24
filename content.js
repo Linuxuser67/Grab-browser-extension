@@ -413,16 +413,24 @@ if (
 
   function flushPendingShadowNodes() {
     shadowDiscoveryTimer = null;
-    const pending = [...pendingShadowNodes];
+    const pending = new Set(pendingShadowNodes);
     pendingShadowNodes.clear();
-    const roots = pending.filter((node) =>
-      !pending.some(
-        (other) =>
-          other !== node &&
-          typeof other.contains === "function" &&
-          other.contains(node),
-      ),
-    );
+    const roots = [];
+    for (const node of pending) {
+      let ancestor =
+        node.parentNode || (node.nodeType === 11 && node.host ? node.host : null);
+      let covered = false;
+      while (ancestor) {
+        if (pending.has(ancestor)) {
+          covered = true;
+          break;
+        }
+        ancestor =
+          ancestor.parentNode ||
+          (ancestor.nodeType === 11 && ancestor.host ? ancestor.host : null);
+      }
+      if (!covered) roots.push(node);
+    }
     let discovered = false;
     for (const node of roots) {
       const connected =
