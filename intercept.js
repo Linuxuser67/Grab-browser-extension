@@ -103,8 +103,9 @@ async function interceptDownload(item) {
   await unclaimDownload(item.id);
 }
 
-// Downloads parked while waiting for their size to become known, when the
-// user set a minimum intercept size. MV3 service workers are ephemeral: an
+// Downloads parked while waiting for metadata needed by the interception
+// policy: size when a positive minimum is configured, or the server filename
+// when a skip list is configured. MV3 service workers are ephemeral: an
 // in-memory Map + setTimeout can die mid-wait and lose the interception, so
 // the pending set lives in session storage (survives worker restarts, clears
 // with the browser) and the deadline is a chrome.alarms one-shot (alarms
@@ -113,22 +114,17 @@ async function interceptDownload(item) {
 const pendingKey = (id) => `pendingSize:${id}`;
 const alarmName = (id) => `size-wait:${id}`;
 
-/// Wait for the browser's target filename when a configured skip list cannot
-/// yet be evaluated from either URL. DownloadItem.filename may arrive later
-/// through downloads.onChanged.
+/// Wait for the browser's target filename whenever a skip list is configured.
+/// A URL extension does not establish the server-provided filename, which may
+/// arrive later through downloads.onChanged.
 function needsFilenameForSkip(item, settings) {
-  if (!settings.skipTypes || (typeof item.filename === "string" && item.filename)) {
-    return false;
-  }
-  const urlHasExtension = (url) => {
-    try {
-      const basename = new URL(url).pathname.split("/").pop() || "";
-      return /\.[^.]+$/.test(basename);
-    } catch {
-      return false;
-    }
-  };
-  return !urlHasExtension(item.url) && !urlHasExtension(item.finalUrl);
+  // A non-skipped URL extension does not establish the server-provided name:
+  // /download.php may still resolve to report.pdf. Only a known filename can
+  // conclusively satisfy the user's skip list.
+  return (
+    !!settings.skipTypes &&
+    !(typeof item.filename === "string" && item.filename.length > 0)
+  );
 }
 
 // Best-effort guard against deciding the same download twice when an alarm
@@ -195,7 +191,8 @@ async function decidePending(id) {
       await dropPending(id);
       return;
     }
-    if (item.fileSize >= 0 && item.fileSize < minSizeBytes(settings)) {
+    const sizeCapBytes = minSizeBytes(settings);
+    if (item.fileSize >= 0 && item.fileSize < sizeCapBytes) {
       // Size is known and below the user's threshold.
       await dropPending(id);
       return;
@@ -210,7 +207,7 @@ async function decidePending(id) {
       }
       return;
     }
-    if (!(item.fileSize >= 0) && Date.now() < deadline) {
+    if (sizeCapBytes > 0 && !(item.fileSize >= 0) && Date.now() < deadline) {
       // Size still unknown but the deadline hasn't passed: this call came
       // too early (the alarm is only the wakeup). Re-park and wait for the
       // real deadline instead of intercepting early. Don't drop: parkForSize
@@ -287,7 +284,7 @@ chrome.downloads.onChanged.addListener(async (delta) => {
   if (await isPending(delta.id)) {
     const state = delta.state && delta.state.current;
     if (state === "complete" || state === "interrupted") {
-      // Finished or failed before the size arrived: too late to hand over.
+      // Finished or failed before the required metadata arrived: too late to hand over.
       await dropPending(delta.id);
       return;
     }
