@@ -1220,8 +1220,6 @@ describe("per-video menu candidates", () => {
       base + "segment-12.mp4",
       base + "segment12.mp4",
       base + "chunk_001.mp4",
-      base + "preview-720p.mp4",
-      base + "trailer.mp4",
       base + "ad-video.mp4",
       base + "promo-clip.mp4",
       "https://cdn.example.com/segments/0001.mp4",
@@ -1233,11 +1231,17 @@ describe("per-video menu candidates", () => {
       base + "chunk1.mp4",
     ]) assert.equal(bg.wholeVideoMediaSize(details(url, 200, full)), 8388608, url);
 
-    assert.equal(
-      bg.wholeVideoMediaSize(details("https://cdn.example.com/ad/episode.mp4", 200, full)),
-      null,
-      "an /ad/ directory is an advertisement path",
-    );
+    for (const url of [
+      base + "preview-720p.mp4",
+      base + "trailer.mp4",
+      "https://cdn.example.com/ad/episode.mp4",
+    ]) {
+      assert.equal(
+        bg.wholeVideoMediaSize(details(url, 200, full)),
+        8388608,
+        `${url} is a possible full media resource`,
+      );
+    }
   });
 
   test("a whole-file fallback survives session restore", async () => {
