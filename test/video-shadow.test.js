@@ -193,6 +193,39 @@ describe("shadow-root video detection (jsdom)", () => {
     }
   });
 
+  test("batches shadow discovery and skips leaf-only additions", async () => {
+    const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
+    const { document, window, cleanup } = loadContent(dom);
+    try {
+      // Let the script's startup report finish before measuring mutation work.
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      let wildcardQueries = 0;
+      const original = window.Element.prototype.querySelectorAll;
+      window.Element.prototype.querySelectorAll = function (selector) {
+        if (selector === "*") wildcardQueries++;
+        return original.call(this, selector);
+      };
+
+      for (let i = 0; i < 20; i++) {
+        document.body.appendChild(document.createElement("div"));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      assert.equal(wildcardQueries, 0, "leaf additions cannot contain nested shadow hosts");
+
+      const subtree = document.createElement("div");
+      subtree.appendChild(document.createElement("span"));
+      document.body.appendChild(subtree);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(wildcardQueries, 0, "the mutation callback only queues the subtree");
+
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      assert.equal(wildcardQueries, 1, "the subtree is scanned once when the batch flushes");
+      window.Element.prototype.querySelectorAll = original;
+    } finally {
+      cleanup();
+    }
+  });
+
   test("light-DOM video still reports (control)", async () => {
     const dom = new JSDOM("<!DOCTYPE html><body></body>", { url: "https://example.com/" });
     const { messages, document, window, cleanup } = loadContent(dom);

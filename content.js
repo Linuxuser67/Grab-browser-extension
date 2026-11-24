@@ -394,6 +394,9 @@ if (
       if (wireShadowRootsInSubtree(root)) discovered = true;
     };
     if (node.nodeType === 1) inspectHost(node);
+    // A leaf cannot contain another shadow host. Inspect the node itself first
+    // so an ordinary element with its own open root is still discovered.
+    if (node.childElementCount === 0) return discovered;
     if (typeof node.querySelectorAll === "function") {
       for (const host of node.querySelectorAll("*")) {
         if (host.shadowRoot) inspectHost(host);
@@ -402,18 +405,61 @@ if (
     return discovered;
   }
 
+  // Batch inserted subtrees instead of walking each one in the observer's
+  // mutation callback. This bounds discovery work during DOM-heavy feeds and
+  // avoids rescanning a descendant when its ancestor is in the same batch.
+  const pendingShadowNodes = new Set();
+  let shadowDiscoveryTimer = null;
+
+  function flushPendingShadowNodes() {
+    shadowDiscoveryTimer = null;
+    const pending = [...pendingShadowNodes];
+    pendingShadowNodes.clear();
+    const roots = pending.filter((node) =>
+      !pending.some(
+        (other) =>
+          other !== node &&
+          typeof other.contains === "function" &&
+          other.contains(node),
+      ),
+    );
+    let discovered = false;
+    for (const node of roots) {
+      const connected =
+        node.nodeType === 11 && node.host ? node.host.isConnected : node.isConnected;
+      if (!connected) continue;
+      if (wireShadowRootsInSubtree(node)) discovered = true;
+    }
+    if (discovered) {
+      // The scan itself was delayed and batched, so don't add a second
+      // 400 ms report delay. Preserve any pending lifecycle details.
+      if (timer) clearTimeout(timer);
+      timer = null;
+      report();
+    }
+  }
+
+  function queueShadowSubtree(node) {
+    if (!node || (node.nodeType !== 1 && node.nodeType !== 11)) return;
+    if (node.childElementCount === 0 && !(node.nodeType === 1 && node.shadowRoot)) {
+      return;
+    }
+    pendingShadowNodes.add(node);
+    // Throttle, rather than reset, so a continuously mutating page cannot
+    // postpone discovery indefinitely.
+    if (shadowDiscoveryTimer === null) {
+      shadowDiscoveryTimer = setTimeout(flushPendingShadowNodes, 400);
+    }
+  }
+
   function observeShadowTree(root) {
     if (!MutationObserverCtor || !root || shadowRootObservers.has(root)) return;
     const observer = new MutationObserverCtor((mutations) => {
-      let discovered = false;
       for (const mutation of mutations) {
         for (const node of mutation.addedNodes) {
-          if (wireShadowRootsInSubtree(node)) discovered = true;
+          queueShadowSubtree(node);
         }
       }
-      // A root may already contain a playing direct-source video when it is
-      // attached. A shallow report sees it through the newly wired root list.
-      if (discovered) scheduleReport();
     });
     observer.observe(root, { childList: true, subtree: true });
     shadowRootObservers.set(root, observer);
