@@ -4768,7 +4768,7 @@ describe("opt-in video access", () => {
     chrome.permissions = {
       contains: async (query) =>
         query && query.permissions && query.permissions.includes("webRequest")
-          ? state.webRequest
+          ? state.webRequest && state.granted
           : state.granted,
       onAdded: { addListener: (fn) => { state.onAdded = fn; } },
       onRemoved: { addListener: (fn) => { state.onRemoved = fn; } },
@@ -4804,6 +4804,7 @@ describe("opt-in video access", () => {
     assert.equal(state.registered.length, 0, "no page access: nothing registered");
 
     state.granted = true;
+    state.webRequest = true;
     await bg.syncVideoScript();
     assert.equal(state.registered.length, 1);
     const [script] = state.registered;
@@ -4818,6 +4819,7 @@ describe("opt-in video access", () => {
 
     shared.syncSettings.detectVideos = true;
     state.granted = false;
+    state.webRequest = false;
     await bg.syncVideoScript();
     assert.equal(state.registered.length, 0, "page access revoked: stays unregistered");
   });
