@@ -394,6 +394,98 @@ describe("size-wait interception", () => {
     assert.equal(skippedChrome._session.has("pendingSize:8"), false);
   });
 
+  test("waits for a late filename before applying the skip list", async () => {
+    const skippedChrome = makeChrome({
+      localSettings: pairedLocal(),
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "pdf" },
+    });
+    loadBackground(skippedChrome);
+    const download = {
+      id: 82,
+      url: "https://example.com/download?id=82",
+      fileSize: 200 * MiB,
+      state: "in_progress",
+    };
+    skippedChrome._downloads.set(download.id, { ...download });
+    await skippedChrome._listeners["downloads.onCreated"](download);
+    assert.equal(skippedChrome._session.has("pendingSize:82"), true);
+    assert.equal(
+      skippedChrome._calls.some(([name]) => name === "handoff" || name === "cancel"),
+      false,
+      "the browser download stays active until its type is known",
+    );
+
+    const filename = "/home/user/Downloads/report.pdf";
+    skippedChrome._downloads.set(download.id, { ...download, filename });
+    await skippedChrome._listeners["downloads.onChanged"]({
+      id: download.id,
+      filename: { current: filename },
+    });
+    assert.equal(
+      skippedChrome._calls.some(([name]) => name === "handoff" || name === "cancel"),
+      false,
+      "the late filename matches the skip list",
+    );
+    assert.equal(skippedChrome._session.has("pendingSize:82"), false);
+    assert.equal(skippedChrome._alarms.has("size-wait:82"), false);
+  });
+
+  test("resumes interception when the late filename is not excluded", async () => {
+    const allowedChrome = makeChrome({
+      localSettings: pairedLocal(),
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "pdf" },
+    });
+    loadBackground(allowedChrome);
+    const download = {
+      id: 83,
+      url: "https://example.com/download?id=83",
+      fileSize: 200 * MiB,
+      state: "in_progress",
+    };
+    allowedChrome._downloads.set(download.id, { ...download });
+    await allowedChrome._listeners["downloads.onCreated"](download);
+    const filename = "/home/user/Downloads/archive.zip";
+    allowedChrome._downloads.set(download.id, { ...download, filename });
+    await allowedChrome._listeners["downloads.onChanged"]({
+      id: download.id,
+      filename: { current: filename },
+    });
+    assert.ok(
+      allowedChrome._calls.some(([name]) => name === "handoff"),
+      "the non-excluded download is handed to Grab",
+    );
+    assert.ok(
+      allowedChrome._calls.some(([name, id]) => name === "cancel" && id === download.id),
+      "the browser copy is cancelled after acceptance",
+    );
+    assert.equal(allowedChrome._session.has("pendingSize:83"), false);
+  });
+
+  test("keeps the browser copy when no filename arrives before the deadline", async () => {
+    const skippedChrome = makeChrome({
+      localSettings: pairedLocal(),
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "pdf" },
+    });
+    loadBackground(skippedChrome);
+    const download = {
+      id: 84,
+      url: "https://example.com/download?id=84",
+      fileSize: 200 * MiB,
+      state: "in_progress",
+    };
+    skippedChrome._downloads.set(download.id, { ...download });
+    await skippedChrome._listeners["downloads.onCreated"](download);
+    skippedChrome._session.set("pendingSize:84", Date.now() - 1);
+    skippedChrome._listeners["alarms.onAlarm"]({ name: "size-wait:84" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(
+      skippedChrome._calls.some(([name]) => name === "handoff" || name === "cancel"),
+      false,
+      "an unknown type is not taken over",
+    );
+    assert.equal(skippedChrome._session.has("pendingSize:84"), false);
+  });
+
   test("parks an unknown-size download in session storage with an alarm", async () => {
     chrome._downloads.set(7, { ...bigItem(7), state: "in_progress" });
     await listeners["downloads.onCreated"](bigItem(7));
