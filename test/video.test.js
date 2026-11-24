@@ -1232,6 +1232,7 @@ describe("per-video menu candidates", () => {
     ]) assert.equal(bg.wholeVideoMediaSize(details(url, 200, full)), 8388608, url);
 
     for (const url of [
+      base + "preview.mp4",
       base + "preview-720p.mp4",
       base + "trailer.mp4",
       "https://cdn.example.com/ad/episode.mp4",
