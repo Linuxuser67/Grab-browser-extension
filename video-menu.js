@@ -1920,7 +1920,12 @@ let videoScriptSync = Promise.resolve();
 
 async function hasPageAccess() {
   try {
-    return await chrome.permissions.contains({ origins: SHARED_PAGE_ORIGINS });
+    // Cookie pairing can grant page origins without enabling video detection.
+    // The detector needs both its network permission and page access.
+    return await chrome.permissions.contains({
+      permissions: ["webRequest"],
+      origins: SHARED_PAGE_ORIGINS,
+    });
   } catch {
     return false;
   }

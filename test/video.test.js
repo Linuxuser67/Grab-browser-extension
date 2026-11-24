@@ -4758,9 +4758,18 @@ describe("opt-in video access", () => {
 
   /// Permissions + scripting mocks. `state.granted` is the page-access answer.
   function withPermissionApis(chrome, granted) {
-    const state = { granted, registered: [], registerCalls: 0, unregisterCalls: 0 };
+    const state = {
+      granted,
+      webRequest: granted,
+      registered: [],
+      registerCalls: 0,
+      unregisterCalls: 0,
+    };
     chrome.permissions = {
-      contains: async () => state.granted,
+      contains: async (query) =>
+        query && query.permissions && query.permissions.includes("webRequest")
+          ? state.webRequest
+          : state.granted,
       onAdded: { addListener: (fn) => { state.onAdded = fn; } },
       onRemoved: { addListener: (fn) => { state.onRemoved = fn; } },
     };
@@ -4811,6 +4820,26 @@ describe("opt-in video access", () => {
     state.granted = false;
     await bg.syncVideoScript();
     assert.equal(state.registered.length, 0, "page access revoked: stays unregistered");
+  });
+
+  test("cookie-only page access does not enable video detection", async () => {
+    const chrome = makeChrome();
+    const state = withPermissionApis(chrome, false);
+    const bg = loadBackground(chrome);
+
+    // Pairing for cookie forwarding grants host access, but not webRequest.
+    state.granted = true;
+    state.webRequest = false;
+    await bg.syncVideoScript();
+    assert.equal(state.registered.length, 0, "site access alone is not video consent");
+
+    state.webRequest = true;
+    await bg.syncVideoScript();
+    assert.equal(state.registered.length, 1, "video permission plus site access enables the detector");
+
+    state.webRequest = false;
+    await bg.syncVideoScript();
+    assert.equal(state.registered.length, 0, "revoking webRequest unregisters the detector");
   });
 
   test("concurrent triggers register the script once", async () => {
