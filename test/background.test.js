@@ -416,6 +416,34 @@ describe("size-wait interception", () => {
     assert.equal(chrome._alarms.has("size-wait:7"), false);
   });
 
+  test("cancels the browser copy when the state lookup fails after handoff", async () => {
+    const item = { ...bigItem(72), fileSize: 200 * MiB };
+    chrome._downloads.set(item.id, { ...item, state: "in_progress" });
+    const search = chrome.downloads.search;
+    chrome.downloads.search = async (query) => {
+      if (query.id === item.id) throw new Error("temporary downloads.search failure");
+      return search(query);
+    };
+
+    await listeners["downloads.onCreated"](item);
+
+    assert.equal(intercepted(), true, "Grab accepted the download");
+    assert.equal(cancelled(item.id), true, "the browser copy is cancelled");
+    assert.ok(
+      chrome._calls.some(([name, id]) => name === "removeFile" && id === item.id),
+      "the partial browser file is removed",
+    );
+    assert.ok(
+      chrome._calls.some(([name, query]) => name === "erase" && query.id === item.id),
+      "the browser history entry is erased",
+    );
+    assert.equal(
+      chrome._session.has(`claimedDownload:${item.id}`),
+      false,
+      "the session claim is released",
+    );
+  });
+
   test("automatic interception forwards the browser-provided referrer", async () => {
     const referer = "https://example.com/watch/episode?id=42";
     const download = { ...bigItem(71), fileSize: 200 * MiB, referrer: referer };

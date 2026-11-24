@@ -78,7 +78,13 @@ async function interceptDownload(item) {
   }
   // A tiny download can finish while the handoff is in flight, before the
   // claim exists, so onChanged skipped it: clean up here instead.
-  const [current] = await chrome.downloads.search({ id: item.id });
+  let current;
+  try {
+    [current] = await chrome.downloads.search({ id: item.id });
+  } catch {
+    // Grab already accepted the download. If the browser state cannot be read,
+    // continue with cancellation rather than leave a second copy running.
+  }
   if (current && current.state === "complete") {
     await removeBrowserCopy(item.id);
     await unclaimDownload(item.id);
