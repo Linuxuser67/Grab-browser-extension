@@ -10,4 +10,6 @@ Send browser downloads, links, images, and videos to the [Grab download manager]
 
 Available for Firefox and Chromium-based browsers. The Grab desktop app is required.
 
+Video detection is opt-in. When enabled, it can inspect pages and matching network responses on every HTTP(S) site where you grant optional site access. There is currently no per-site exclusion list.
+
 Use **Alt+G** to send the current tab, or right-click a link or media item and choose **Download with Grab**.
