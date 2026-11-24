@@ -107,6 +107,24 @@ async function interceptDownload(item) {
 const pendingKey = (id) => `pendingSize:${id}`;
 const alarmName = (id) => `size-wait:${id}`;
 
+/// Wait for the browser's target filename when a configured skip list cannot
+/// yet be evaluated from either URL. DownloadItem.filename may arrive later
+/// through downloads.onChanged.
+function needsFilenameForSkip(item, settings) {
+  if (!settings.skipTypes || (typeof item.filename === "string" && item.filename)) {
+    return false;
+  }
+  const urlHasExtension = (url) => {
+    try {
+      const basename = new URL(url).pathname.split("/").pop() || "";
+      return /\.[^.]+$/.test(basename);
+    } catch {
+      return false;
+    }
+  };
+  return !urlHasExtension(item.url) && !urlHasExtension(item.finalUrl);
+}
+
 // Best-effort guard against deciding the same download twice when an alarm
 // and a size event interleave within one worker lifetime. Cross-restart
 // dedup comes from dropPending's session-storage removal.
@@ -171,14 +189,22 @@ async function decidePending(id) {
       await dropPending(id);
       return;
     }
-    if (item.fileSize >= 0) {
-      // Size is known: small enough stays in the browser, big enough is
-      // intercepted now.
-      if (item.fileSize < minSizeBytes(settings)) {
+    if (item.fileSize >= 0 && item.fileSize < minSizeBytes(settings)) {
+      // Size is known and below the user's threshold.
+      await dropPending(id);
+      return;
+    }
+    if (needsFilenameForSkip(item, settings)) {
+      if (Date.now() < deadline) {
+        // Keep the browser copy until the filename can be checked.
+        await parkForSize(item, deadline);
+      } else {
+        // Unknown type at the deadline: preserve the browser's download.
         await dropPending(id);
-        return;
       }
-    } else if (Date.now() < deadline) {
+      return;
+    }
+    if (!(item.fileSize >= 0) && Date.now() < deadline) {
       // Size still unknown but the deadline hasn't passed: this call came
       // too early (the alarm is only the wakeup). Re-park and wait for the
       // real deadline instead of intercepting early. Don't drop: parkForSize
@@ -205,31 +231,29 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.downloads.onCreated.addListener(async (item) => {
-  const settings = await getSettings();
-  if (!settings.interceptDownloads) return;
-  // Ignore downloads from a previous browser session (Varia pattern):
-  // onCreated can re-fire on startup for old downloads. Missing startTime
-  // or a missing browserStartTime (no startup seen) is treated as new.
-  if (item.startTime) {
-    const { browserStartTime } = await chrome.storage.session.get(
-      "browserStartTime",
-    );
+  const settin  const cap = minSizeBytes(settings);
+  if (cap > 0 && item.fileSize >= 0 && item.fileSize < cap) return;
+  if (needsFilenameForSkip(item, settings) || (cap > 0 && !(item.fileSize >= 0))) {
+    // Wait for metadata that may arrive after onCreated (size and/or filename).
+    await parkForSize(item);
+    // Re-read after parking to close the race where the download finishes or
+    // its metadata changes before the pending state is stored.
+    const fresh = await chrome.downloads.search({ id: item.id });
+    const current = fresh[0];
     if (
-      browserStartTime !== undefined &&
-      new Date(item.startTime).getTime() < browserStartTime
+      !current ||
+      current.state === "complete" ||
+      current.state === "interrupted"
     ) {
-      return;
+      await dropPending(item.id);
+    } else {
+      await decidePending(item.id);
     }
+    return;
   }
-  // Extension installs/updates must never be intercepted.
-  if (item.mime === "application/x-chrome-extension") return;
-  if (isSkipped(item.url, settings.skipTypes, item.filename) || isSkipped(item.finalUrl, settings.skipTypes, item.filename)) return;
-  // Non-http(s) downloads (blob:, data:) have no server URL to hand over.
-  if (!toGrabUrl(item.url)) return;
 
-  const cap = minSizeBytes(settings);
-  if (cap > 0) {
-    if (item.fileSize >= 0 && item.fileSize < cap) return; // Too small: browser keeps it.
+  await interceptDownload(item);
+turn; // Too small: browser keeps it.
     if (item.fileSize < 0) {
       // Size not known yet (headers haven't arrived): wait for it instead of
       // guessing. The browser download proceeds normally meanwhile.
@@ -263,7 +287,11 @@ chrome.downloads.onChanged.addListener(async (delta) => {
       await dropPending(delta.id);
       return;
     }
-    if (delta.fileSize && delta.fileSize.current >= 0) {
+    const filenameReady =
+      delta.filename &&
+      typeof delta.filename.current === "string" &&
+      delta.filename.current.length > 0;
+    if ((delta.fileSize && delta.fileSize.current >= 0) || filenameReady) {
       await decidePending(delta.id);
       return;
     }
