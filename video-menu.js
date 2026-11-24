@@ -1420,10 +1420,10 @@ function isSegmentLikeVideoUrl(url) {
   try {
     const path = new URL(url).pathname.toLowerCase();
     const basename = path.split("/").filter(Boolean).pop() || "";
-    if (/(?:^|\/)(?:segments?|chunks?|fragments?|previews?|pre[-_]rolls?|prerolls?|mid[-_]rolls?|midrolls?|post[-_]rolls?|postrolls?|ad|ads|thumbnails?|storyboards?|sprites?|subtitles?|captions?|audio[-_]only|audioonly|prefetch(?:es)?)(?:\/|$)/.test(path)) {
+    if (/(?:^|\/)(?:segments?|chunks?|fragments?|previews?|pre[-_]rolls?|prerolls?|mid[-_]rolls?|midrolls?|post[-_]rolls?|postrolls?|thumbnails?|storyboards?|sprites?|subtitles?|captions?|audio[-_]only|audioonly|prefetch(?:es)?)(?:\/|$)/.test(path)) {
       return true;
     }
-    if (/^(?:preview|trailer|teaser|ad|advert|advertisement|promo|thumbnail|thumb|storyboard|sprite|preroll|midroll|postroll|prefetch)(?:[._-]|$)/.test(basename)) {
+    if (/^(?:ad|advert|advertisement|promo|thumbnail|thumb|storyboard|sprite|preroll|midroll|postroll|prefetch)(?:[._-]|$)/.test(basename)) {
       return true;
     }
     return /^(?:seg(?:ment)?[._-]?\d+|(?:chunk|frag(?:ment)?)[._-]+\d+)(?:[._-]|$)/.test(basename);
