@@ -231,7 +231,29 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.downloads.onCreated.addListener(async (item) => {
-  const settin  const cap = minSizeBytes(settings);
+  const settings = await getSettings();
+  if (!settings.interceptDownloads) return;
+  // Ignore downloads from a previous browser session (Varia pattern):
+  // onCreated can re-fire on startup for old downloads. Missing startTime
+  // or a missing browserStartTime (no startup seen) is treated as new.
+  if (item.startTime) {
+    const { browserStartTime } = await chrome.storage.session.get(
+      "browserStartTime",
+    );
+    if (
+      browserStartTime !== undefined &&
+      new Date(item.startTime).getTime() < browserStartTime
+    ) {
+      return;
+    }
+  }
+  // Extension installs/updates must never be intercepted.
+  if (item.mime === "application/x-chrome-extension") return;
+  if (isSkipped(item.url, settings.skipTypes, item.filename) || isSkipped(item.finalUrl, settings.skipTypes, item.filename)) return;
+  // Non-http(s) downloads (blob:, data:) have no server URL to hand over.
+  if (!toGrabUrl(item.url)) return;
+
+  const cap = minSizeBytes(settings);
   if (cap > 0 && item.fileSize >= 0 && item.fileSize < cap) return;
   if (needsFilenameForSkip(item, settings) || (cap > 0 && !(item.fileSize >= 0))) {
     // Wait for metadata that may arrive after onCreated (size and/or filename).
@@ -250,30 +272,6 @@ chrome.downloads.onCreated.addListener(async (item) => {
       await decidePending(item.id);
     }
     return;
-  }
-
-  await interceptDownload(item);
-turn; // Too small: browser keeps it.
-    if (item.fileSize < 0) {
-      // Size not known yet (headers haven't arrived): wait for it instead of
-      // guessing. The browser download proceeds normally meanwhile.
-      await parkForSize(item);
-      // The download may have finished while the pending state was being
-      // written (async gap between deciding to park and persisting it):
-      // re-check, and drop the parked entry if it's already too late to
-      // hand over. Anything finishing after this is caught by the onChanged
-      // guard or by decidePending's own state check.
-      const fresh = await chrome.downloads.search({ id: item.id });
-      const current = fresh[0];
-      if (
-        !current ||
-        current.state === "complete" ||
-        current.state === "interrupted"
-      ) {
-        await dropPending(item.id);
-      }
-      return;
-    }
   }
 
   await interceptDownload(item);
