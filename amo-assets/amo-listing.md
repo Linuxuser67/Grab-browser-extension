@@ -26,7 +26,7 @@ Send browser downloads straight to the [Grab download manager](https://github.co
 **How it works:**
 The extension talks to Grab over a local HTTP endpoint (`127.0.0.1:9412`) — no setup, no native messaging host, works from Flatpak. If Grab isn't running, downloads stay in the browser.
 
-**Permissions:** the `downloads` permission supports automatic download interception, which is off by default and only takes over when enabled and paired with Grab. Video detection requests the optional `webRequest` permission and optional site access when enabled. Cookie forwarding requests the optional `cookies` permission and optional site access when paired. The only host permission granted at install is limited to the local Grab endpoint (`http://127.0.0.1/*`).
+**Permissions:** the `downloads` permission supports automatic download interception, which is off by default and only takes over when enabled and paired with Grab. Video detection requests the optional `webRequest` permission and optional site access when enabled. On every HTTP(S) site where you grant access, its content script and network listener can inspect page media and matching requests; there is currently no per-site exclusion list. Cookie forwarding requests the optional `cookies` permission and optional site access when paired. The only host permission granted at install is limited to the local Grab endpoint (`http://127.0.0.1/*`).
 
 **Requires:** Grab 5.7.0+ for automatic interception. Alt+G and context menu work with Grab 4.7.1+.
 
