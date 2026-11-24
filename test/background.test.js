@@ -394,6 +394,85 @@ describe("size-wait interception", () => {
     assert.equal(skippedChrome._session.has("pendingSize:8"), false);
   });
 
+  test("waits for a late filename when the URL has a non-skipped extension", async () => {
+    const skippedChrome = makeChrome({
+      localSettings: pairedLocal(),
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "pdf" },
+    });
+    loadBackground(skippedChrome);
+    const download = {
+      id: 85,
+      url: "https://example.com/download.php?id=85",
+      fileSize: 200 * MiB,
+      state: "in_progress",
+    };
+    skippedChrome._downloads.set(download.id, { ...download });
+    await skippedChrome._listeners["downloads.onCreated"](download);
+
+    assert.equal(
+      skippedChrome._session.has("pendingSize:85"),
+      true,
+      "a non-skipped URL extension does not establish the server filename type",
+    );
+    assert.equal(
+      skippedChrome._calls.some(([name]) => name === "handoff" || name === "cancel"),
+      false,
+      "the browser copy remains active until the server filename is known",
+    );
+
+    const filename = "/home/user/Downloads/report.pdf";
+    skippedChrome._downloads.set(download.id, { ...download, filename });
+    await skippedChrome._listeners["downloads.onChanged"]({
+      id: download.id,
+      filename: { current: filename },
+    });
+    assert.equal(
+      skippedChrome._calls.some(([name]) => name === "handoff" || name === "cancel"),
+      false,
+      "the late PDF filename matches the skip list",
+    );
+    assert.equal(skippedChrome._session.has("pendingSize:85"), false);
+    assert.equal(skippedChrome._alarms.has("size-wait:85"), false);
+  });
+
+  test("hands off an unknown-size download as soon as its filename resolves when the minimum is zero", async () => {
+    const allowedChrome = makeChrome({
+      localSettings: pairedLocal(),
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "pdf" },
+    });
+    loadBackground(allowedChrome);
+    const download = {
+      id: 86,
+      url: "https://example.com/download?id=86",
+      fileSize: -1,
+      state: "in_progress",
+    };
+    allowedChrome._downloads.set(download.id, { ...download });
+    await allowedChrome._listeners["downloads.onCreated"](download);
+    assert.equal(allowedChrome._session.has("pendingSize:86"), true);
+
+    // The server filename is known, but a chunked response never reports size.
+    const filename = "/home/user/Downloads/archive.zip";
+    allowedChrome._downloads.set(download.id, { ...download, filename });
+    await allowedChrome._listeners["downloads.onChanged"]({
+      id: download.id,
+      filename: { current: filename },
+    });
+
+    assert.ok(
+      allowedChrome._calls.some(
+        ([name, url]) => name === "handoff" && url === download.url,
+      ),
+      "the allowed filename is enough when no minimum size is configured",
+    );
+    assert.ok(
+      allowedChrome._calls.some(([name, id]) => name === "cancel" && id === download.id),
+      "the browser copy is cancelled after Grab accepts the handoff",
+    );
+    assert.equal(allowedChrome._session.has("pendingSize:86"), false);
+    assert.equal(allowedChrome._alarms.has("size-wait:86"), false);
+  });
+
   test("waits for a late filename before applying the skip list", async () => {
     const skippedChrome = makeChrome({
       localSettings: pairedLocal(),
