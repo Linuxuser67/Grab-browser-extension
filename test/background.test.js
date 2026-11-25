@@ -640,6 +640,24 @@ describe("size-wait interception", () => {
     assert.equal(skippedChrome._session.has("pendingSize:84"), false);
   });
 
+  test("leaves the browser download untouched when pending session storage is full", async () => {
+    const originalSet = chrome.storage.session.set;
+    chrome.storage.session.set = async (values) => {
+      if (Object.keys(values).some((key) => key.startsWith("pendingSize:"))) {
+        throw new Error("session storage quota exceeded");
+      }
+      return originalSet(values);
+    };
+    chrome._downloads.set(91, { ...bigItem(91), state: "in_progress" });
+
+    await listeners["downloads.onCreated"](bigItem(91));
+
+    assert.equal(cancelled(91), false);
+    assert.equal(intercepted(), false);
+    assert.equal(chrome._session.has("pendingSize:91"), false);
+    assert.equal(chrome._alarms.has("size-wait:91"), false);
+  });
+
   test("parks an unknown-size download in session storage with an alarm", async () => {
     chrome._downloads.set(7, { ...bigItem(7), state: "in_progress" });
     await listeners["downloads.onCreated"](bigItem(7));

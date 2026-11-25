@@ -144,13 +144,27 @@ async function parkForSize(item, deadline = Date.now() + SIZE_WAIT_MS) {
   // effective wait in packaged builds is >= 30s even though the deadline is
   // sooner; the deadline still decides, so unpacked builds keep the short
   // wait for development.
-  await chrome.storage.session.set({ [pendingKey(item.id)]: deadline });
-  await chrome.alarms.create(alarmName(item.id), { when: deadline });
+  try {
+    await chrome.storage.session.set({ [pendingKey(item.id)]: deadline });
+    await chrome.alarms.create(alarmName(item.id), { when: deadline });
+    return true;
+  } catch {
+    // Never cancel or take over a browser download if its restart-safe pending
+    // marker cannot be persisted. If the alarm failed after the write, remove
+    // the partial marker so it cannot park indefinitely.
+    try { await chrome.storage.session.remove(pendingKey(item.id)); } catch {}
+    try { await chrome.alarms.clear(alarmName(item.id)); } catch {}
+    return false;
+  }
 }
 
 async function dropPending(id) {
   await chrome.alarms.clear(alarmName(id)).catch(() => {});
-  await chrome.storage.session.remove(pendingKey(id));
+  try {
+    await chrome.storage.session.remove(pendingKey(id));
+  } catch {
+    // The pending entry is already inert when session storage is unavailable.
+  }
 }
 
 const minSizeBytes = (settings) =>
@@ -200,7 +214,7 @@ async function decidePending(id) {
     if (needsFilenameForSkip(item, settings)) {
       if (Date.now() < deadline) {
         // Keep the browser copy until the filename can be checked.
-        await parkForSize(item, deadline);
+        if (!(await parkForSize(item, deadline))) await dropPending(id);
       } else {
         // Unknown type at the deadline: preserve the browser's download.
         await dropPending(id);
@@ -212,7 +226,7 @@ async function decidePending(id) {
       // too early (the alarm is only the wakeup). Re-park and wait for the
       // real deadline instead of intercepting early. Don't drop: parkForSize
       // refreshes the pending entry.
-      await parkForSize(item, deadline);
+      if (!(await parkForSize(item, deadline))) await dropPending(id);
       return;
     }
     // Unknown size past the deadline: streams rarely report one, and they
@@ -260,7 +274,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
   if (cap > 0 && item.fileSize >= 0 && item.fileSize < cap) return;
   if (needsFilenameForSkip(item, settings) || (cap > 0 && !(item.fileSize >= 0))) {
     // Wait for metadata that may arrive after onCreated (size and/or filename).
-    await parkForSize(item);
+    if (!(await parkForSize(item))) return;
     // Re-read after parking to close the race where the download finishes or
     // its metadata changes before the pending state is stored.
     const fresh = await chrome.downloads.search({ id: item.id });
