@@ -987,7 +987,7 @@ function videoManifestPriority(url, kinds) {
 }
 
 /// A lone active player owns every manifest observed in its frame. With
-/// concurrent players, use each path's first request time to disambiguate.
+/// concurrent players, use each stream's first request time to disambiguate.
 function attributedManifestUrlsForVideo(
   videos,
   targetVideo,
@@ -1014,7 +1014,7 @@ function attributedManifestUrlsForVideo(
   const attributed = [];
   for (const url of manifests || []) {
     const observedAt = firstSeenTimes instanceof Map
-      ? firstSeenTimes.get(urlPathKey(url))
+      ? firstSeenTimes.get(videoUrlIdentityKey(url))
       : null;
     if (!Number.isFinite(observedAt) || observedAt < 0) continue;
     const possibleOwners = videos
