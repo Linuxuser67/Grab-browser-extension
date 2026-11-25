@@ -895,7 +895,9 @@ async function restoreVideoFinds(tabId) {
           }
           for (const url of urls) {
             const key = videoUrlIdentityKey(url);
-            if (!sequences.has(key)) sequences.set(key, ++sniffSequence);
+            if (!sequences.has(key) && !sequences.has(urlPathKey(url))) {
+              sequences.set(key, ++sniffSequence);
+            }
           }
         }
         for (const [frameId, urls] of mediaByFrame) {
@@ -906,7 +908,9 @@ async function restoreVideoFinds(tabId) {
           }
           for (const url of urls) {
             const key = videoUrlIdentityKey(url);
-            if (!sequences.has(key)) sequences.set(key, ++sniffSequence);
+            if (!sequences.has(key) && !sequences.has(urlPathKey(url))) {
+              sequences.set(key, ++sniffSequence);
+            }
           }
         }
 

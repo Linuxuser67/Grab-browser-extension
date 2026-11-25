@@ -2264,7 +2264,13 @@ describe("detection wiring", () => {
 
     const restarted = makeChrome(shared);
     restarted.tabs.query = (q, cb) => cb([{ id: 9 }]);
-    loadBackground(restarted);
+    const restartedBg = loadBackground(restarted);
+    await restartedBg._restoreVideoFinds(9);
+    assert.equal(
+      restartedBg._videoFinds.get(9).frames.get(0)[0].title,
+      "Player-specific title",
+      "per-video title is restored before the next page report",
+    );
     await restarted._listeners["runtime.onMessage"](
       { type: "grab-videos-detected", videos: [{
         src: null, blob: true, blobUrl: "blob:https://example.com/uuid"
@@ -3359,12 +3365,6 @@ describe("detection wiring", () => {
 
     const restarted = makeChrome(shared);
     const bg = loadBackground(restarted);
-    await bg._restoreVideoFinds(9);
-    assert.equal(
-      bg._videoFinds.get(9).frames.get(0)[0].title,
-      "Player-specific title",
-      "per-video title survives worker restart",
-    );
     await restarted._listeners["runtime.onMessage"](
       { type: "grab-videos-detected", videos: [{ src: null, blob: true, blobUrl }] },
       { tab: { id: tabId, url: "https://example.com/" }, frameId: 9 },
