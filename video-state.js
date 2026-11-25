@@ -230,7 +230,7 @@ function removeFrameSniffsAtOrBefore(finds, frameId, sequence, preserveKeys = ne
     if (!Array.isArray(urls)) continue;
     const kept = [];
     for (const url of urls) {
-      const key = urlPathKey(url);
+      const key = videoUrlIdentityKey(url);
       const observedSequence = sequences && sequences.get(key);
       if (
         (Number.isSafeInteger(observedSequence) && observedSequence > cutoff) ||
@@ -262,8 +262,8 @@ function removeFrameSniffsAtOrBefore(finds, frameId, sequence, preserveKeys = ne
   if (kinds) {
     for (const key of removedKeys) {
       const stillPresent =
-        (finds.sniffedByFrame.get(frameId) || []).some((url) => urlPathKey(url) === key) ||
-        (finds.mediaByFrame.get(frameId) || []).some((url) => urlPathKey(url) === key);
+        (finds.sniffedByFrame.get(frameId) || []).some((url) => videoUrlIdentityKey(url) === key) ||
+        (finds.mediaByFrame.get(frameId) || []).some((url) => videoUrlIdentityKey(url) === key);
       if (!stillPresent) kinds.delete(key);
     }
     if (kinds.size === 0) finds.kindsByFrame.delete(frameId);
@@ -275,7 +275,7 @@ function hasManifestSniffedAfter(finds, frameId, sequence) {
   const urls = finds.sniffedByFrame.get(frameId) || [];
   const sequences = sniffSequenceMapForFrame(finds, frameId);
   if (!sequences) return false;
-  return urls.some((url) => (sequences.get(urlPathKey(url)) || 0) > sequence);
+  return urls.some((url) => (sequences.get(videoUrlIdentityKey(url)) || 0) > sequence);
 }
 
 function pruneExpiredRetiredFrames(finds, now = Date.now()) {
@@ -334,7 +334,7 @@ function recordRetiredFrame(
 function videoResourceIdentity(video) {
   if (!video || typeof video !== "object") return null;
   if (video.blob === true) return validBlobUrl(video.blobUrl);
-  if (typeof video.src === "string" && fitsGrabUrl(video.src)) return urlPathKey(video.src);
+  if (typeof video.src === "string" && fitsGrabUrl(video.src)) return videoUrlIdentityKey(video.src);
   return null;
 }
 
@@ -370,7 +370,7 @@ function preservedSniffsForOtherPlayers(finds, frameId, retired, currentVideos) 
       ).length === 1
     );
     if (owners.length === 1 && retained.includes(owners[0])) {
-      preserve.add(urlPathKey(url));
+      preserve.add(videoUrlIdentityKey(url));
     }
   }
   return preserve;
@@ -502,7 +502,7 @@ function snapshotVideoFinds(finds) {
     for (const url of urls || []) {
       if (remainingSniffed <= 0) break;
       if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
-      const key = urlPathKey(url);
+      const key = videoUrlIdentityKey(url);
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(url);
@@ -572,7 +572,7 @@ function snapshotVideoFinds(finds) {
         key.length > MAX_GRAB_URL_BYTES ||
         !Number.isSafeInteger(size) ||
         size < MIN_WHOLE_VIDEO_MEDIA_BYTES ||
-        !wholeUrls.some((url) => urlPathKey(url) === key)
+        !wholeUrls.some((url) => videoUrlIdentityKey(url) === key)
       ) continue;
       out.push([key, size]);
     }
@@ -700,7 +700,7 @@ function restoreUrls(candidates, limit, accept = () => true) {
   for (const url of candidates) {
     if (urls.length >= limit) break;
     if (typeof url !== "string" || !fitsGrabUrl(url) || !accept(url)) continue;
-    const identity = urlPathKey(url);
+    const identity = videoUrlIdentityKey(url);
     if (seen.has(identity)) continue;
     seen.add(identity);
     urls.push(url);
@@ -724,6 +724,21 @@ function restoreKeyedValues(candidates, limit, valid) {
     out.set(entry[0], entry[1]);
   }
   return out;
+}
+
+function rekeyRestoredVideoMetadata(map, urlsForFrame) {
+  if (!(map instanceof Map)) return;
+  for (const [frameId, values] of map) {
+    if (!(values instanceof Map)) continue;
+    const urls = urlsForFrame(frameId);
+    const migrated = new Map();
+    for (const [key, value] of values) {
+      const url = urls.find((candidate) =>
+        urlPathKey(candidate) === key || videoUrlIdentityKey(candidate) === key);
+      migrated.set(url ? videoUrlIdentityKey(url) : key, value);
+    }
+    map.set(frameId, migrated);
+  }
 }
 
 async function restoreVideoFinds(tabId) {
@@ -782,6 +797,8 @@ async function restoreVideoFinds(tabId) {
             if (identity && seen.has(identity)) continue;
             if (identity) seen.add(identity);
             const item = { src, blob: video.blob === true };
+            const title = boundedVideoTitle(video.title);
+            if (title) item.title = title;
             if (blobUrl) item.blobUrl = blobUrl;
             if (Number.isFinite(video.height) && video.height > 0) item.height = video.height;
             if (Number.isSafeInteger(video.elementId) && video.elementId > 0 && video.elementId <= 1_000_000_000) {
@@ -839,7 +856,9 @@ async function restoreVideoFinds(tabId) {
         });
 
         const mediaSizesByFrame = restoreFrameMap(saved, "mediaSizesFrames", (frameId, entries) => {
-          const wholeKeys = new Set((wholeMediaByFrame.get(frameId) || []).map(urlPathKey));
+          const wholeKeys = new Set((wholeMediaByFrame.get(frameId) || []).flatMap((url) => [
+            urlPathKey(url), videoUrlIdentityKey(url),
+          ]));
           const sizes = restoreKeyedValues(
             entries.slice(0, MAX_MEDIA_SNIFFS_PER_FRAME),
             MAX_MEDIA_SNIFFS_PER_FRAME,
@@ -875,8 +894,10 @@ async function restoreVideoFinds(tabId) {
             sniffSequencesByFrame.set(frameId, sequences);
           }
           for (const url of urls) {
-            const key = urlPathKey(url);
-            if (!sequences.has(key)) sequences.set(key, ++sniffSequence);
+            const key = videoUrlIdentityKey(url);
+            if (!sequences.has(key) && !sequences.has(urlPathKey(url))) {
+              sequences.set(key, ++sniffSequence);
+            }
           }
         }
         for (const [frameId, urls] of mediaByFrame) {
@@ -886,8 +907,10 @@ async function restoreVideoFinds(tabId) {
             sniffSequencesByFrame.set(frameId, sequences);
           }
           for (const url of urls) {
-            const key = urlPathKey(url);
-            if (!sequences.has(key)) sequences.set(key, ++sniffSequence);
+            const key = videoUrlIdentityKey(url);
+            if (!sequences.has(key) && !sequences.has(urlPathKey(url))) {
+              sequences.set(key, ++sniffSequence);
+            }
           }
         }
 
@@ -916,7 +939,7 @@ async function restoreVideoFinds(tabId) {
           const available = new Set([
             ...(sniffedByFrame.get(frameId) || []),
             ...(mediaByFrame.get(frameId) || []),
-          ].map(urlPathKey));
+          ].flatMap((url) => [urlPathKey(url), videoUrlIdentityKey(url)]));
           const times = restoreKeyedValues(
             entries.slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME),
             MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME,
@@ -970,6 +993,17 @@ async function restoreVideoFinds(tabId) {
             expired: false,
           });
         }
+
+        const urlsForFrame = (frameId) => [
+          ...(sniffedByFrame.get(frameId) || []),
+          ...(mediaByFrame.get(frameId) || []),
+          ...(wholeMediaByFrame.get(frameId) || []),
+        ];
+        rekeyRestoredVideoMetadata(kindsByFrame, urlsForFrame);
+        rekeyRestoredVideoMetadata(mediaSizesByFrame, urlsForFrame);
+        rekeyRestoredVideoMetadata(sniffSequencesByFrame, urlsForFrame);
+        rekeyRestoredVideoMetadata(sniffTimesByFrame, urlsForFrame);
+        rekeyRestoredVideoMetadata(sniffFirstSeenByFrame, urlsForFrame);
 
         const restored = {
           frames,
