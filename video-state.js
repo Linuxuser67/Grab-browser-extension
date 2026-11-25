@@ -8,6 +8,9 @@ const MAX_VIDEO_FRAMES = 32;
 const MAX_VIDEO_TITLE_LENGTH = 512;
 const MAX_MANIFESTS_PER_FRAME = 20;
 const MAX_MEDIA_SNIFFS_PER_FRAME = 8;
+const ADAPTIVE_QUERY_VARIANT_WINDOW_MS = 30_000;
+const ADAPTIVE_QUERY_VARIANT_LIMIT = 3;
+const ADAPTIVE_QUERY_PARAMETER_LIMIT = 16;
 const MIN_WHOLE_VIDEO_MEDIA_BYTES = 1024 * 1024;
 const RETIRED_FRAME_TTL_MS = 5 * 60 * 1000;
 const videoFinds = new Map();
@@ -28,6 +31,7 @@ function createVideoFinds() {
     sniffSequencesByFrame: new Map(),
     sniffTimesByFrame: new Map(),
     sniffFirstSeenByFrame: new Map(),
+    rotatingQueryParamsByFrame: new Map(),
     retiredFrames: new Map(),
     sniffSequence: 0,
     title: "",
@@ -38,32 +42,44 @@ function createVideoFinds() {
 /// One budget covers all sources: a frame never occupies two slots.
 function trackedFrameIds(f) {
   const ids = new Set();
-  for (const id of f.frames.keys()) ids.add(id);
-  for (const id of f.sniffedByFrame.keys()) ids.add(id);
-  for (const id of f.mediaByFrame.keys()) ids.add(id);
-  for (const id of f.wholeMediaByFrame.keys()) ids.add(id);
-  for (const id of f.mediaSizesByFrame.keys()) ids.add(id);
-  for (const id of f.kindsByFrame.keys()) ids.add(id);
-  for (const id of f.sniffSequencesByFrame.keys()) ids.add(id);
-  for (const id of f.sniffTimesByFrame.keys()) ids.add(id);
-  for (const id of f.sniffFirstSeenByFrame.keys()) ids.add(id);
-  for (const id of f.retiredFrames.keys()) ids.add(id);
+  const maps = [
+    f.frames,
+    f.sniffedByFrame,
+    f.mediaByFrame,
+    f.wholeMediaByFrame,
+    f.mediaSizesByFrame,
+    f.kindsByFrame,
+    f.sniffSequencesByFrame,
+    f.sniffTimesByFrame,
+    f.sniffFirstSeenByFrame,
+    f.rotatingQueryParamsByFrame,
+    f.retiredFrames,
+  ];
+  for (const map of maps) {
+    if (!(map instanceof Map)) continue;
+    for (const id of map.keys()) ids.add(id);
+  }
   return ids;
 }
 
 /// Drop every trace of a frame. Chrome's frame ids grow with the frame, so
 /// the smallest id is the oldest one.
 function dropFrame(f, frameId) {
-  f.frames.delete(frameId);
-  f.sniffedByFrame.delete(frameId);
-  f.mediaByFrame.delete(frameId);
-  f.wholeMediaByFrame.delete(frameId);
-  f.mediaSizesByFrame.delete(frameId);
-  f.kindsByFrame.delete(frameId);
-  f.sniffSequencesByFrame.delete(frameId);
-  f.sniffTimesByFrame.delete(frameId);
-  f.sniffFirstSeenByFrame.delete(frameId);
-  f.retiredFrames.delete(frameId);
+  for (const map of [
+    f.frames,
+    f.sniffedByFrame,
+    f.mediaByFrame,
+    f.wholeMediaByFrame,
+    f.mediaSizesByFrame,
+    f.kindsByFrame,
+    f.sniffSequencesByFrame,
+    f.sniffTimesByFrame,
+    f.sniffFirstSeenByFrame,
+    f.rotatingQueryParamsByFrame,
+    f.retiredFrames,
+  ]) {
+    if (map instanceof Map) map.delete(frameId);
+  }
 }
 
 /// Evict the oldest tracked frame to free a slot. The top frame is kept
@@ -211,6 +227,7 @@ function nextSniffSequence(finds) {
 }
 
 function removeFrameSniffsAtOrBefore(finds, frameId, sequence, preserveKeys = new Set()) {
+  pruneExpiredAdaptiveQueryMarkers(finds, frameId);
   const cutoff = Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : 0;
   const sequences = sniffSequenceMapForFrame(finds, frameId);
   const times = sniffTimeMapForFrame(finds, frameId);
@@ -230,7 +247,7 @@ function removeFrameSniffsAtOrBefore(finds, frameId, sequence, preserveKeys = ne
     if (!Array.isArray(urls)) continue;
     const kept = [];
     for (const url of urls) {
-      const key = videoUrlIdentityKey(url);
+      const key = videoUrlIdentityKey(url, finds, frameId);
       const observedSequence = sequences && sequences.get(key);
       if (
         (Number.isSafeInteger(observedSequence) && observedSequence > cutoff) ||
@@ -262,8 +279,8 @@ function removeFrameSniffsAtOrBefore(finds, frameId, sequence, preserveKeys = ne
   if (kinds) {
     for (const key of removedKeys) {
       const stillPresent =
-        (finds.sniffedByFrame.get(frameId) || []).some((url) => videoUrlIdentityKey(url) === key) ||
-        (finds.mediaByFrame.get(frameId) || []).some((url) => videoUrlIdentityKey(url) === key);
+        (finds.sniffedByFrame.get(frameId) || []).some((url) => videoUrlIdentityKey(url, finds, frameId) === key) ||
+        (finds.mediaByFrame.get(frameId) || []).some((url) => videoUrlIdentityKey(url, finds, frameId) === key);
       if (!stillPresent) kinds.delete(key);
     }
     if (kinds.size === 0) finds.kindsByFrame.delete(frameId);
@@ -275,7 +292,7 @@ function hasManifestSniffedAfter(finds, frameId, sequence) {
   const urls = finds.sniffedByFrame.get(frameId) || [];
   const sequences = sniffSequenceMapForFrame(finds, frameId);
   if (!sequences) return false;
-  return urls.some((url) => (sequences.get(videoUrlIdentityKey(url)) || 0) > sequence);
+  return urls.some((url) => (sequences.get(videoUrlIdentityKey(url, finds, frameId)) || 0) > sequence);
 }
 
 function pruneExpiredRetiredFrames(finds, now = Date.now()) {
@@ -339,6 +356,7 @@ function videoResourceIdentity(video) {
 }
 
 function preservedSniffsForOtherPlayers(finds, frameId, retired, currentVideos) {
+  pruneExpiredAdaptiveQueryMarkers(finds, frameId);
   const previousVideos = Array.isArray(retired.previousVideos) ? retired.previousVideos : [];
   if (previousVideos.length < 2 || !Array.isArray(currentVideos)) return new Set();
 
@@ -367,10 +385,12 @@ function preservedSniffsForOtherPlayers(finds, frameId, retired, currentVideos) 
         [url],
         sniffTimes,
         firstSeenTimes,
+        finds,
+        frameId,
       ).length === 1
     );
     if (owners.length === 1 && retained.includes(owners[0])) {
-      preserve.add(videoUrlIdentityKey(url));
+      preserve.add(videoUrlIdentityKey(url, finds, frameId));
     }
   }
   return preserve;
@@ -502,7 +522,7 @@ function snapshotVideoFindsV2(finds) {
     for (const url of urls || []) {
       if (remainingSniffed <= 0) break;
       if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
-      const key = videoUrlIdentityKey(url);
+      const key = videoUrlIdentityKey(url, finds, frameId);
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(url);
@@ -572,7 +592,7 @@ function snapshotVideoFindsV2(finds) {
         key.length > MAX_GRAB_URL_BYTES ||
         !Number.isSafeInteger(size) ||
         size < MIN_WHOLE_VIDEO_MEDIA_BYTES ||
-        !wholeUrls.some((url) => videoUrlIdentityKey(url) === key)
+        !wholeUrls.some((url) => videoUrlIdentityKey(url, finds, frameId) === key)
       ) continue;
       out.push([key, size]);
     }
@@ -681,14 +701,14 @@ const MAX_VIDEO_STATE_SNAPSHOT_BYTES = 256 * 1024;
 /// Compact all sniff-related maps into a single URL-keyed observation tuple:
 /// [url, flags, kind, sequence, observedAt, firstSeenAt, wholeMediaSize].
 /// flags: 1 = manifest sniff, 2 = media sniff, 4 = whole-file media candidate.
-function compactVideoObservations(snapshot) {
+function compactVideoObservations(snapshot, finds) {
   const byFrame = new Map();
   const ensure = (frameId, url) => {
     if (!Number.isInteger(frameId) || frameId < 0 ||
         typeof url !== "string" || !fitsGrabUrl(url)) return null;
     let records = byFrame.get(frameId);
     if (!records) byFrame.set(frameId, records = new Map());
-    const key = videoUrlIdentityKey(url);
+    const key = videoUrlIdentityKey(url, finds, frameId);
     let record = records.get(key);
     if (!record) {
       record = [url, 0, null, null, null, null, null];
@@ -761,6 +781,10 @@ function videoStateSnapshotByteLength(snapshot) {
 /// long as possible; old child-frame observations go first.
 function fitVideoStateSnapshot(snapshot) {
   let size = videoStateSnapshotByteLength(snapshot);
+  if (size > MAX_VIDEO_STATE_SNAPSHOT_BYTES && snapshot.rotatingQueryParams.length > 0) {
+    snapshot.rotatingQueryParams = [];
+    size = videoStateSnapshotByteLength(snapshot);
+  }
   const overageFraction = () => Math.max(
     1,
     Math.ceil(Math.max(1, size - MAX_VIDEO_STATE_SNAPSHOT_BYTES) /
@@ -870,14 +894,106 @@ function fitVideoStateSnapshot(snapshot) {
   return snapshot;
 }
 
+function snapshotRotatingQueryParams(finds) {
+  const entries = [];
+  const now = Date.now();
+  for (const [frameId, paths] of finds.rotatingQueryParamsByFrame || []) {
+    if (entries.length >= MAX_VIDEO_FRAMES) break;
+    const pathEntries = [];
+    for (const [pathKey, parameters] of paths || []) {
+      if (pathEntries.length >= MAX_MANIFESTS_PER_FRAME) break;
+      if (
+        typeof pathKey !== "string" ||
+        pathKey.length > MAX_GRAB_URL_BYTES ||
+        !(parameters instanceof Map)
+      ) continue;
+      const active = [];
+      for (const [name, expiresAt] of parameters) {
+        if (
+          typeof name === "string" &&
+          name.length > 0 &&
+          name.length <= 128 &&
+          Number.isFinite(expiresAt) &&
+          expiresAt > now
+        ) active.push([name, expiresAt]);
+      }
+      if (active.length) {
+        pathEntries.push([pathKey, active.slice(0, ADAPTIVE_QUERY_PARAMETER_LIMIT)]);
+      }
+    }
+    if (pathEntries.length) entries.push([frameId, pathEntries]);
+  }
+  return entries;
+}
+
+function restoreRotatingQueryParams(entries) {
+  const restored = new Map();
+  const now = Date.now();
+  for (const pair of Array.isArray(entries) ? entries : []) {
+    if (
+      !Array.isArray(pair) ||
+      pair.length !== 2 ||
+      !Number.isInteger(pair[0]) ||
+      pair[0] < 0 ||
+      restored.size >= MAX_VIDEO_FRAMES ||
+      !Array.isArray(pair[1])
+    ) continue;
+    const paths = new Map();
+    for (const pathEntry of pair[1].slice(0, MAX_MANIFESTS_PER_FRAME)) {
+      if (
+        !Array.isArray(pathEntry) ||
+        pathEntry.length !== 2 ||
+        typeof pathEntry[0] !== "string" ||
+        !Array.isArray(pathEntry[1])
+      ) continue;
+      let parsed;
+      try {
+        parsed = new URL(pathEntry[0]);
+      } catch {
+        continue;
+      }
+      const pathKey = parsed.origin + parsed.pathname;
+      if (
+        (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+        parsed.search ||
+        parsed.hash ||
+        parsed.username ||
+        parsed.password ||
+        pathKey !== pathEntry[0]
+      ) continue;
+      const parameters = new Map();
+      for (const entry of pathEntry[1].slice(0, ADAPTIVE_QUERY_PARAMETER_LIMIT)) {
+        if (!Array.isArray(entry) || entry.length !== 2) continue;
+        const [name, expiresAt] = entry;
+        if (
+          typeof name !== "string" ||
+          name.length === 0 ||
+          name.length > 128 ||
+          !Number.isFinite(expiresAt) ||
+          expiresAt <= now ||
+          expiresAt > now + ADAPTIVE_QUERY_VARIANT_WINDOW_MS * 2
+        ) continue;
+        parameters.set(name, expiresAt);
+      }
+      if (parameters.size) paths.set(pathKey, parameters);
+    }
+    if (paths.size) restored.set(pair[0], paths);
+  }
+  return restored;
+}
+
 function snapshotVideoFinds(finds) {
+  for (const frameId of trackedFrameIds(finds)) {
+    pruneExpiredAdaptiveQueryMarkers(finds, frameId);
+  }
   const legacy = snapshotVideoFindsV2(finds);
   const snapshot = {
     version: 3,
     frames: legacy.frames,
-    observations: compactVideoObservations(legacy),
+    observations: compactVideoObservations(legacy, finds),
     sniffSequence: legacy.sniffSequence,
     retiredFrames: legacy.retiredFrames,
+    rotatingQueryParams: snapshotRotatingQueryParams(finds),
     title: legacy.title,
   };
   return fitVideoStateSnapshot(snapshot);
@@ -890,6 +1006,7 @@ function expandCompactVideoSnapshot(saved) {
   const expanded = {
     ...saved,
     version: 2,
+    rotatingQueryParamsByFrame: restoreRotatingQueryParams(saved.rotatingQueryParams),
     sniffedFrames: [],
     mediaFrames: [],
     wholeMediaFrames: [],
@@ -939,7 +1056,7 @@ function expandCompactVideoSnapshot(saved) {
         !Number.isInteger(entry[1]) || entry[1] <= 0 || entry[1] > 7
       ) continue;
       const [url, flags, kind, sequence, observedAt, firstSeenAt, size] = entry;
-      const key = videoUrlIdentityKey(url);
+      const key = videoUrlIdentityKey(url, expanded, frameId);
       if (seenUrls.has(key)) continue;
       seenUrls.add(key);
 
@@ -1034,13 +1151,13 @@ function restoreFrameMap(saved, key, parse) {
 }
 
 /// Restores a stored URL list, keeping valid unique paths up to `limit`.
-function restoreUrls(candidates, limit, accept = () => true) {
+function restoreUrls(candidates, limit, accept = () => true, finds = null, frameId = null) {
   const urls = [];
   const seen = new Set();
   for (const url of candidates) {
     if (urls.length >= limit) break;
     if (typeof url !== "string" || !fitsGrabUrl(url) || !accept(url)) continue;
-    const identity = videoUrlIdentityKey(url);
+    const identity = videoUrlIdentityKey(url, finds, frameId);
     if (seen.has(identity)) continue;
     seen.add(identity);
     urls.push(url);
@@ -1066,7 +1183,7 @@ function restoreKeyedValues(candidates, limit, valid) {
   return out;
 }
 
-function rekeyRestoredVideoMetadata(map, urlsForFrame) {
+function rekeyRestoredVideoMetadata(map, urlsForFrame, finds) {
   if (!(map instanceof Map)) return;
   for (const [frameId, values] of map) {
     if (!(values instanceof Map)) continue;
@@ -1074,8 +1191,8 @@ function rekeyRestoredVideoMetadata(map, urlsForFrame) {
     const migrated = new Map();
     for (const [key, value] of values) {
       const url = urls.find((candidate) =>
-        urlPathKey(candidate) === key || videoUrlIdentityKey(candidate) === key);
-      migrated.set(url ? videoUrlIdentityKey(url) : key, value);
+        urlPathKey(candidate) === key || videoUrlIdentityKey(candidate, finds, frameId) === key);
+      migrated.set(url ? videoUrlIdentityKey(url, finds, frameId) : key, value);
     }
     map.set(frameId, migrated);
   }
@@ -1160,7 +1277,7 @@ async function restoreVideoFinds(tabId) {
 
         let remainingSniffed = MAX_VIDEO_ITEMS;
         const sniffedByFrame = restoreFrameMap(saved, "sniffedFrames", (frameId, entries) => {
-          const urls = restoreUrls(entries.slice(0, MAX_VIDEO_ITEMS), remainingSniffed);
+          const urls = restoreUrls(entries.slice(0, MAX_VIDEO_ITEMS), remainingSniffed, undefined, saved, frameId);
           remainingSniffed -= urls.length;
           return urls.length ? urls : null;
         });
@@ -1178,7 +1295,7 @@ async function restoreVideoFinds(tabId) {
 
         let remainingMedia = MAX_VIDEO_FRAMES * MAX_MEDIA_SNIFFS_PER_FRAME;
         const mediaByFrame = restoreFrameMap(saved, "mediaFrames", (frameId, entries) => {
-          const urls = restoreUrls(entries.slice(0, MAX_MEDIA_SNIFFS_PER_FRAME), remainingMedia);
+          const urls = restoreUrls(entries.slice(0, MAX_MEDIA_SNIFFS_PER_FRAME), remainingMedia, undefined, saved, frameId);
           remainingMedia -= urls.length;
           return urls.length ? urls : null;
         });
@@ -1193,6 +1310,8 @@ async function restoreVideoFinds(tabId) {
               available.has(url) &&
               classifyStream(url, "") === "media" &&
               !isSegmentLikeVideoUrl(url),
+            saved,
+            frameId,
           );
           remainingWholeMedia -= urls.length;
           return urls.length ? urls : null;
@@ -1200,7 +1319,7 @@ async function restoreVideoFinds(tabId) {
 
         const mediaSizesByFrame = restoreFrameMap(saved, "mediaSizesFrames", (frameId, entries) => {
           const wholeKeys = new Set((wholeMediaByFrame.get(frameId) || []).flatMap((url) => [
-            urlPathKey(url), videoUrlIdentityKey(url),
+            urlPathKey(url), videoUrlIdentityKey(url, saved, frameId),
           ]));
           const sizes = restoreKeyedValues(
             entries.slice(0, MAX_MEDIA_SNIFFS_PER_FRAME),
@@ -1237,7 +1356,7 @@ async function restoreVideoFinds(tabId) {
             sniffSequencesByFrame.set(frameId, sequences);
           }
           for (const url of urls) {
-            const key = videoUrlIdentityKey(url);
+            const key = videoUrlIdentityKey(url, saved, frameId);
             if (!sequences.has(key) && !sequences.has(urlPathKey(url))) {
               sequences.set(key, ++sniffSequence);
             }
@@ -1250,7 +1369,7 @@ async function restoreVideoFinds(tabId) {
             sniffSequencesByFrame.set(frameId, sequences);
           }
           for (const url of urls) {
-            const key = videoUrlIdentityKey(url);
+            const key = videoUrlIdentityKey(url, saved, frameId);
             if (!sequences.has(key) && !sequences.has(urlPathKey(url))) {
               sequences.set(key, ++sniffSequence);
             }
@@ -1282,7 +1401,10 @@ async function restoreVideoFinds(tabId) {
           const available = new Set([
             ...(sniffedByFrame.get(frameId) || []),
             ...(mediaByFrame.get(frameId) || []),
-          ].flatMap((url) => [urlPathKey(url), videoUrlIdentityKey(url)]));
+          ].flatMap((url) => [
+            urlPathKey(url),
+            videoUrlIdentityKey(url, saved, frameId),
+          ]));
           const times = restoreKeyedValues(
             entries.slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME),
             MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME,
@@ -1342,11 +1464,11 @@ async function restoreVideoFinds(tabId) {
           ...(mediaByFrame.get(frameId) || []),
           ...(wholeMediaByFrame.get(frameId) || []),
         ];
-        rekeyRestoredVideoMetadata(kindsByFrame, urlsForFrame);
-        rekeyRestoredVideoMetadata(mediaSizesByFrame, urlsForFrame);
-        rekeyRestoredVideoMetadata(sniffSequencesByFrame, urlsForFrame);
-        rekeyRestoredVideoMetadata(sniffTimesByFrame, urlsForFrame);
-        rekeyRestoredVideoMetadata(sniffFirstSeenByFrame, urlsForFrame);
+        rekeyRestoredVideoMetadata(kindsByFrame, urlsForFrame, saved);
+        rekeyRestoredVideoMetadata(mediaSizesByFrame, urlsForFrame, saved);
+        rekeyRestoredVideoMetadata(sniffSequencesByFrame, urlsForFrame, saved);
+        rekeyRestoredVideoMetadata(sniffTimesByFrame, urlsForFrame, saved);
+        rekeyRestoredVideoMetadata(sniffFirstSeenByFrame, urlsForFrame, saved);
 
         const restored = {
           frames,
@@ -1358,6 +1480,9 @@ async function restoreVideoFinds(tabId) {
           sniffSequencesByFrame,
           sniffTimesByFrame,
           sniffFirstSeenByFrame,
+          rotatingQueryParamsByFrame: saved.rotatingQueryParamsByFrame instanceof Map
+            ? saved.rotatingQueryParamsByFrame
+            : new Map(),
           retiredFrames,
           sniffSequence,
           title: typeof saved.title === "string" ? saved.title.slice(0, MAX_VIDEO_TITLE_LENGTH) : "",

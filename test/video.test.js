@@ -439,6 +439,16 @@ describe("mergeVideoFinds", () => {
     ]);
   });
 
+  test("preserves e and ts stream identifiers before adaptive rotation is observed", () => {
+    const merged = bg.mergeVideoFinds([], [
+      "https://site.example/hls/playlist.m3u8?e=episode-one",
+      "https://site.example/hls/playlist.m3u8?e=episode-two",
+      "https://site.example/hls/playlist.m3u8?ts=100",
+      "https://site.example/hls/playlist.m3u8?ts=200",
+    ]);
+    assert.equal(merged.length, 4);
+  });
+
   test("rotating auth query parameters still collapse manifests", () => {
     const merged = bg.mergeVideoFinds([], [
       "https://site.example/hls/playlist.m3u8?id=alpha&token=old",
@@ -1408,7 +1418,7 @@ describe("cross-frame video URL deduplication", () => {
     assert.equal(badges.at(-1)[1].text, "1");
   });
 
-  test("rotating non-auth query parameters on the same manifest deduplicate across frames", async () => {
+  test("preserves non-auth query identities for the same manifest across frames", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);
     const tabId = 175;
@@ -1446,7 +1456,7 @@ describe("cross-frame video URL deduplication", () => {
 
     assert.deepEqual(
       await bg.resolvedVideoUrls(tabId),
-      [observations[1].url],
+      observations.map((observation) => observation.url),
     );
   });
 
@@ -4325,6 +4335,156 @@ describe("HLS master playlist filtering", () => {
       ),
       candidates,
     );
+  });
+
+  test("coalesces an unlisted rotating query parameter before the manifest FIFO fills", async () => {
+    const tabId = 211;
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const base = "https://cdn.example.com/live/master.m3u8";
+    const start = Date.now();
+
+    for (let value = 1; value <= 5; value += 1) {
+      const url = `${base}?playSessionId=${value}`;
+      await chrome._listeners["webRequest.onResponseStarted"]({
+        tabId,
+        frameId: 0,
+        url,
+        timeStamp: start + value * 1000,
+        responseHeaders: [
+          { name: "content-type", value: "application/vnd.apple.mpegurl" },
+        ],
+      });
+      const observed = bg._videoFinds.get(tabId).sniffedByFrame.get(0) || [];
+      assert.equal(observed.length, value < 4 ? value : 1);
+      if (value >= 4) assert.equal(observed[0], url);
+    }
+    assert.deepEqual(
+      await bg.resolvedVideoUrlsForFrame(tabId, 0),
+      [`${base}?playSessionId=5`],
+    );
+  });
+
+  test("adaptive rotation ignores only the volatile parameter and keeps episode IDs separate", async () => {
+    const tabId = 212;
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const base = "https://cdn.example.com/live/master.m3u8";
+    const start = Date.now();
+
+    for (const episode of ["alpha", "beta"]) {
+      for (let value = 1; value <= 4; value += 1) {
+        const url = `${base}?episode=${episode}&rnd=${value}`;
+        await chrome._listeners["webRequest.onResponseStarted"]({
+          tabId,
+          frameId: 0,
+          url,
+          timeStamp: start + (episode === "beta" ? 5_000 : 0) + value * 500,
+          responseHeaders: [
+            { name: "content-type", value: "application/vnd.apple.mpegurl" },
+          ],
+        });
+      }
+    }
+
+    const findings = bg._videoFinds.get(tabId);
+    const observed = findings.sniffedByFrame.get(0) || [];
+    assert.equal(observed.length, 2);
+    assert.deepEqual(
+      observed.map((url) => new URL(url).searchParams.get("episode")).sort(),
+      ["alpha", "beta"],
+    );
+    assert.deepEqual(await bg.resolvedVideoUrlsForFrame(tabId, 0), observed);
+
+    const stored = await chrome.storage.session.get("videoFinds:v2:" + tabId);
+    assert.equal(stored["videoFinds:v2:" + tabId].rotatingQueryParams.length, 1);
+
+    const restartedChrome = makeChrome({ session: chrome._session });
+    const restarted = loadBackground(restartedChrome);
+    await restarted._restoreVideoFinds(tabId);
+    assert.deepEqual(await restarted.resolvedVideoUrlsForFrame(tabId, 0), observed);
+    const restoredFinds = restarted._videoFinds.get(tabId);
+    for (const url of observed) {
+      const key = restarted.videoUrlIdentityKey(url, restoredFinds, 0);
+      assert.equal(restoredFinds.kindsByFrame.get(0).get(key), "manifest");
+      assert.ok(restoredFinds.sniffTimesByFrame.get(0).has(key));
+      assert.ok(restoredFinds.sniffFirstSeenByFrame.get(0).has(key));
+    }
+  });
+
+  test("expires adaptive identities and restores full query keys after an idle window", async () => {
+    const originalNow = Date.now;
+    let now = 1_800_000_000_000;
+    Date.now = () => now;
+    try {
+      const tabId = 213;
+      const chrome = makeChrome();
+      const bg = loadBackground(chrome);
+      const base = "https://cdn.example.com/live/master.m3u8";
+      const observe = async (value) => {
+        now += 1_000;
+        await chrome._listeners["webRequest.onResponseStarted"]({
+          tabId,
+          frameId: 0,
+          url: `${base}?playSessionId=${value}`,
+          timeStamp: now,
+          responseHeaders: [
+            { name: "content-type", value: "application/vnd.apple.mpegurl" },
+          ],
+        });
+      };
+
+      for (let value = 1; value <= 4; value += 1) await observe(value);
+      let findings = bg._videoFinds.get(tabId);
+      assert.equal(findings.sniffedByFrame.get(0).length, 1);
+      assert.ok(findings.rotatingQueryParamsByFrame.get(0).has(base));
+
+      now += 31_000;
+      await observe(5);
+      findings = bg._videoFinds.get(tabId);
+      assert.equal(findings.rotatingQueryParamsByFrame.has(0), false);
+      assert.deepEqual(
+        findings.sniffedByFrame.get(0),
+        [
+          `${base}?playSessionId=4`,
+          `${base}?playSessionId=5`,
+        ],
+      );
+      assert.deepEqual(
+        await bg.resolvedVideoUrlsForFrame(tabId, 0),
+        findings.sniffedByFrame.get(0),
+      );
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("query values outside the adaptive window remain separate", async () => {
+    const originalNow = Date.now;
+    let now = 1_800_000_000_000;
+    Date.now = () => now;
+    try {
+      const tabId = 214;
+      const chrome = makeChrome();
+      const bg = loadBackground(chrome);
+      const base = "https://cdn.example.com/live/master.m3u8";
+
+      for (let value = 1; value <= 4; value += 1) {
+        now += 20_000;
+        await chrome._listeners["webRequest.onResponseStarted"]({
+          tabId,
+          frameId: 0,
+          url: `${base}?t=${value}`,
+          timeStamp: now,
+          responseHeaders: [
+            { name: "content-type", value: "application/vnd.apple.mpegurl" },
+          ],
+        });
+      }
+      assert.equal(bg._videoFinds.get(tabId).sniffedByFrame.get(0).length, 4);
+    } finally {
+      Date.now = originalNow;
+    }
   });
 
   test("HLS child filtering preserves separate query-identified streams", async () => {
