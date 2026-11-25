@@ -1209,7 +1209,7 @@ function videoUrlCandidateObservedAt(finds, url, frameId = null) {
       ? finds.sniffTimesByFrame.get(observedFrameId)
       : null;
     const observedAt = times instanceof Map
-      ? times.get(videoUrlIdentityKey(url, finds, frameId))
+      ? times.get(videoUrlIdentityKey(url, finds, observedFrameId))
       : null;
     if (Number.isFinite(observedAt)) newest = Math.max(newest, observedAt);
   }
@@ -1239,7 +1239,7 @@ function queryParameterSignatures(url) {
       let name;
       try { name = decodeURIComponent(rawName.replace(/\+/g, " ")); }
       catch { continue; }
-      if (!name || AUTH_QUERY_PARAMETER_NAME.test(name)) continue;
+      if (!name || name.length > 128 || AUTH_QUERY_PARAMETER_NAME.test(name)) continue;
       const rawValue = separator < 0 ? "" : parameter.slice(separator + 1);
       let values = signatures.get(name);
       if (!values) signatures.set(name, values = []);
@@ -1294,7 +1294,11 @@ function observeAdaptiveQueryVariants(finds, frameId, url, observedAt) {
       if (other.origin + other.pathname !== pathKey) continue;
       const candidateSignature = queryParameterSignatures(candidate).get(name);
       if (candidateSignature === undefined) continue;
-      const seenAt = times instanceof Map ? times.get(videoUrlIdentityKey(candidate)) : null;
+      const seenAt = times instanceof Map
+        ? times.get(videoUrlIdentityKey(candidate)) ??
+          times.get(videoUrlIdentityKey(candidate, finds, frameId)) ??
+          times.get(videoUrlIdentityKey(candidate, null, null, name))
+        : null;
       if (
         !Number.isFinite(seenAt) ||
         seenAt < eventTime - ADAPTIVE_QUERY_VARIANT_WINDOW_MS ||
@@ -1316,7 +1320,7 @@ function observeAdaptiveQueryVariants(finds, frameId, url, observedAt) {
     if (!earliest) break;
     rotating.delete(earliest[0]);
   }
-  while (paths.size > ADAPTIVE_QUERY_PATH_LIMIT) {
+  while (paths.size > MAX_MANIFESTS_PER_FRAME) {
     const earliest = [...paths].sort((a, b) =>
       Math.max(0, ...a[1].values()) - Math.max(0, ...b[1].values()))[0];
     if (!earliest) break;
@@ -1382,7 +1386,7 @@ function collapseAdaptiveQueryPath(finds, frameId, pathKey) {
 
 /// Build a stable request identity while ignoring recognized auth parameters
 /// and parameters observed rotating for this frame/path.
-function videoUrlIdentityKey(url, finds = null, frameId = null) {
+function videoUrlIdentityKey(url, finds = null, frameId = null, ignoredParameterName = null) {
   try {
     const parsed = new URL(url);
     const pathKey = parsed.origin + parsed.pathname;
@@ -1406,7 +1410,7 @@ function videoUrlIdentityKey(url, finds = null, frameId = null) {
         } catch {
           return true;
         }
-        return !AUTH_QUERY_PARAMETER_NAME.test(name) && !rotatingNames.has(name);
+        return name !== ignoredParameterName && !AUTH_QUERY_PARAMETER_NAME.test(name) && !rotatingNames.has(name);
       })
       .join("&");
     return pathKey +
