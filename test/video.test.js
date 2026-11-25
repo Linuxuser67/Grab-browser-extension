@@ -1320,7 +1320,7 @@ describe("per-video menu candidates", () => {
     const byteLength = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
     assert.equal(snapshot.version, 3);
     assert.ok(byteLength <= bg.MAX_VIDEO_STATE_SNAPSHOT_BYTES,
-      \`snapshot is bounded: \${byteLength} bytes\`);
+      "snapshot is bounded: " + byteLength + " bytes");
     for (const [, records] of snapshot.observations) {
       const keys = records.map(([url]) => bg.videoUrlIdentityKey(url));
       assert.equal(new Set(keys).size, keys.length, "each URL identity occurs once per frame");
