@@ -138,7 +138,7 @@ test("a failed sync save is reported and does not reject the change listener", a
   context.bindSettingsForm(doc);
   await tick();
 
-  const intercept = elements.get("intercept");
+  const intercept = elements.get("interceptDownloads");
   intercept.checked = true;
   const result = await intercept.listeners.get("change")();
 
