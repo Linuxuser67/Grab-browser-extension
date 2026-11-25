@@ -45,7 +45,7 @@ test("Chromium and Firefox background scripts use the same load order", () => {
 describe("HLS inspection limiting", () => {
   test("uses a 24-request burst and refills at four requests per second", () => {
     const bg = loadBackground(makeChrome());
-    const start = 1_000_000;
+    const start = Date.now() + 60_000;
 
     for (let i = 0; i < 24; i += 1) {
       assert.equal(bg._takeHlsInspectionToken(start), true, `burst token ${i + 1}`);
