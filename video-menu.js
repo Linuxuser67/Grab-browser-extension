@@ -653,7 +653,8 @@ function hlsPlaylistNameHints(urls) {
   for (const [folder, masterVariants] of mastersByFolder) {
     // Multiple stream IDs in one directory make the folder hint ambiguous.
     if (masterVariants.size !== 1) continue;
-    const [queryIdentity] = masterVariants.keys();
+    const [[queryIdentity, masterIdentities]] = [...masterVariants];
+    if (masterIdentities.size !== 1) continue;
     for (const child of (childrenByFolder.get(folder)?.get(queryIdentity) || [])) {
       hintedChildren.add(child);
     }

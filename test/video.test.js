@@ -4309,6 +4309,24 @@ describe("HLS master playlist filtering", () => {
     );
   });
 
+  test("multiple master files still make same-directory hints ambiguous", async () => {
+    const bg = loadBackground(makeChrome());
+    const master = "https://cdn.example.com/live/master.m3u8?id=alpha";
+    const alternateMaster = "https://cdn.example.com/live/index.m3u8?id=alpha";
+    const child = "https://cdn.example.com/live/chunklist.m3u8?id=alpha";
+    const candidates = [master, alternateMaster, child];
+
+    assert.deepEqual(
+      await bg.preferMasterPlaylists(
+        candidates,
+        "https://page.example/watch",
+        candidates,
+        async () => null,
+      ),
+      candidates,
+    );
+  });
+
   test("HLS child filtering preserves separate query-identified streams", async () => {
     const bg = loadBackground(makeChrome());
     const master = "https://cdn.example.com/live/master.m3u8?id=alpha";
