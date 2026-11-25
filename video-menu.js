@@ -1136,6 +1136,7 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) 
   const finds = videoFinds.get(tabId);
   if (!finds) return null;
   if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
+  pruneExpiredAdaptiveQueryMarkers(finds, frameId);
   if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return null;
   const videos = finds.frames.get(frameId) || [];
   const video = targetVideo || (videos.length === 1 ? videos[0] : null);
@@ -1278,7 +1279,7 @@ function observeAdaptiveQueryVariants(finds, frameId, url, observedAt) {
   const times = finds.sniffTimesByFrame instanceof Map
     ? finds.sniffTimesByFrame.get(frameId)
     : null;
-  let promoted = false;
+  const promotedNames = [];
 
   for (const [name, signature] of signatures) {
     const activeUntil = rotating.get(name) || 0;
@@ -1308,7 +1309,7 @@ function observeAdaptiveQueryVariants(finds, frameId, url, observedAt) {
     }
     if (variants.size > ADAPTIVE_QUERY_VARIANT_LIMIT) {
       rotating.set(name, now + ADAPTIVE_QUERY_VARIANT_WINDOW_MS);
-      promoted = true;
+      promotedNames.push(name);
     }
   }
 
@@ -1328,11 +1329,12 @@ function observeAdaptiveQueryVariants(finds, frameId, url, observedAt) {
   }
   if (rotating.size === 0) paths.delete(pathKey);
   if (paths.size === 0) finds.rotatingQueryParamsByFrame.delete(frameId);
-  return promoted;
+  return promotedNames;
 }
 
-/// Re-key state for one path when a parameter becomes volatile.
-function collapseAdaptiveQueryPath(finds, frameId, pathKey) {
+/// Re-key one frame's URL lists and metadata from a supplied previous identity
+/// to the identity currently selected by videoUrlIdentityKey.
+function rekeyAdaptiveQueryPath(finds, frameId, pathKey, oldIdentityForUrl) {
   const listMaps = [finds.sniffedByFrame, finds.mediaByFrame, finds.wholeMediaByFrame];
   const urls = [];
   for (const listMap of listMaps) {
@@ -1342,7 +1344,7 @@ function collapseAdaptiveQueryPath(finds, frameId, pathKey) {
   }
   if (urls.length < 2) return false;
   const keyChanges = new Map(urls.map((url) => [
-    videoUrlIdentityKey(url),
+    oldIdentityForUrl(url),
     videoUrlIdentityKey(url, finds, frameId),
   ]));
   if (![...keyChanges].some(([oldKey, newKey]) => oldKey !== newKey)) return false;
@@ -1371,7 +1373,7 @@ function collapseAdaptiveQueryPath(finds, frameId, pathKey) {
     if (!Array.isArray(frameUrls)) continue;
     const selected = new Map();
     for (const url of frameUrls) {
-      const oldKey = videoUrlIdentityKey(url);
+      const oldKey = oldIdentityForUrl(url);
       const key = keyChanges.get(oldKey) || oldKey;
       const observedAt = oldTimes.get(oldKey) || 0;
       const previous = selected.get(key);
@@ -1384,9 +1386,64 @@ function collapseAdaptiveQueryPath(finds, frameId, pathKey) {
   return true;
 }
 
+/// Expired adaptive names must be removed from identity *and* metadata keys.
+/// Otherwise the URL helper would restore the query while the maps still use the
+/// collapsed key, breaking timing and attribution after an idle period.
+function pruneExpiredAdaptiveQueryMarkers(finds, frameId, now = Date.now()) {
+  const paths = finds && finds.rotatingQueryParamsByFrame instanceof Map
+    ? finds.rotatingQueryParamsByFrame.get(frameId)
+    : null;
+  if (!(paths instanceof Map)) return false;
+
+  let changed = false;
+  for (const [pathKey, parameters] of paths) {
+    if (!(parameters instanceof Map)) {
+      paths.delete(pathKey);
+      changed = true;
+      continue;
+    }
+    const previouslyRotatingNames = new Set(parameters.keys());
+    const expiredNames = [...parameters]
+      .filter(([, expiresAt]) => !Number.isFinite(expiresAt) || expiresAt <= now)
+      .map(([name]) => name);
+    if (expiredNames.length === 0) continue;
+
+    for (const name of expiredNames) parameters.delete(name);
+    rekeyAdaptiveQueryPath(
+      finds,
+      frameId,
+      pathKey,
+      (url) => videoUrlIdentityKey(url, null, null, null, previouslyRotatingNames),
+    );
+    changed = true;
+    if (parameters.size === 0) paths.delete(pathKey);
+  }
+  if (paths.size === 0) finds.rotatingQueryParamsByFrame.delete(frameId);
+  return changed;
+}
+
+/// Re-key state for one path when one or more new parameters become volatile.
+/// Previously rotating names stay excluded; newly promoted names are restored
+/// in the old key so metadata moves cleanly to the new, more compact identity.
+function collapseAdaptiveQueryPath(finds, frameId, pathKey, newlyRotatingNames) {
+  const paths = finds.rotatingQueryParamsByFrame.get(frameId);
+  const rotating = paths instanceof Map ? paths.get(pathKey) : null;
+  const previousNames = new Set(
+    rotating instanceof Map
+      ? [...rotating.keys()].filter((name) => !newlyRotatingNames.has(name))
+      : [],
+  );
+  return rekeyAdaptiveQueryPath(
+    finds,
+    frameId,
+    pathKey,
+    (url) => videoUrlIdentityKey(url, null, null, null, previousNames),
+  );
+}
+
 /// Build a stable request identity while ignoring recognized auth parameters
 /// and parameters observed rotating for this frame/path.
-function videoUrlIdentityKey(url, finds = null, frameId = null, ignoredParameterName = null) {
+function videoUrlIdentityKey(url, finds = null, frameId = null, ignoredParameterName = null, additionallyIgnoredNames = null) {
   try {
     const parsed = new URL(url);
     const pathKey = parsed.origin + parsed.pathname;
@@ -1410,7 +1467,10 @@ function videoUrlIdentityKey(url, finds = null, frameId = null, ignoredParameter
         } catch {
           return true;
         }
-        return name !== ignoredParameterName && !AUTH_QUERY_PARAMETER_NAME.test(name) && !rotatingNames.has(name);
+        return name !== ignoredParameterName &&
+          !(additionallyIgnoredNames instanceof Set && additionallyIgnoredNames.has(name)) &&
+          !AUTH_QUERY_PARAMETER_NAME.test(name) &&
+          !rotatingNames.has(name);
       })
       .join("&");
     return pathKey +
@@ -1470,6 +1530,7 @@ async function resolvedVideoUrlsForFrame(tabId, frameId) {
 /// only manifests attributed to their element. With no DOM video, preserve the
 /// existing conservative manifest-only fallback for embedded/custom players.
 async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
+  pruneExpiredAdaptiveQueryMarkers(finds, frameId);
   if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return [];
   const videos = finds.frames.get(frameId) || [];
   const manifests = sniffedManifestsForFrame(finds, frameId);
@@ -1726,8 +1787,14 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
   if (!tracked.has(sourceFrame) && tracked.size >= MAX_VIDEO_FRAMES) {
     if (!evictOldestFrame(f, sourceFrame)) return false;
   }
-  const promoted = observeAdaptiveQueryVariants(f, sourceFrame, url, observedAt);
-  let changed = promoted && collapseAdaptiveQueryPath(f, sourceFrame, urlPathKey(url));
+  pruneExpiredAdaptiveQueryMarkers(f, sourceFrame);
+  const promotedNames = observeAdaptiveQueryVariants(f, sourceFrame, url, observedAt);
+  let changed = promotedNames.length > 0 && collapseAdaptiveQueryPath(
+    f,
+    sourceFrame,
+    urlPathKey(url),
+    new Set(promotedNames),
+  );
 
   let kinds = f.kindsByFrame.get(sourceFrame);
   if (!kinds) {
