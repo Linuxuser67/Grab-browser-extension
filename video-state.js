@@ -42,38 +42,44 @@ function createVideoFinds() {
 /// One budget covers all sources: a frame never occupies two slots.
 function trackedFrameIds(f) {
   const ids = new Set();
-  for (const id of f.frames.keys()) ids.add(id);
-  for (const id of f.sniffedByFrame.keys()) ids.add(id);
-  for (const id of f.mediaByFrame.keys()) ids.add(id);
-  for (const id of f.wholeMediaByFrame.keys()) ids.add(id);
-  for (const id of f.mediaSizesByFrame.keys()) ids.add(id);
-  for (const id of f.kindsByFrame.keys()) ids.add(id);
-  for (const id of f.sniffSequencesByFrame.keys()) ids.add(id);
-  for (const id of f.sniffTimesByFrame.keys()) ids.add(id);
-  for (const id of f.sniffFirstSeenByFrame.keys()) ids.add(id);
-  if (f.rotatingQueryParamsByFrame instanceof Map) {
-    for (const id of f.rotatingQueryParamsByFrame.keys()) ids.add(id);
+  const maps = [
+    f.frames,
+    f.sniffedByFrame,
+    f.mediaByFrame,
+    f.wholeMediaByFrame,
+    f.mediaSizesByFrame,
+    f.kindsByFrame,
+    f.sniffSequencesByFrame,
+    f.sniffTimesByFrame,
+    f.sniffFirstSeenByFrame,
+    f.rotatingQueryParamsByFrame,
+    f.retiredFrames,
+  ];
+  for (const map of maps) {
+    if (!(map instanceof Map)) continue;
+    for (const id of map.keys()) ids.add(id);
   }
-  for (const id of f.retiredFrames.keys()) ids.add(id);
   return ids;
 }
 
 /// Drop every trace of a frame. Chrome's frame ids grow with the frame, so
 /// the smallest id is the oldest one.
 function dropFrame(f, frameId) {
-  f.frames.delete(frameId);
-  f.sniffedByFrame.delete(frameId);
-  f.mediaByFrame.delete(frameId);
-  f.wholeMediaByFrame.delete(frameId);
-  f.mediaSizesByFrame.delete(frameId);
-  f.kindsByFrame.delete(frameId);
-  f.sniffSequencesByFrame.delete(frameId);
-  f.sniffTimesByFrame.delete(frameId);
-  f.sniffFirstSeenByFrame.delete(frameId);
-  if (f.rotatingQueryParamsByFrame instanceof Map) {
-    f.rotatingQueryParamsByFrame.delete(frameId);
+  for (const map of [
+    f.frames,
+    f.sniffedByFrame,
+    f.mediaByFrame,
+    f.wholeMediaByFrame,
+    f.mediaSizesByFrame,
+    f.kindsByFrame,
+    f.sniffSequencesByFrame,
+    f.sniffTimesByFrame,
+    f.sniffFirstSeenByFrame,
+    f.rotatingQueryParamsByFrame,
+    f.retiredFrames,
+  ]) {
+    if (map instanceof Map) map.delete(frameId);
   }
-  f.retiredFrames.delete(frameId);
 }
 
 /// Evict the oldest tracked frame to free a slot. The top frame is kept
