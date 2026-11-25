@@ -1260,6 +1260,74 @@ describe("per-video menu candidates", () => {
     }
   });
 
+  test("serialized video snapshots stay within 256 KiB with adversarial URL volume", () => {
+    const bg = loadBackground(makeChrome());
+    const frames = new Map();
+    const sniffedByFrame = new Map();
+    const mediaByFrame = new Map();
+    const wholeMediaByFrame = new Map();
+    const kindsByFrame = new Map();
+    const mediaSizesByFrame = new Map();
+    const sniffSequencesByFrame = new Map();
+    const sniffTimesByFrame = new Map();
+    const sniffFirstSeenByFrame = new Map();
+    const padding = "x".repeat(1700);
+
+    for (let frameId = 0; frameId < bg.MAX_VIDEO_FRAMES; frameId += 1) {
+      const manifests = [];
+      const media = [];
+      const kinds = new Map();
+      const sizes = new Map();
+      const sequences = new Map();
+      const times = new Map();
+      const firstSeen = new Map();
+      for (let index = 0; index < 20; index += 1) {
+        const url = "https://cdn.example.com/" + frameId + "/master-" + index + ".m3u8?id=" + index + "&pad=" + padding;
+        manifests.push(url);
+        const key = bg.videoUrlIdentityKey(url);
+        kinds.set(key, "manifest");
+        sequences.set(key, frameId * 28 + index + 1);
+        times.set(key, Date.now() - index * 1000);
+        firstSeen.set(key, Date.now() - index * 1000);
+      }
+      for (let index = 0; index < 8; index += 1) {
+        const url = "https://cdn.example.com/" + frameId + "/file-" + index + ".mp4?id=" + index + "&pad=" + padding;
+        media.push(url);
+        const key = bg.videoUrlIdentityKey(url);
+        kinds.set(key, "media");
+        sizes.set(key, 8 * 1024 * 1024);
+        sequences.set(key, frameId * 28 + index + 21);
+        times.set(key, Date.now() - index * 1000);
+        firstSeen.set(key, Date.now() - index * 1000);
+      }
+      frames.set(frameId, []);
+      sniffedByFrame.set(frameId, manifests);
+      mediaByFrame.set(frameId, media);
+      wholeMediaByFrame.set(frameId, media);
+      kindsByFrame.set(frameId, kinds);
+      mediaSizesByFrame.set(frameId, sizes);
+      sniffSequencesByFrame.set(frameId, sequences);
+      sniffTimesByFrame.set(frameId, times);
+      sniffFirstSeenByFrame.set(frameId, firstSeen);
+    }
+
+    const snapshot = bg.snapshotVideoFinds({
+      frames, sniffedByFrame, mediaByFrame, wholeMediaByFrame,
+      kindsByFrame, mediaSizesByFrame, sniffSequencesByFrame,
+      sniffTimesByFrame, sniffFirstSeenByFrame,
+      retiredFrames: new Map(), sniffSequence: 896, title: "stress",
+    });
+    const byteLength = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
+    assert.equal(snapshot.version, 3);
+    assert.ok(byteLength <= bg.MAX_VIDEO_STATE_SNAPSHOT_BYTES,
+      "snapshot is bounded: " + byteLength + " bytes");
+    for (const [, records] of snapshot.observations) {
+      const keys = records.map(([url]) => bg.videoUrlIdentityKey(url));
+      assert.equal(new Set(keys).size, keys.length, "each URL identity occurs once per frame");
+      for (const record of records) assert.equal(record.length, 7);
+    }
+  });
+
   test("a whole-file fallback survives session restore", async () => {
     const shared = {};
     const first = makeChrome(shared);
@@ -1289,8 +1357,10 @@ describe("per-video menu candidates", () => {
     );
     await bg._persistVideoFinds(tabId);
     const saved = shared.session.get("videoFinds:v2:" + tabId);
-    assert.deepEqual(saved.wholeMediaFrames, [[0, [url]]]);
-    assert.deepEqual(saved.mediaSizesFrames, [[0, [[pathKey(url), 8388608]]]]);
+    const observation = saved.observations[0][1].find(([candidate]) => candidate === url);
+    assert.ok(observation, "whole-media URL is serialized once");
+    assert.equal(observation[1] & 6, 6, "flags preserve media and whole-file state");
+    assert.equal(observation[6], 8388608, "size metadata is co-located with its URL");
 
     const restarted = makeChrome(shared);
     const restoredBg = loadBackground(restarted);
@@ -2257,9 +2327,9 @@ describe("detection wiring", () => {
     await tick();
     const saved = shared.session.get("videoFinds:v2:9");
     assert.ok(saved, "per-tab findings are persisted in session storage");
-    assert.equal(saved.version, 2);
-    assert.deepEqual(saved.sniffedFrames, [[0, ["https://cdn.example.com/s/stream.m3u8"]]]);
-    assert.ok(saved.kindsFrames[0][1].some(([key, kind]) => key.endsWith("/s/stream.m3u8") && kind === "manifest"));
+    assert.equal(saved.version, 3);
+    assert.ok(saved.observations[0][1].some(([url, flags, kind]) =>
+      url === "https://cdn.example.com/s/stream.m3u8" && (flags & 1) === 1 && kind === "manifest"));
     assert.equal(saved.frames[0][1][0].blobUrl, "blob:https://example.com/uuid");
 
     const restarted = makeChrome(shared);
@@ -2795,7 +2865,8 @@ describe("detection wiring", () => {
     assert.deepEqual(saved.retiredFrames.map(([frameId, retired]) => [
       frameId, retired.source, retired.retiredAtSeq,
     ]), [[0, video.blobUrl, saved.sniffSequence]]);
-    assert.deepEqual(saved.sniffedFrames, [[0, [manifest]]]);
+    assert.ok(saved.observations[0][1].some(([url, flags]) =>
+      url === manifest && (flags & 1) === 1));
 
     const restarted = makeChrome(shared);
     const restartedBg = loadBackground(restarted);
@@ -3204,15 +3275,9 @@ describe("detection wiring", () => {
     assert.deepEqual(saved.retiredFrames.map(([frameId, retired]) => [
       frameId, retired.source, retired.retiredAtSeq,
     ]), [[0, video.blobUrl, 1]]);
-    assert.deepEqual(saved.sniffSequences, [[0, [[
-      "https://cdn.example.com/old/master.m3u8", 1,
-    ]]]]);
-    assert.deepEqual(saved.sniffTimes, [[0, [[
-      "https://cdn.example.com/old/master.m3u8", sniffAt,
-    ]]]]);
-    assert.deepEqual(saved.sniffFirstSeen, [[0, [[
-      "https://cdn.example.com/old/master.m3u8", sniffAt,
-    ]]]]);
+    const savedObservation = saved.observations[0][1].find(([url]) =>
+      url === "https://cdn.example.com/old/master.m3u8");
+    assert.deepEqual(savedObservation.slice(3, 6), [1, sniffAt, sniffAt]);
     assert.deepEqual(saved.retiredFrames[0][1].previousVideos, [video]);
 
     const restoredChrome = makeChrome(shared);
@@ -3360,7 +3425,7 @@ describe("detection wiring", () => {
     );
     const saved = shared.session.get("videoFinds:v2:" + tabId);
     assert.ok(saved);
-    assert.equal(saved.version, 2);
+    assert.equal(saved.version, 3);
     assert.equal(saved.frames.find(([id]) => id === 9)[1][0].blobUrl, blobUrl);
 
     const restarted = makeChrome(shared);
