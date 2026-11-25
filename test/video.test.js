@@ -428,14 +428,23 @@ describe("mergeVideoFinds", () => {
     ]);
   });
 
-  test("query-string variants of one manifest stay one entry", () => {
+  test("non-auth query parameters distinguish manifests", () => {
     const merged = bg.mergeVideoFinds([], [
-      "https://site.example/hls/playlist.m3u8?v=alpha",
-      "https://site.example/hls/playlist.m3u8?v=beta",
+      "https://site.example/hls/playlist.m3u8?id=alpha",
+      "https://site.example/hls/playlist.m3u8?id=beta",
     ]);
     assert.deepEqual(merged, [
-      "https://site.example/hls/playlist.m3u8?v=alpha",
+      "https://site.example/hls/playlist.m3u8?id=alpha",
+      "https://site.example/hls/playlist.m3u8?id=beta",
     ]);
+  });
+
+  test("rotating auth query parameters still collapse manifests", () => {
+    const merged = bg.mergeVideoFinds([], [
+      "https://site.example/hls/playlist.m3u8?id=alpha&token=old",
+      "https://site.example/hls/playlist.m3u8?id=alpha&token=new",
+    ]);
+    assert.equal(merged.length, 1);
   });
 
   test("a directory with two families does not absorb a direct rendition", () => {
@@ -484,10 +493,7 @@ describe("per-video menu candidates", () => {
     bg = loadBackground(chrome);
   });
 
-  const pathKey = (url) => {
-    const parsed = new URL(url);
-    return parsed.origin + parsed.pathname;
-  };
+  const pathKey = (url) => bg.videoUrlIdentityKey(url);
 
   const makeFinds = (videos, manifests = [], times = new Map(), media = []) => ({
     frames: new Map([[0, videos]]),
@@ -524,6 +530,15 @@ describe("per-video menu candidates", () => {
     bg._videoFinds.set(190, findings);
 
     assert.deepEqual(await bg.resolvedVideoUrls(190), [first, second]);
+  });
+
+  test("direct menu heights are finite positive integers capped at 8640p", () => {
+    const bg = loadBackground(makeChrome());
+    const url = "https://cdn.example.com/video.mp4";
+    assert.equal(bg.directMenuRow(url, 720.9).quality, "720p");
+    assert.equal(bg.directMenuRow(url, 1e21).quality, "8640p");
+    assert.equal(bg.directMenuRow(url, 0.5).quality, "");
+    assert.equal(bg.directMenuRow(url, Infinity).quality, "");
   });
 
   test("direct-source dedupe preserves the exact order of non-auth query parameters", async () => {
@@ -2234,7 +2249,8 @@ describe("detection wiring", () => {
     });
     await first._listeners["runtime.onMessage"](
       { type: "grab-videos-detected", videos: [{
-        src: null, blob: true, blobUrl: "blob:https://example.com/uuid"
+        src: null, blob: true, blobUrl: "blob:https://example.com/uuid",
+        title: "Player-specific title",
       }], title: "Live stream" },
       { tab: { id: 9 }, frameId: 0 }
     );
@@ -2414,7 +2430,7 @@ describe("detection wiring", () => {
       { type: "grab-videos-detected", videos: [video] }, sender,
     );
     const finds = bg._videoFinds.get(tabId);
-    const key = new URL(first).origin + new URL(first).pathname;
+    const key = bg.videoUrlIdentityKey(first);
     const initialSequence = finds.sniffSequencesByFrame.get(0).get(key);
     assert.equal(finds.sniffFirstSeenByFrame.get(0).get(key), firstSeenAt);
     assert.equal(await bg.resolvedBlobVideoUrlForFrame(tabId, 0), first);
@@ -3343,6 +3359,12 @@ describe("detection wiring", () => {
 
     const restarted = makeChrome(shared);
     const bg = loadBackground(restarted);
+    await bg._restoreVideoFinds(9);
+    assert.equal(
+      bg._videoFinds.get(9).frames.get(0)[0].title,
+      "Player-specific title",
+      "per-video title survives worker restart",
+    );
     await restarted._listeners["runtime.onMessage"](
       { type: "grab-videos-detected", videos: [{ src: null, blob: true, blobUrl }] },
       { tab: { id: tabId, url: "https://example.com/" }, frameId: 9 },

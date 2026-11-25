@@ -262,6 +262,7 @@ if (typeof module !== "undefined" && module.exports) {
     MAX_VIDEO_TITLE_LENGTH,
     manifestMenuRows,
     directMenuRow,
+    videoUrlIdentityKey,
     manifestKind,
     buildVideoEntry,
     uniqueLabels,
