@@ -21,21 +21,43 @@ const HLS_INSPECTION_HANDSHAKE_MAX_AGE_MS = 2_000;
 const MAX_HLS_INSPECT_RESPONSE_BYTES = 16 * 1024;
 const MAX_HLS_INSPECT_CHILDREN = 256;
 
-/// Share Grab's four-request HLS inspection budget across every tab and frame
-/// handled by this background context. Per-menu worker limits alone allow
-/// concurrent batches to exceed the server's process-wide semaphore.
+/// Share Grab's four-request HLS inspection budget across every tab and frame.
+/// Page-controlled URLs must not create an unbounded wait queue or consume
+/// the server's replay budget faster than its matching token bucket allows.
 const HLS_INSPECTION_CONCURRENCY = 4;
+const HLS_INSPECTION_QUEUE_LIMIT = 32;
+const HLS_INSPECTION_RATE_PER_SECOND = 4;
+const HLS_INSPECTION_BURST = 24;
 let activeHlsInspections = 0;
 const queuedHlsInspections = [];
+let hlsInspectionTokens = HLS_INSPECTION_BURST;
+let hlsInspectionTokenUpdatedAt = Date.now();
+
+function takeHlsInspectionToken(nowMs = Date.now()) {
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const elapsedMs = Math.max(0, now - hlsInspectionTokenUpdatedAt);
+  hlsInspectionTokens = Math.min(
+    HLS_INSPECTION_BURST,
+    hlsInspectionTokens + elapsedMs * HLS_INSPECTION_RATE_PER_SECOND / 1000,
+  );
+  hlsInspectionTokenUpdatedAt = Math.max(hlsInspectionTokenUpdatedAt, now);
+  if (hlsInspectionTokens < 1) return false;
+  hlsInspectionTokens -= 1;
+  return true;
+}
 
 async function withHlsInspectionSlot(operation) {
   if (activeHlsInspections < HLS_INSPECTION_CONCURRENCY) {
     activeHlsInspections += 1;
   } else {
+    if (queuedHlsInspections.length >= HLS_INSPECTION_QUEUE_LIMIT) return null;
     await new Promise((resolve) => queuedHlsInspections.push(resolve));
   }
 
   try {
+    // Consume only when this request actually owns a slot. A rate-limited
+    // request returns null before handshake, HMAC, or network work begins.
+    if (!takeHlsInspectionToken()) return null;
     return await operation();
   } finally {
     // Hand the occupied slot directly to the oldest waiter. The active count

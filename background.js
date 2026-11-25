@@ -272,6 +272,10 @@ if (typeof module !== "undefined" && module.exports) {
     postToGrab,
     normalizeReferer,
     inspectHlsPlaylistWithGrab,
+    // Test hooks: verify the public-inspection token bucket and bounded queue.
+    _takeHlsInspectionToken: takeHlsInspectionToken,
+    _withHlsInspectionSlot: withHlsInspectionSlot,
+    HLS_INSPECTION_QUEUE_LIMIT,
     // Test hook: the raw playlist inspection result (is_master, child_keys).
     inspectHlsPlaylist,
     HLS_INSPECTION_HANDSHAKE_MAX_AGE_MS,
