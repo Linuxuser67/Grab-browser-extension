@@ -4405,25 +4405,79 @@ describe("HLS master playlist filtering", () => {
     assert.deepEqual(await restarted.resolvedVideoUrlsForFrame(tabId, 0), observed);
   });
 
-  test("query values outside the adaptive window remain separate", async () => {
-    const tabId = 213;
-    const chrome = makeChrome();
-    const bg = loadBackground(chrome);
-    const base = "https://cdn.example.com/live/master.m3u8";
-    const start = Date.now();
+  test("expires adaptive identities and restores full query keys after an idle window", async () => {
+    const originalNow = Date.now;
+    let now = 1_800_000_000_000;
+    Date.now = () => now;
+    try {
+      const tabId = 213;
+      const chrome = makeChrome();
+      const bg = loadBackground(chrome);
+      const base = "https://cdn.example.com/live/master.m3u8";
+      const observe = async (value) => {
+        now += 1_000;
+        await chrome._listeners["webRequest.onResponseStarted"]({
+          tabId,
+          frameId: 0,
+          url: `${base}?playSessionId=${value}`,
+          timeStamp: now,
+          responseHeaders: [
+            { name: "content-type", value: "application/vnd.apple.mpegurl" },
+          ],
+        });
+      };
 
-    for (let value = 1; value <= 4; value += 1) {
-      await chrome._listeners["webRequest.onResponseStarted"]({
-        tabId,
-        frameId: 0,
-        url: `${base}?t=${value}`,
-        timeStamp: start + value * 20_000,
-        responseHeaders: [
-          { name: "content-type", value: "application/vnd.apple.mpegurl" },
+      for (let value = 1; value <= 4; value += 1) await observe(value);
+      let findings = bg._videoFinds.get(tabId);
+      assert.equal(findings.sniffedByFrame.get(0).length, 1);
+      assert.ok(findings.rotatingQueryParamsByFrame.get(0).has(base));
+
+      now += 31_000;
+      await observe(5);
+      findings = bg._videoFinds.get(tabId);
+      assert.equal(findings.rotatingQueryParamsByFrame.has(0), false);
+      assert.deepEqual(
+        findings.sniffedByFrame.get(0),
+        [
+          `${base}?playSessionId=4`,
+          `${base}?playSessionId=5`,
         ],
-      });
+      );
+      assert.deepEqual(
+        await bg.resolvedVideoUrlsForFrame(tabId, 0),
+        findings.sniffedByFrame.get(0),
+      );
+    } finally {
+      Date.now = originalNow;
     }
-    assert.equal(bg._videoFinds.get(tabId).sniffedByFrame.get(0).length, 4);
+  });
+
+  test("query values outside the adaptive window remain separate", async () => {
+    const originalNow = Date.now;
+    let now = 1_800_000_000_000;
+    Date.now = () => now;
+    try {
+      const tabId = 214;
+      const chrome = makeChrome();
+      const bg = loadBackground(chrome);
+      const base = "https://cdn.example.com/live/master.m3u8";
+
+      for (let value = 1; value <= 4; value += 1) {
+        now += 20_000;
+        await chrome._listeners["webRequest.onResponseStarted"]({
+          tabId,
+          frameId: 0,
+          url: `${base}?t=${value}`,
+          timeStamp: now,
+          responseHeaders: [
+            { name: "content-type", value: "application/vnd.apple.mpegurl" },
+          ],
+        });
+      }
+      assert.equal(bg._videoFinds.get(tabId).sniffedByFrame.get(0).length, 4);
+    } finally {
+      Date.now = originalNow;
+    }
   });
 
   test("HLS child filtering preserves separate query-identified streams", async () => {

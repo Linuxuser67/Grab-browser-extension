@@ -217,6 +217,7 @@ function nextSniffSequence(finds) {
 }
 
 function removeFrameSniffsAtOrBefore(finds, frameId, sequence, preserveKeys = new Set()) {
+  pruneExpiredAdaptiveQueryMarkers(finds, frameId);
   const cutoff = Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : 0;
   const sequences = sniffSequenceMapForFrame(finds, frameId);
   const times = sniffTimeMapForFrame(finds, frameId);
@@ -345,6 +346,7 @@ function videoResourceIdentity(video) {
 }
 
 function preservedSniffsForOtherPlayers(finds, frameId, retired, currentVideos) {
+  pruneExpiredAdaptiveQueryMarkers(finds, frameId);
   const previousVideos = Array.isArray(retired.previousVideos) ? retired.previousVideos : [];
   if (previousVideos.length < 2 || !Array.isArray(currentVideos)) return new Set();
 
@@ -972,6 +974,9 @@ function restoreRotatingQueryParams(entries) {
 }
 
 function snapshotVideoFinds(finds) {
+  for (const frameId of trackedFrameIds(finds)) {
+    pruneExpiredAdaptiveQueryMarkers(finds, frameId);
+  }
   const legacy = snapshotVideoFindsV2(finds);
   const snapshot = {
     version: 3,

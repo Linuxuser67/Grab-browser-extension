@@ -1256,12 +1256,12 @@ function queryParameterSignatures(url) {
 /// Promote a name only after four distinct values for one HLS path/frame in 30s.
 /// The bounded manifest list and last-seen map provide the rolling history.
 function observeAdaptiveQueryVariants(finds, frameId, url, observedAt) {
-  if (!isHlsPlaylistUrl(url)) return false;
+  if (!isHlsPlaylistUrl(url)) return [];
   let parsed;
   try { parsed = new URL(url); } catch { return false; }
   const pathKey = parsed.origin + parsed.pathname;
   const signatures = queryParameterSignatures(url);
-  if (signatures.size === 0) return false;
+  if (signatures.size === 0) return [];
   const now = Date.now();
   const eventTime = Number.isFinite(observedAt) && observedAt >= 0
     ? Math.min(observedAt, now + 60_000)
@@ -1783,11 +1783,11 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
   }
   pruneExpiredRetiredFrames(f);
   const sourceFrame = Number.isInteger(frameId) && frameId >= 0 ? frameId : 0;
+  pruneExpiredAdaptiveQueryMarkers(f, sourceFrame);
   const tracked = trackedFrameIds(f);
   if (!tracked.has(sourceFrame) && tracked.size >= MAX_VIDEO_FRAMES) {
     if (!evictOldestFrame(f, sourceFrame)) return false;
   }
-  pruneExpiredAdaptiveQueryMarkers(f, sourceFrame);
   const promotedNames = observeAdaptiveQueryVariants(f, sourceFrame, url, observedAt);
   let changed = promotedNames.length > 0 && collapseAdaptiveQueryPath(
     f,
