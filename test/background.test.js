@@ -42,6 +42,41 @@ test("Chromium and Firefox background scripts use the same load order", () => {
   );
 });
 
+describe("HLS inspection limiting", () => {
+  test("uses a 24-request burst and refills at four requests per second", () => {
+    const bg = loadBackground(makeChrome());
+    const start = 1_000_000;
+
+    for (let i = 0; i < 24; i += 1) {
+      assert.equal(bg._takeHlsInspectionToken(start), true, `burst token ${i + 1}`);
+    }
+    assert.equal(bg._takeHlsInspectionToken(start), false, "the burst is bounded");
+    assert.equal(bg._takeHlsInspectionToken(start + 250), true, "one token refills in 250 ms");
+    assert.equal(bg._takeHlsInspectionToken(start + 250), false, "a token is consumed once");
+    assert.equal(bg._takeHlsInspectionToken(start + 10_250), true, "elapsed time refills the bucket");
+  });
+
+  test("bounds queued inspection work without exceeding four active operations", async () => {
+    const bg = loadBackground(makeChrome());
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const active = Array.from({ length: 4 }, () =>
+      bg._withHlsInspectionSlot(() => gate)
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const queued = Array.from({ length: bg.HLS_INSPECTION_QUEUE_LIMIT }, () =>
+      bg._withHlsInspectionSlot(async () => true)
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    const overflow = await bg._withHlsInspectionSlot(async () => true);
+    assert.equal(overflow, null, "work beyond the queue cap is dropped");
+
+    release(true);
+    await Promise.all([...active, ...queued]);
+  });
+});
+
 describe("storage access hardening", () => {
   test("restricts local and sync storage to trusted contexts when supported", () => {
     const chrome = makeChrome();
