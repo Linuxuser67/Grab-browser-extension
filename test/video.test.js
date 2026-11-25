@@ -439,6 +439,16 @@ describe("mergeVideoFinds", () => {
     ]);
   });
 
+  test("preserves e and ts stream identifiers before adaptive rotation is observed", () => {
+    const merged = bg.mergeVideoFinds([], [
+      "https://site.example/hls/playlist.m3u8?e=episode-one",
+      "https://site.example/hls/playlist.m3u8?e=episode-two",
+      "https://site.example/hls/playlist.m3u8?ts=100",
+      "https://site.example/hls/playlist.m3u8?ts=200",
+    ]);
+    assert.equal(merged.length, 4);
+  });
+
   test("rotating auth query parameters still collapse manifests", () => {
     const merged = bg.mergeVideoFinds([], [
       "https://site.example/hls/playlist.m3u8?id=alpha&token=old",
@@ -4325,6 +4335,95 @@ describe("HLS master playlist filtering", () => {
       ),
       candidates,
     );
+  });
+
+  test("coalesces an unlisted rotating query parameter before the manifest FIFO fills", async () => {
+    const tabId = 211;
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const base = "https://cdn.example.com/live/master.m3u8";
+    const start = Date.now();
+
+    for (let value = 1; value <= 5; value += 1) {
+      const url = `${base}?playSessionId=${value}`;
+      await chrome._listeners["webRequest.onResponseStarted"]({
+        tabId,
+        frameId: 0,
+        url,
+        timeStamp: start + value * 1000,
+        responseHeaders: [
+          { name: "content-type", value: "application/vnd.apple.mpegurl" },
+        ],
+      });
+      const observed = bg._videoFinds.get(tabId).sniffedByFrame.get(0) || [];
+      assert.equal(observed.length, value < 4 ? value : 1);
+      if (value >= 4) assert.equal(observed[0], url);
+    }
+    assert.deepEqual(
+      await bg.resolvedVideoUrlsForFrame(tabId, 0),
+      [`${base}?playSessionId=5`],
+    );
+  });
+
+  test("adaptive rotation ignores only the volatile parameter and keeps episode IDs separate", async () => {
+    const tabId = 212;
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const base = "https://cdn.example.com/live/master.m3u8";
+    const start = Date.now();
+
+    for (const episode of ["alpha", "beta"]) {
+      for (let value = 1; value <= 4; value += 1) {
+        const url = `${base}?episode=${episode}&rnd=${value}`;
+        await chrome._listeners["webRequest.onResponseStarted"]({
+          tabId,
+          frameId: 0,
+          url,
+          timeStamp: start + (episode === "beta" ? 5_000 : 0) + value * 500,
+          responseHeaders: [
+            { name: "content-type", value: "application/vnd.apple.mpegurl" },
+          ],
+        });
+      }
+    }
+
+    const findings = bg._videoFinds.get(tabId);
+    const observed = findings.sniffedByFrame.get(0) || [];
+    assert.equal(observed.length, 2);
+    assert.deepEqual(
+      observed.map((url) => new URL(url).searchParams.get("episode")).sort(),
+      ["alpha", "beta"],
+    );
+    assert.deepEqual(await bg.resolvedVideoUrlsForFrame(tabId, 0), observed);
+
+    const stored = await chrome.storage.session.get("grabVideoFinds:" + tabId);
+    assert.equal(stored["grabVideoFinds:" + tabId].rotatingQueryParams.length, 1);
+
+    const restartedChrome = makeChrome({ session: chrome._session });
+    const restarted = loadBackground(restartedChrome);
+    await restarted._restoreVideoFinds(tabId);
+    assert.deepEqual(await restarted.resolvedVideoUrlsForFrame(tabId, 0), observed);
+  });
+
+  test("query values outside the adaptive window remain separate", async () => {
+    const tabId = 213;
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const base = "https://cdn.example.com/live/master.m3u8";
+    const start = Date.now();
+
+    for (let value = 1; value <= 4; value += 1) {
+      await chrome._listeners["webRequest.onResponseStarted"]({
+        tabId,
+        frameId: 0,
+        url: `${base}?t=${value}`,
+        timeStamp: start + value * 20_000,
+        responseHeaders: [
+          { name: "content-type", value: "application/vnd.apple.mpegurl" },
+        ],
+      });
+    }
+    assert.equal(bg._videoFinds.get(tabId).sniffedByFrame.get(0).length, 4);
   });
 
   test("HLS child filtering preserves separate query-identified streams", async () => {

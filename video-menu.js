@@ -627,8 +627,8 @@ function hlsPlaylistNameHints(urls) {
     const basename = parsed.pathname.split("/").filter(Boolean).pop() || "";
     const parent = parsed.pathname.slice(0, Math.max(1, parsed.pathname.lastIndexOf("/")));
     const folder = parsed.origin + parent;
-    const identity = videoUrlIdentityKey(url);
-    const queryIdentity = videoUrlQueryIdentityKey(url);
+    const identity = videoUrlIdentityKey(url, finds, frameId);
+    const queryIdentity = videoUrlQueryIdentityKey(url, finds, frameId);
     const isMaster =
       /^(?:master|index|playlist|hlsplaylist|stream)(?:[_-][a-z0-9]+)?\.(?:m3u8|m3u)$/i.test(basename);
     const isChild =
@@ -715,8 +715,8 @@ function nestedHlsPlaylistChildKeys(urls, firstSeenTimes) {
         path: parsed.pathname,
         directory,
         filename: parsed.pathname.slice(slash + 1),
-        key: videoUrlIdentityKey(url),
-        firstSeenAt: firstSeenTimes.get(videoUrlIdentityKey(url)),
+        key: videoUrlIdentityKey(url, finds, frameId),
+        firstSeenAt: firstSeenTimes.get(videoUrlIdentityKey(url, finds, frameId)),
       });
     } catch {
       // Invalid playlist URLs are not candidates.
@@ -768,6 +768,8 @@ async function preferMasterPlaylists(
   tabOrigin = null,
   sniffedUrls = [],
   inspectPublic = inspectHlsPlaylistWithGrab,
+  finds = null,
+  frameId = null,
 ) {
   const manifests = [...new Set((sniffedUrls || []).filter(isHlsPlaylistUrl))];
   if (manifests.length === 0) return urls || [];
@@ -826,7 +828,7 @@ async function preferMasterPlaylists(
   if (childKeys.size === 0) return urls || [];
   return (urls || []).filter((url) => {
     if (!isHlsPlaylistUrl(url)) return true;
-    const key = videoUrlIdentityKey(url);
+    const key = videoUrlIdentityKey(url, finds, frameId);
     return masterKeys.has(key) || !childKeys.has(key);
   });
 }
@@ -835,7 +837,7 @@ async function preferMasterPlaylists(
 /// query strings and group a direct rendition with its manifest directory only
 /// when that directory holds a single stream family. Distinct manifests keep
 /// distinct entries, so a second video in the same directory is not dropped.
-function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
+function mergeVideoFinds(domVideos, sniffedUrls, kinds, finds = null, frameId = null) {
   const candidates = [];
   for (const v of domVideos || []) {
     if (v && typeof v.src === "string" && v.src) {
@@ -844,7 +846,7 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
   }
   for (const url of sniffedUrls || []) {
     if (typeof url !== "string" || !url) continue;
-    const kind = (kinds && kinds.get(videoUrlIdentityKey(url))) || null;
+    const kind = (kinds && kinds.get(videoUrlIdentityKey(url, finds, frameId))) || null;
     candidates.push({ url, fromDom: false, kind });
   }
 
@@ -862,7 +864,7 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
       bucket = { hls: new Set(), dash: new Set(), manifest: new Set() };
       byFolder.set(folder, bucket);
     }
-    bucket[kind].add(videoUrlIdentityKey(item.url));
+    bucket[kind].add(videoUrlIdentityKey(item.url, finds, frameId));
   }
 
   const familyFor = new Map();
@@ -889,7 +891,7 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
     if (isManifestKind(kind)) {
       const folder = manifestFolderKey(item.url, kind);
       key =
-        (folder && familyFor.get(`${folder}\u0000${videoUrlIdentityKey(item.url)}`)) ||
+        (folder && familyFor.get(`${folder}\u0000${videoUrlIdentityKey(item.url, finds, frameId)}`)) ||
         videoUrlIdentityKey(item.url);
     } else {
       try {
@@ -900,9 +902,9 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds) {
         const families = familiesByFolder.get(siblingFolder);
         key = families && families.size === 1
           ? [...families][0]
-          : videoUrlIdentityKey(item.url);
+          : videoUrlIdentityKey(item.url, finds, frameId);
       } catch {
-        key = videoUrlIdentityKey(item.url);
+        key = videoUrlIdentityKey(item.url, finds, frameId);
       }
     }
 
@@ -1003,13 +1005,13 @@ function sniffFirstSeenTimesForFrame(finds, frameId) {
 function sniffedManifestsForFrame(finds, frameId) {
   const kinds = kindsForFrame(finds, frameId);
   return sniffedUrlsForFrame(finds, frameId).filter((url) => {
-    const kind = manifestKind(url) || kinds.get(videoUrlIdentityKey(url));
+    const kind = manifestKind(url) || kinds.get(videoUrlIdentityKey(url, finds, frameId));
     return isManifestKind(kind) && !isSegmentLikeVideoUrl(url);
   });
 }
 
-function videoManifestPriority(url, kinds) {
-  const kind = manifestKind(url) || (kinds && kinds.get(videoUrlIdentityKey(url)));
+function videoManifestPriority(url, kinds, finds = null, frameId = null) {
+  const kind = manifestKind(url) || (kinds && kinds.get(videoUrlIdentityKey(url, finds, frameId)));
   return kind === "hls" ? 30 : kind === "manifest" ? 25 : kind === "dash" ? 20 : 0;
 }
 
@@ -1021,6 +1023,8 @@ function attributedManifestUrlsForVideo(
   manifests,
   sniffTimes,
   firstSeenTimes = sniffTimes,
+  finds = null,
+  frameId = null,
 ) {
   if (!Array.isArray(videos) || !videos.includes(targetVideo)) return [];
   if (videos.length === 1) return Array.isArray(manifests) ? manifests : [];
@@ -1041,7 +1045,7 @@ function attributedManifestUrlsForVideo(
   const attributed = [];
   for (const url of manifests || []) {
     const observedAt = firstSeenTimes instanceof Map
-      ? firstSeenTimes.get(videoUrlIdentityKey(url))
+      ? firstSeenTimes.get(videoUrlIdentityKey(url, finds, frameId))
       : null;
     if (!Number.isFinite(observedAt) || observedAt < 0) continue;
     const possibleOwners = videos
@@ -1074,20 +1078,25 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVid
   const nestedChildKeys = nestedHlsPlaylistChildKeys(
     resolved,
     firstSeenTimes,
+    finds,
+    frameId,
   );
   if (nestedChildKeys.size > 0) {
-    resolved = resolved.filter((url) => !nestedChildKeys.has(videoUrlIdentityKey(url)));
+    resolved = resolved.filter((url) => !nestedChildKeys.has(videoUrlIdentityKey(url, finds, frameId)));
   }
   if (resolved.length > 1) {
     resolved = await preferMasterPlaylists(
       resolved,
       await tabOriginForHlsFetch(tabId),
       resolved,
+      undefined,
+      finds,
+      frameId,
     );
   }
-  const merged = mergeVideoFinds([], resolved, kinds);
+  const merged = mergeVideoFinds([], resolved, kinds, finds, frameId);
   const timingFor = (url) => {
-    const firstSeenAt = firstSeenTimes.get(videoUrlIdentityKey(url));
+    const firstSeenAt = firstSeenTimes.get(videoUrlIdentityKey(url, finds, frameId));
     if (!Number.isFinite(firstSeenAt)) {
       return { phase: 2, distance: Number.POSITIVE_INFINITY };
     }
@@ -1099,7 +1108,7 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVid
       : { phase: 1, distance: firstSeenAt - loadStartedAt };
   };
   merged.sort((a, b) => {
-    const rankDifference = videoManifestPriority(b, kinds) - videoManifestPriority(a, kinds);
+    const rankDifference = videoManifestPriority(b, kinds, finds, frameId) - videoManifestPriority(a, kinds, finds, frameId);
     if (rankDifference !== 0) return rankDifference;
     const aTiming = timingFor(a);
     const bTiming = timingFor(b);
@@ -1114,7 +1123,7 @@ async function bestManifestForVideo(tabId, finds, frameId, candidates, targetVid
     secondTiming &&
     firstTiming.phase === 0 &&
     secondTiming.phase === 0 &&
-    videoManifestPriority(merged[0], kinds) === videoManifestPriority(merged[1], kinds) &&
+    videoManifestPriority(merged[0], kinds, finds, frameId) === videoManifestPriority(merged[1], kinds, finds, frameId) &&
     Math.abs(firstTiming.distance - secondTiming.distance) <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
   ) return null;
   return merged[0] || null;
@@ -1140,6 +1149,8 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) 
     manifests,
     sniffTimes,
     firstSeenTimes,
+    finds,
+    frameId,
   );
   const best = await bestManifestForVideo(tabId, finds, frameId, attributed, video);
   if (best) return best;
@@ -1150,9 +1161,11 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) 
     video,
     wholeMedia,
     sniffTimes,
-      firstSeenTimes,
+    firstSeenTimes,
+    finds,
+    frameId,
   );
-  const uniqueMedia = dedupeVideoUrlsByPath(attributedMedia, finds);
+  const uniqueMedia = dedupeVideoUrlsByPath(attributedMedia, finds, frameId);
   return uniqueMedia.length === 1 ? uniqueMedia[0] : null;
 }
 
@@ -1179,7 +1192,9 @@ function videoUrlCandidateObservedAt(finds, url) {
       const times = finds.sniffTimesByFrame instanceof Map
         ? finds.sniffTimesByFrame.get(frameId)
         : null;
-      const observedAt = times instanceof Map ? times.get(key) : null;
+      const observedAt = times instanceof Map
+        ? times.get(videoUrlIdentityKey(url, finds, frameId))
+        : null;
       if (Number.isFinite(observedAt)) newest = Math.max(newest, observedAt);
     }
   }
@@ -1190,7 +1205,9 @@ function videoUrlCandidateObservedAt(finds, url) {
     const times = finds.sniffTimesByFrame instanceof Map
       ? finds.sniffTimesByFrame.get(frameId)
       : null;
-    const observedAt = times instanceof Map ? times.get(key) : null;
+    const observedAt = times instanceof Map
+      ? times.get(videoUrlIdentityKey(url, finds, frameId))
+      : null;
     if (Number.isFinite(observedAt)) newest = Math.max(newest, observedAt);
   }
   return newest;
@@ -1205,13 +1222,174 @@ function videoUrlCandidatePriority(finds, url) {
 }
 
 const AUTH_QUERY_PARAMETER_NAME =
-  /^(?:access[-_]?token|api[-_]?token|auth|auth[-_]?key|auth[-_]?token|authorization|bearer|_|_hls_msn|_hls_part|cb|e|md5|ts|exp|expires|expiry|hdnea|hdnts|hmac|jwt|policy|session[-_]?token|sig|signature|token|x-amz-(?:credential|date|expires|security-token|signature)|x-goog-(?:algorithm|credential|date|expires|signature))$/i;
+  /^(?:access[-_]?token|api[-_]?token|auth|auth[-_]?key|auth[-_]?token|authorization|bearer|_hls_msn|_hls_part|exp|expires|expiry|hdnea|hdnts|hmac|jwt|policy|session[-_]?token|sig|signature|token|x-amz-(?:credential|date|expires|security-token|signature)|x-goog-(?:algorithm|credential|date|expires|signature))$/i;
 
-/// Build a stable request identity while ignoring only recognized auth-token
-/// query parameters. Preserve every other parameter's spelling, encoding and order.
-function videoUrlIdentityKey(url) {
+/// Query parameter values used for adaptive HLS identity.
+function queryParameterSignatures(url) {
+  const signatures = new Map();
   try {
     const parsed = new URL(url);
+    for (const parameter of parsed.search.slice(1).split("&")) {
+      if (!parameter) continue;
+      const separator = parameter.indexOf("=");
+      const rawName = separator < 0 ? parameter : parameter.slice(0, separator);
+      let name;
+      try { name = decodeURIComponent(rawName.replace(/\+/g, " ")); }
+      catch { continue; }
+      if (!name || AUTH_QUERY_PARAMETER_NAME.test(name)) continue;
+      const rawValue = separator < 0 ? "" : parameter.slice(separator + 1);
+      let values = signatures.get(name);
+      if (!values) signatures.set(name, values = []);
+      values.push(rawValue);
+    }
+  } catch {
+    // Invalid URLs cannot establish a rotating-parameter pattern.
+  }
+  for (const [name, values] of signatures) signatures.set(name, values.join("\u001f"));
+  return signatures;
+}
+
+/// Promote a name only after four distinct values for one HLS path/frame in 30s.
+/// The bounded manifest list and last-seen map provide the rolling history.
+function observeAdaptiveQueryVariants(finds, frameId, url, observedAt) {
+  if (!isHlsPlaylistUrl(url)) return false;
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  const pathKey = parsed.origin + parsed.pathname;
+  const signatures = queryParameterSignatures(url);
+  if (signatures.size === 0) return false;
+  const now = Date.now();
+  const eventTime = Number.isFinite(observedAt) && observedAt >= 0
+    ? Math.min(observedAt, now + 60_000)
+    : now;
+
+  if (!(finds.rotatingQueryParamsByFrame instanceof Map)) finds.rotatingQueryParamsByFrame = new Map();
+  let paths = finds.rotatingQueryParamsByFrame.get(frameId);
+  if (!paths) finds.rotatingQueryParamsByFrame.set(frameId, paths = new Map());
+  let rotating = paths.get(pathKey);
+  if (!rotating) paths.set(pathKey, rotating = new Map());
+
+  const existingUrls = finds.sniffedByFrame instanceof Map
+    ? finds.sniffedByFrame.get(frameId) || []
+    : [];
+  const times = finds.sniffTimesByFrame instanceof Map
+    ? finds.sniffTimesByFrame.get(frameId)
+    : null;
+  let promoted = false;
+
+  for (const [name, signature] of signatures) {
+    const activeUntil = rotating.get(name) || 0;
+    if (activeUntil > now) {
+      rotating.set(name, Math.max(activeUntil, now + ADAPTIVE_QUERY_VARIANT_WINDOW_MS));
+      continue;
+    }
+    if (activeUntil) rotating.delete(name);
+    const variants = new Set([signature]);
+    for (const candidate of existingUrls) {
+      let other;
+      try { other = new URL(candidate); } catch { continue; }
+      if (other.origin + other.pathname !== pathKey) continue;
+      const candidateSignature = queryParameterSignatures(candidate).get(name);
+      if (candidateSignature === undefined) continue;
+      const seenAt = times instanceof Map ? times.get(videoUrlIdentityKey(candidate)) : null;
+      if (
+        !Number.isFinite(seenAt) ||
+        seenAt < eventTime - ADAPTIVE_QUERY_VARIANT_WINDOW_MS ||
+        seenAt > eventTime + 60_000
+      ) continue;
+      variants.add(candidateSignature);
+    }
+    if (variants.size > ADAPTIVE_QUERY_VARIANT_LIMIT) {
+      rotating.set(name, now + ADAPTIVE_QUERY_VARIANT_WINDOW_MS);
+      promoted = true;
+    }
+  }
+
+  for (const [name, expiresAt] of rotating) {
+    if (!Number.isFinite(expiresAt) || expiresAt <= now) rotating.delete(name);
+  }
+  while (rotating.size > ADAPTIVE_QUERY_PARAMETER_LIMIT) {
+    const earliest = [...rotating].sort((a, b) => a[1] - b[1])[0];
+    if (!earliest) break;
+    rotating.delete(earliest[0]);
+  }
+  while (paths.size > ADAPTIVE_QUERY_PATH_LIMIT) {
+    const earliest = [...paths].sort((a, b) =>
+      Math.max(0, ...a[1].values()) - Math.max(0, ...b[1].values()))[0];
+    if (!earliest) break;
+    paths.delete(earliest[0]);
+  }
+  if (rotating.size === 0) paths.delete(pathKey);
+  if (paths.size === 0) finds.rotatingQueryParamsByFrame.delete(frameId);
+  return promoted;
+}
+
+/// Re-key state for one path when a parameter becomes volatile.
+function collapseAdaptiveQueryPath(finds, frameId, pathKey) {
+  const listMaps = [finds.sniffedByFrame, finds.mediaByFrame, finds.wholeMediaByFrame];
+  const urls = [];
+  for (const listMap of listMaps) {
+    for (const url of (listMap instanceof Map ? listMap.get(frameId) || [] : [])) {
+      if (urlPathKey(url) === pathKey) urls.push(url);
+    }
+  }
+  if (urls.length < 2) return false;
+  const keyChanges = new Map(urls.map((url) => [
+    videoUrlIdentityKey(url),
+    videoUrlIdentityKey(url, finds, frameId),
+  ]));
+  if (![...keyChanges].some(([oldKey, newKey]) => oldKey !== newKey)) return false;
+
+  const oldTimes = finds.sniffTimesByFrame.get(frameId) || new Map();
+  const rekeyMap = (map, combine) => {
+    if (!(map instanceof Map)) return;
+    const values = map.get(frameId);
+    if (!(values instanceof Map)) return;
+    const next = new Map();
+    for (const [oldKey, value] of values) {
+      const key = keyChanges.get(oldKey) || oldKey;
+      next.set(key, next.has(key) ? combine(next.get(key), value) : value);
+    }
+    map.set(frameId, next);
+  };
+  rekeyMap(finds.kindsByFrame, (_old, value) => value);
+  rekeyMap(finds.sniffSequencesByFrame, Math.min);
+  rekeyMap(finds.sniffTimesByFrame, Math.max);
+  rekeyMap(finds.sniffFirstSeenByFrame, Math.min);
+  rekeyMap(finds.mediaSizesByFrame, Math.max);
+
+  for (const listMap of listMaps) {
+    if (!(listMap instanceof Map)) continue;
+    const frameUrls = listMap.get(frameId);
+    if (!Array.isArray(frameUrls)) continue;
+    const selected = new Map();
+    for (const url of frameUrls) {
+      const oldKey = videoUrlIdentityKey(url);
+      const key = keyChanges.get(oldKey) || oldKey;
+      const observedAt = oldTimes.get(oldKey) || 0;
+      const previous = selected.get(key);
+      if (!previous || observedAt >= previous.observedAt) selected.set(key, {url, observedAt});
+    }
+    const nextUrls = [...selected.values()].map((entry) => entry.url);
+    if (nextUrls.length) listMap.set(frameId, nextUrls);
+    else listMap.delete(frameId);
+  }
+  return true;
+}
+
+/// Build a stable request identity while ignoring recognized auth parameters
+/// and parameters observed rotating for this frame/path.
+function videoUrlIdentityKey(url, finds = null, frameId = null) {
+  try {
+    const parsed = new URL(url);
+    const pathKey = parsed.origin + parsed.pathname;
+    const paths = finds && finds.rotatingQueryParamsByFrame instanceof Map ? finds.rotatingQueryParamsByFrame.get(frameId) : null;
+    const markers = paths instanceof Map ? paths.get(pathKey) : null;
+    const rotatingNames = new Set();
+    if (markers instanceof Map) {
+      const now = Date.now();
+      for (const [name, expiresAt] of markers) if (Number.isFinite(expiresAt) && expiresAt > now) rotatingNames.add(name);
+    }
     const retainedParameters = parsed.search
       .slice(1)
       .split("&")
@@ -1225,10 +1403,10 @@ function videoUrlIdentityKey(url) {
         } catch {
           return true;
         }
-        return !AUTH_QUERY_PARAMETER_NAME.test(name);
+        return !AUTH_QUERY_PARAMETER_NAME.test(name) && !rotatingNames.has(name);
       })
       .join("&");
-    return parsed.origin + parsed.pathname +
+    return pathKey +
       (retainedParameters ? `?${retainedParameters}` : "");
   } catch {
     return url;
@@ -1237,11 +1415,11 @@ function videoUrlIdentityKey(url) {
 
 /// Retained non-auth query parameters identify a stream variant. Used when
 /// matching path-only child keys returned by the paired HLS inspection API.
-function videoUrlQueryIdentityKey(url) {
+function videoUrlQueryIdentityKey(url, finds = null, frameId = null) {
   try {
     const parsed = new URL(url);
     const pathPrefix = parsed.origin + parsed.pathname;
-    return videoUrlIdentityKey(url).slice(pathPrefix.length);
+    return videoUrlIdentityKey(url, finds, frameId).slice(pathPrefix.length);
   } catch {
     return "";
   }
@@ -1294,16 +1472,21 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
     const nestedChildKeys = nestedHlsPlaylistChildKeys(
       manifests,
       sniffFirstSeenTimesForFrame(finds, frameId),
+      finds,
+      frameId,
     );
     const candidates = nestedChildKeys.size > 0
-      ? manifests.filter((url) => !nestedChildKeys.has(videoUrlIdentityKey(url)))
+      ? manifests.filter((url) => !nestedChildKeys.has(videoUrlIdentityKey(url, finds, frameId)))
       : manifests;
-    let fallback = mergeVideoFinds([], candidates, kinds);
+    let fallback = mergeVideoFinds([], candidates, kinds, finds, frameId);
     if (fallback.length > 1) {
       fallback = await preferMasterPlaylists(
         fallback,
         await tabOriginForHlsFetch(tabId),
         manifests,
+        undefined,
+        finds,
+        frameId,
       );
     }
     return fallback;
@@ -1324,6 +1507,8 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
       manifests,
       sniffTimes,
       firstSeenTimes,
+      finds,
+      frameId,
     );
     const best = await bestManifestForVideo(tabId, finds, frameId, attributed, video);
     if (best) {
@@ -1338,8 +1523,10 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
       wholeMedia,
       sniffTimes,
       firstSeenTimes,
+      finds,
+      frameId,
     );
-    const uniqueMedia = dedupeVideoUrlsByPath(attributedMedia, finds);
+    const uniqueMedia = dedupeVideoUrlsByPath(attributedMedia, finds, frameId);
     if (uniqueMedia.length === 1) urls.push(uniqueMedia[0]);
   }
   return urls;
@@ -1368,13 +1555,13 @@ async function resolvedVideoUrls(tabId) {
 }
 
 function detectedKindForUrl(finds, url) {
-  const key = videoUrlIdentityKey(url);
   if (finds && finds.kindsByFrame instanceof Map) {
-    for (const kinds of finds.kindsByFrame.values()) {
-      const kind = kinds.get(key);
+    for (const [frameId, kinds] of finds.kindsByFrame) {
+      const kind = kinds.get(videoUrlIdentityKey(url, finds, frameId));
       if (kind) return kind;
     }
   }
+  const key = videoUrlIdentityKey(url, finds);
   return finds && finds.kinds instanceof Map ? finds.kinds.get(key) || null : null;
 }
 
@@ -1391,6 +1578,7 @@ function videoTitleForUrl(finds, url) {
     const sniffed = sniffedManifestsForFrame(finds, frameId);
     const wholeMedia = wholeMediaUrlsForFrame(finds, frameId);
     const candidates = sniffed.concat(wholeMedia);
+    const frameKey = videoUrlIdentityKey(url, finds, frameId);
     const sniffTimes = sniffTimesForFrame(finds, frameId);
     const firstSeenTimes = sniffFirstSeenTimesForFrame(finds, frameId);
 
@@ -1401,7 +1589,7 @@ function videoTitleForUrl(finds, url) {
       if (!title) continue;
 
       let matches = typeof video.src === "string" &&
-        video.src && videoUrlIdentityKey(video.src) === key;
+        video.src && videoUrlIdentityKey(video.src, finds, frameId) === frameKey;
       if (!matches && video.blob === true && candidates.length > 0) {
         matches = attributedManifestUrlsForVideo(
           videos,
@@ -1409,7 +1597,7 @@ function videoTitleForUrl(finds, url) {
           candidates,
           sniffTimes,
           firstSeenTimes,
-        ).some((candidate) => videoUrlIdentityKey(candidate) === key);
+        ).some((candidate) => videoUrlIdentityKey(candidate, finds, frameId) === frameKey);
       }
       if (matches) labels.add(title);
     }
@@ -1508,8 +1696,8 @@ function wholeMediaUrlsForFrame(finds, frameId) {
     !isSegmentLikeVideoUrl(url) &&
     !isByteRangeSliceUrl(url) &&
     sizes instanceof Map &&
-    Number.isSafeInteger(sizes.get(videoUrlIdentityKey(url))) &&
-    sizes.get(videoUrlIdentityKey(url)) >= MIN_WHOLE_VIDEO_MEDIA_BYTES
+    Number.isSafeInteger(sizes.get(videoUrlIdentityKey(url, finds, frameId))) &&
+    sizes.get(videoUrlIdentityKey(url, finds, frameId)) >= MIN_WHOLE_VIDEO_MEDIA_BYTES
   );
 }
 
@@ -1526,24 +1714,23 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
   if (!tracked.has(sourceFrame) && tracked.size >= MAX_VIDEO_FRAMES) {
     if (!evictOldestFrame(f, sourceFrame)) return false;
   }
-  // Whether the menu-visible state changed. Repeat observations of the same
-  // URL still refresh their last-seen time below, but no save or rebuild.
-  let changed = false;
+  const promoted = observeAdaptiveQueryVariants(f, sourceFrame, url, observedAt);
+  let changed = promoted && collapseAdaptiveQueryPath(f, sourceFrame, urlPathKey(url));
 
   let kinds = f.kindsByFrame.get(sourceFrame);
   if (!kinds) {
     kinds = new Map();
     f.kindsByFrame.set(sourceFrame, kinds);
   }
-  const key = videoUrlIdentityKey(url);
-  if (kinds.get(key) !== kind) {
+  const key = videoUrlIdentityKey(url, f, sourceFrame)
+  if (kinds.get(key) !== kind; {
     kinds.set(key, kind);
     changed = true;
   }
   const sequences = sniffSequenceMapForFrame(f, sourceFrame, true);
   const hadPriorObservation =
     sequences.has(key) ||
-    (f.sniffedByFrame.get(sourceFrame) || []).some((candidate) => videoUrlIdentityKey(candidate) === key) ||
+    (f.sniffedByFrame.get(sourceFrame) || []).some((candidate) => videoUrlIdentityKey(candidate, f, sourceFrame) === key) ||
     (f.mediaByFrame.get(sourceFrame) || []).some((candidate) => videoUrlIdentityKey(candidate) === key);
 
   const listMap = kind === "manifest" ? f.sniffedByFrame : f.mediaByFrame;
@@ -1552,7 +1739,7 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
     urls = [];
     listMap.set(sourceFrame, urls);
   }
-  const idx = urls.findIndex((candidate) => videoUrlIdentityKey(candidate) === key);
+  const idx = urls.findIndex((candidate) => videoUrlIdentityKey(candidate, f, sourceFrame) === key);
   if (idx >= 0) {
     if (urls[idx] !== url) {
       urls[idx] = url;
@@ -1579,7 +1766,7 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
       wholeMediaSize >= MIN_WHOLE_VIDEO_MEDIA_BYTES &&
       !isSegmentLikeVideoUrl(url)
     ) {
-      const wholeIndex = wholeUrls.findIndex((candidate) => videoUrlIdentityKey(candidate) === key);
+      const wholeIndex = wholeUrls.findIndex((candidate) => videoUrlIdentityKey(candidate, f, sourceFrame) === key);
       if (wholeIndex >= 0) {
         if (wholeUrls[wholeIndex] !== url) {
           wholeUrls[wholeIndex] = url;
@@ -1595,7 +1782,7 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
       }
     } else {
       for (let i = wholeUrls.length - 1; i >= 0; i--) {
-        if (videoUrlIdentityKey(wholeUrls[i]) === key) {
+        if (videoUrlIdentityKey(wholeUrls[i], f, sourceFrame) === key) {
           wholeUrls.splice(i, 1);
           changed = true;
         }
@@ -1604,7 +1791,7 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
     }
     while (wholeUrls.length > MAX_MEDIA_SNIFFS_PER_FRAME) {
       const removed = wholeUrls.shift();
-      sizes.delete(videoUrlIdentityKey(removed));
+      sizes.delete(videoUrlIdentityKey(removed, f, sourceFrame));
       changed = true;
     }
     if (wholeUrls.length === 0) f.wholeMediaByFrame.delete(sourceFrame);
@@ -1633,11 +1820,11 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
   while (urls.length > limit) {
     changed = true;
     const removed = urls.shift();
-    const removedKey = videoUrlIdentityKey(removed);
+    const removedKey = videoUrlIdentityKey(removed, f, sourceFrame);
     if (kind === "media") {
       const wholeUrls = f.wholeMediaByFrame.get(sourceFrame) || [];
       for (let i = wholeUrls.length - 1; i >= 0; i--) {
-        if (videoUrlIdentityKey(wholeUrls[i]) === removedKey) wholeUrls.splice(i, 1);
+        if (videoUrlIdentityKey(wholeUrls[i], f, sourceFrame) === removedKey) wholeUrls.splice(i, 1);
       }
       const sizes = f.mediaSizesByFrame.get(sourceFrame);
       if (sizes) {
@@ -1648,7 +1835,7 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
     }
     const otherList = kind === "manifest" ? f.mediaByFrame.get(sourceFrame) : f.sniffedByFrame.get(sourceFrame);
     const stillPresent = Array.isArray(otherList) &&
-      otherList.some((candidate) => videoUrlIdentityKey(candidate) === removedKey);
+      otherList.some((candidate) => videoUrlIdentityKey(candidate, f, sourceFrame) === removedKey);
     if (!stillPresent) {
       sequences.delete(removedKey);
       times.delete(removedKey);
