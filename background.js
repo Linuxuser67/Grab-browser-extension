@@ -37,6 +37,22 @@ if (
   );
 }
 
+// Content scripts only use runtime messaging. Disable their direct storage
+// access so they cannot read preferences or the machine-local pairing secret.
+// Chrome supports local/sync restrictions from 140; Firefox does not expose it.
+function restrictContentScriptStorage(area) {
+  if (!area || typeof area.setAccessLevel !== "function") return;
+  try {
+    const result = area.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
+    if (result && typeof result.catch === "function") result.catch(() => {});
+  } catch {
+    // Older browsers may not implement access-level restrictions.
+  }
+}
+
+restrictContentScriptStorage(chrome.storage.local);
+restrictContentScriptStorage(chrome.storage.sync);
+
 const GRAB_SCHEME = "grab://";
 
 // Browser startup time (Varia pattern): chrome.downloads.onCreated can re-fire
