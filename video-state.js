@@ -1363,7 +1363,7 @@ async function restoreVideoFinds(tabId) {
             sniffSequencesByFrame.set(frameId, sequences);
           }
           for (const url of urls) {
-            const key = videoUrlIdentityKey(url);
+            const key = videoUrlIdentityKey(url, saved, frameId);
             if (!sequences.has(key) && !sequences.has(urlPathKey(url))) {
               sequences.set(key, ++sniffSequence);
             }
