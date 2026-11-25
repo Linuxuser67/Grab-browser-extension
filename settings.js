@@ -125,15 +125,26 @@ function bindSettingsForm(doc, options = {}) {
   }
 
   async function save() {
-    await saveSettings({
-      interceptDownloads: els.intercept.checked,
-      skipTypes: els.skip.value,
-      showContextMenu: els.menu.checked,
-      detectVideos: els.detect.checked,
-      minSizeMB: els.minSize.value,
-    });
+    try {
+      await saveSettings({
+        interceptDownloads: els.intercept.checked,
+        skipTypes: els.skip.value,
+        showContextMenu: els.menu.checked,
+        detectVideos: els.detect.checked,
+        minSizeMB: els.minSize.value,
+      });
+    } catch {
+      clearTimeout(saveTimer);
+      els.saved.classList.remove("show");
+      els.saved.classList.add("error");
+      els.saved.textContent = "Could not save settings";
+      els.saved.classList.add("show");
+      els.saved.style.opacity = "1";
+      return false;
+    }
     // Populate the live region only after a save so it does not announce
     // "Saved" when the popup or Options page first opens.
+    els.saved.classList.remove("error");
     els.saved.textContent = "Saved";
     // Flash the "saved" indicator. popup.html styles #saved.show,
     // options.html styles #saved's inline opacity; set both, the unused
@@ -145,6 +156,7 @@ function bindSettingsForm(doc, options = {}) {
       els.saved.classList.remove("show");
       els.saved.style.opacity = "0";
     }, 1200);
+    return true;
   }
 
   async function onDetectChange() {
@@ -166,7 +178,7 @@ function bindSettingsForm(doc, options = {}) {
       await save();
       return;
     }
-    await save();
+    if (!(await save())) return;
     await releaseUnusedPermissions();
   }
 
