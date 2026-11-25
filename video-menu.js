@@ -1342,7 +1342,7 @@ function rekeyAdaptiveQueryPath(finds, frameId, pathKey, oldIdentityForUrl) {
       if (urlPathKey(url) === pathKey) urls.push(url);
     }
   }
-  if (urls.length < 2) return false;
+  if (urls.length === 0) return false;
   const keyChanges = new Map(urls.map((url) => [
     oldIdentityForUrl(url),
     videoUrlIdentityKey(url, finds, frameId),

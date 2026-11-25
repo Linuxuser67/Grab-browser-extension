@@ -771,6 +771,10 @@ function videoStateSnapshotByteLength(snapshot) {
 /// long as possible; old child-frame observations go first.
 function fitVideoStateSnapshot(snapshot) {
   let size = videoStateSnapshotByteLength(snapshot);
+  if (size > MAX_VIDEO_STATE_SNAPSHOT_BYTES && snapshot.rotatingQueryParams.length > 0) {
+    snapshot.rotatingQueryParams = [];
+    size = videoStateSnapshotByteLength(snapshot);
+  }
   const overageFraction = () => Math.max(
     1,
     Math.ceil(Math.max(1, size - MAX_VIDEO_STATE_SNAPSHOT_BYTES) /
@@ -861,11 +865,6 @@ function fitVideoStateSnapshot(snapshot) {
         videos.filter((_, index) => !(removed.get(frameId) || new Set()).has(index)),
       ])
       .filter(([, videos]) => videos.length > 0);
-    size = videoStateSnapshotByteLength(snapshot);
-  }
-
-  if (size > MAX_VIDEO_STATE_SNAPSHOT_BYTES && snapshot.rotatingQueryParams.length > 0) {
-    snapshot.rotatingQueryParams = [];
     size = videoStateSnapshotByteLength(snapshot);
   }
 

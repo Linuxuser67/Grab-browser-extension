@@ -4403,6 +4403,13 @@ describe("HLS master playlist filtering", () => {
     const restarted = loadBackground(restartedChrome);
     await restarted._restoreVideoFinds(tabId);
     assert.deepEqual(await restarted.resolvedVideoUrlsForFrame(tabId, 0), observed);
+    const restoredFinds = restarted._videoFinds.get(tabId);
+    for (const url of observed) {
+      const key = restarted.videoUrlIdentityKey(url, restoredFinds, 0);
+      assert.equal(restoredFinds.kindsByFrame.get(0).get(key), "manifest");
+      assert.ok(restoredFinds.sniffTimesByFrame.get(0).has(key));
+      assert.ok(restoredFinds.sniffFirstSeenByFrame.get(0).has(key));
+    }
   });
 
   test("expires adaptive identities and restores full query keys after an idle window", async () => {
