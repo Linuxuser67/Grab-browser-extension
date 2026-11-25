@@ -27,7 +27,13 @@ function makeElement() {
 
 /// Load settings.js against a fake chrome. `grant` is what permissions.contains
 /// and request report; `sync`/`local` are the stored values.
-function setup({ sync = {}, local = {}, grant = false, requestResult } = {}) {
+function setup({
+  sync = {},
+  local = {},
+  grant = false,
+  requestResult,
+  rejectSyncSet = false,
+} = {}) {
   const state = {
     sync: { ...sync },
     local: { ...local },
@@ -40,7 +46,10 @@ function setup({ sync = {}, local = {}, grant = false, requestResult } = {}) {
     storage: {
       sync: {
         get: async (defaults) => ({ ...defaults, ...state.sync }),
-        set: async (obj) => Object.assign(state.sync, obj),
+        set: async (obj) => {
+          if (rejectSyncSet) throw new Error("sync storage quota exceeded");
+          Object.assign(state.sync, obj);
+        },
       },
       local: {
         get: async (defaults) => ({ ...defaults, ...state.local }),
@@ -122,6 +131,19 @@ test("releaseUnusedPermissions: both features in use removes nothing", async () 
   });
   await context.releaseUnusedPermissions();
   assert.deepEqual(state.removals, []);
+});
+
+test("a failed sync save is reported and does not reject the change listener", async () => {
+  const { elements, context, doc } = setup({ rejectSyncSet: true });
+  context.bindSettingsForm(doc);
+  await tick();
+
+  const intercept = elements.get("interceptDownloads");
+  intercept.checked = true;
+  const result = await intercept.listeners.get("change")();
+
+  assert.equal(result, false);
+  assert.equal(elements.get("saved").textContent, "Could not save settings");
 });
 
 test("detection stored as on but without page access shows as off, with a note", async () => {
