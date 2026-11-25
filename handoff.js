@@ -612,7 +612,12 @@ async function postToGrab(url, ctx) {
     // They go only to a Grab that has proven it holds the pairing code.
     // Never export incognito cookies; retain Firefox container scoping for
     // ordinary downloads using DownloadItem.cookieStoreId.
-    if (!(await hasCookiePermission())) {
+    if (!(await loadForwardCookies())) {
+      // The user turned cookie forwarding off in Options: skip all cookie
+      // permission and store checks, and discard any stale prepared snapshot.
+      cookies = [];
+      if (ctx && typeof ctx === "object") ctx.preparedCookies = undefined;
+    } else if (!(await hasCookiePermission())) {
       // Pairing alone is not enough: the optional Cookies permission is
       // required for authenticated sites. Make the URL-only fallback visible.
       cookies = [];
@@ -620,13 +625,6 @@ async function postToGrab(url, ctx) {
         ctx.cookieWarning =
           COOKIE_WARNINGS.permission;
       }
-    } else if (!(await loadForwardCookies())) {
-      // The user turned cookie forwarding off in Options: the paired request
-      // stays signed but carries no cookies. That is an intentional privacy
-      // choice, not a handoff failure, so leave the toolbar badge alone.
-      cookies = [];
-      // Drop a snapshot taken before the user flipped the toggle.
-      if (ctx && typeof ctx === "object") ctx.preparedCookies = undefined;
     } else if (ctx && Array.isArray(ctx.preparedCookies)) {
       // The cold-start preflight already resolved the source cookie store and
       // read these cookies. Reuse that snapshot instead of reading again after
@@ -782,19 +780,16 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
   // but defer the cookie read until after Grab has been launched.
   let resolvedCookieStoreId;
   let shouldPrepareCookies = false;
-  if (secret && incognito !== true) {
-    // Permission and preference reads are independent. Run them together so
-    // neither adds serial delay before the source cookie store is resolved.
-    const [cookiePermission, forwardingEnabled] = await Promise.all([
-      hasCookiePermission(),
-      loadForwardCookies(),
-    ]);
-    if (!cookiePermission) {
+  if (secret && incognito !== true && await loadForwardCookies()) {
+    // Do not query the optional Cookies permission or resolve a cookie store
+    // when forwarding is disabled. These checks are only needed for a cookie
+    // snapshot; the URL-only wake still proceeds.
+    if (!(await hasCookiePermission())) {
       if (ctx && typeof ctx === "object") {
         ctx.cookieWarning =
           COOKIE_WARNINGS.permission;
       }
-    } else if (forwardingEnabled) {
+    } else {
       try {
         // The original tab's store must be captured before grab:// navigation.
         resolvedCookieStoreId = await resolveStoreId(ctx);

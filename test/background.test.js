@@ -791,11 +791,18 @@ describe("master interception toggle", () => {
     assert.equal(intercepted(chrome, 9), true);
   });
 
-  test("automatic interception reads no cookies when forwarding is off", async () => {
+  test("automatic interception skips cookie permission and reads when forwarding is off", async () => {
     const chrome = makeChrome({
       localSettings: { ...pairedLocal(), forwardCookies: false },
       syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
     });
+    let permissionChecks = 0;
+    chrome.permissions = {
+      contains: async () => {
+        permissionChecks += 1;
+        return true;
+      },
+    };
     let reads = 0;
     chrome.cookies.getAll = async () => {
       reads += 1;
@@ -805,6 +812,7 @@ describe("master interception toggle", () => {
     void bg;
     await chrome._listeners["downloads.onCreated"](item(9));
     assert.equal(intercepted(chrome, 9), true, "the download is still handed over");
+    assert.equal(permissionChecks, 0, "disabled forwarding must skip the Cookies permission API");
     assert.equal(reads, 0, "an intercept must never touch the cookie store while off");
   });
 
@@ -1525,9 +1533,16 @@ describe("HTTP handoff to Grab", () => {
     assert.deepEqual(JSON.parse(post.opts.body).cookies, []);
   });
 
-  test("a paired handoff sends no cookies when cookie forwarding is off", async () => {
+  test("a paired handoff skips cookie permission and reads when forwarding is off", async () => {
     mockPairedGrab();
     await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: false });
+    let permissionChecks = 0;
+    chrome.permissions = {
+      contains: async () => {
+        permissionChecks += 1;
+        throw new Error("Cookies permission must not be queried while forwarding is off");
+      },
+    };
     let reads = 0;
     chrome.cookies.getAll = async () => {
       reads += 1;
@@ -1535,6 +1550,7 @@ describe("HTTP handoff to Grab", () => {
     };
     const ctx = { tabId: 7 };
     assert.equal(await bg.handOff("https://example.com/f.zip", ctx, [0, 0]), true);
+    assert.equal(permissionChecks, 0, "disabled forwarding must skip the Cookies permission API");
     assert.equal(reads, 0, "no cookie may be read while forwarding is off");
     const post = posts()[0];
     const sent = JSON.parse(post.opts.body);
@@ -1573,14 +1589,22 @@ describe("HTTP handoff to Grab", () => {
     assert.deepEqual(JSON.parse(posts()[0].opts.body).cookies, []);
   });
 
-  test("a prepared cookie snapshot is never sent after forwarding turns off", async () => {
+  test("a prepared cookie snapshot is dropped without checking permission when forwarding is off", async () => {
     mockPairedGrab();
     await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: false });
+    let permissionChecks = 0;
+    chrome.permissions = {
+      contains: async () => {
+        permissionChecks += 1;
+        return true;
+      },
+    };
 
     const ctx = {
       preparedCookies: [{ name: "sid", value: "v", domain: "example.com" }],
     };
     assert.equal(await bg.postToGrab("https://example.com/f.zip", ctx), 200);
+    assert.equal(permissionChecks, 0, "stale snapshots must not trigger a Cookies permission query");
     assert.deepEqual(JSON.parse(posts()[0].opts.body).cookies, []);
     assert.equal(ctx.preparedCookies, undefined, "the stale snapshot is dropped");
   });
@@ -1640,9 +1664,21 @@ describe("HTTP handoff to Grab", () => {
     );
   });
 
-  test("the cold-start wake launches Grab without reading cookies when forwarding is off", async () => {
+  test("the cold-start wake skips cookie permission and store lookup when forwarding is off", async () => {
     mockPairedGrab();
     await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: false });
+    let permissionChecks = 0;
+    chrome.permissions = {
+      contains: async () => {
+        permissionChecks += 1;
+        return true;
+      },
+    };
+    let storeLookups = 0;
+    chrome.tabs.get = async (id) => {
+      storeLookups += 1;
+      return { id, url: "https://example.com/" };
+    };
     let reads = 0;
     chrome.cookies.getAll = async () => {
       reads += 1;
@@ -1663,7 +1699,9 @@ describe("HTTP handoff to Grab", () => {
       Date.now = realNow;
       bg._setSleep((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     }
-    assert.equal(reads, 0, "the cookie store is not read while forwarding is off");
+    assert.equal(permissionChecks, 0, "disabled forwarding must skip the Cookies permission API");
+    assert.equal(storeLookups, 0, "disabled forwarding must skip cookie-store resolution");
+    assert.equal(reads, 0, "the browser cookie store is not read while forwarding is off");
     assert.equal(hellos().length, 1, "the extension still waits for Grab to become ready");
     assert.equal(
       chrome._calls.filter(([name, args]) => name === "tabs.update" && args.url === "grab://https/").length,
@@ -2349,82 +2387,6 @@ describe("HTTP handoff to Grab", () => {
     );
   });
 
-  test("cold-start overlaps cookie permission and forwarding preference checks", async () => {
-    await pair();
-    await chrome.storage.local.set({ forwardCookies: true });
-
-    let releasePermission;
-    let releasePreference;
-    const permissionGate = new Promise((resolve) => {
-      releasePermission = resolve;
-    });
-    const preferenceGate = new Promise((resolve) => {
-      releasePreference = resolve;
-    });
-    let permissionStarted = false;
-    let preferenceStarted = false;
-    let launched = false;
-
-    chrome.permissions = {
-      contains: async () => {
-        permissionStarted = true;
-        await permissionGate;
-        return true;
-      },
-    };
-    const originalLocalGet = chrome.storage.local.get;
-    chrome.storage.local.get = async (defaults) => {
-      if (defaults && Object.hasOwn(defaults, "forwardCookies")) {
-        preferenceStarted = true;
-        await preferenceGate;
-      }
-      return originalLocalGet(defaults);
-    };
-
-    mockColdStart();
-    const coldStartUpdate = chrome.tabs.update;
-    chrome.tabs.update = (a, b) => {
-      const target = b !== undefined ? b : a;
-      const update = typeof target === "string" ? target : target && target.url;
-      if (update === "grab://https/") launched = true;
-      return coldStartUpdate(a, b);
-    };
-
-    let fakeNow = 1_000;
-    const realNow = Date.now;
-    Date.now = () => fakeNow;
-    bg._setWakeTimeout(1000);
-    bg._setSleep(async (ms) => { fakeNow += ms; });
-    let pendingWake;
-    try {
-      pendingWake = bg.wakeGrabAndWait(
-        "https://example.com/file.zip",
-        7,
-        false,
-        { tabId: 7 },
-      );
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.equal(permissionStarted, true, "the permission check started");
-      assert.equal(preferenceStarted, true, "the preference read started concurrently");
-      assert.equal(launched, false, "launch waits for the source cookie policy");
-
-      releasePermission();
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.equal(launched, false, "the preference read is still required");
-
-      releasePreference();
-      assert.equal(await pendingWake, true);
-      assert.equal(launched, true, "Grab launches once both checks finish");
-    } finally {
-      releasePermission();
-      releasePreference();
-      if (pendingWake) await pendingWake.catch(() => {});
-      Date.now = realNow;
-      bg._setSleep((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-      chrome.storage.local.get = originalLocalGet;
-    }
-  });
-
   test("cold-start wake launches Grab before awaiting the cookie snapshot", async () => {
     await pair();
     await chrome.storage.local.set({ forwardCookies: true });
@@ -2530,8 +2492,14 @@ describe("HTTP handoff to Grab", () => {
     await chrome.storage.local.set({ forwardCookies: false });
     const referer = "https://example.com/watch/episode";
     const targetUrl = "https://cdn.example.com/f.zip";
+    let permissionChecks = 0;
+    chrome.permissions = {
+      contains: async () => {
+        permissionChecks += 1;
+        return true;
+      },
+    };
     let reads = 0;
-    chrome.permissions = { contains: async () => true };
     chrome.cookies.getAll = async () => {
       reads += 1;
       return [{
@@ -2551,6 +2519,7 @@ describe("HTTP handoff to Grab", () => {
     const sent = JSON.parse(post.opts.body);
     assert.equal(sent.referer, "https://example.com/");
     assert.deepEqual(sent.cookies, []);
+    assert.equal(permissionChecks, 0, "disabled forwarding must skip the Cookies permission API");
     assert.equal(reads, 0, "the cookie store is not read while forwarding is disabled");
   });
 
