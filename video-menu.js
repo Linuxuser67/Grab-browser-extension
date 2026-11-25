@@ -1258,7 +1258,7 @@ function queryParameterSignatures(url) {
 function observeAdaptiveQueryVariants(finds, frameId, url, observedAt) {
   if (!isHlsPlaylistUrl(url)) return [];
   let parsed;
-  try { parsed = new URL(url); } catch { return false; }
+  try { parsed = new URL(url); } catch { return []; }
   const pathKey = parsed.origin + parsed.pathname;
   const signatures = queryParameterSignatures(url);
   if (signatures.size === 0) return [];
