@@ -1027,7 +1027,7 @@ describe("per-video menu candidates", () => {
 
   test("a manifest requested a few seconds after loadstart can belong to one of multiple players", async () => {
     const direct = "https://cdn.example.com/earlier/direct.mp4";
-    const manifest = "https://cdn.example.com/later/master.m3u8";
+    const manifest = "https://cdn.example.com/later/master.m3u8?id=live-stream";
     const findings = makeFinds(
       [
         { src: direct, blob: false, elementId: 12, loadStartedAt: 1_000 },
