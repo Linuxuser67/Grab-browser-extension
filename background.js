@@ -260,6 +260,7 @@ if (typeof module !== "undefined" && module.exports) {
     MAX_VIDEO_ITEMS,
     MAX_VIDEO_FRAMES,
     MAX_VIDEO_TITLE_LENGTH,
+    MAX_VIDEO_STATE_SNAPSHOT_BYTES,
     manifestMenuRows,
     directMenuRow,
     videoUrlIdentityKey,

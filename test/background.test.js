@@ -3105,7 +3105,10 @@ describe("review hardening (1.5.8)", () => {
       kindsByFrame: new Map([[0, new Map()]]),
       title: "",
     });
-    assert.deepEqual(snap.sniffedFrames, [[0, [ok]]]);
+    assert.deepEqual(
+      snap.observations,
+      [[0, [[ok, 1, null, null, null, null, null]]]],
+    );
     assert.deepEqual(snap.frames, [[0, [{ src: ok, blob: false }]]]);
   });
 

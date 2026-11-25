@@ -458,7 +458,7 @@ function normalizeVideoReport(rawVideos, maximum) {
   return out;
 }
 
-function snapshotVideoFinds(finds) {
+function snapshotVideoFindsV2(finds) {
   const frames = [];
   let remainingVideos = MAX_VIDEO_ITEMS;
   for (const [frameId, videos] of finds.frames) {
@@ -672,6 +672,346 @@ function snapshotVideoFinds(finds) {
   };
 }
 
+
+/// Maximum serialized session snapshot size per tab. This is deliberately
+/// far below Chrome's current session-storage quota so one page cannot crowd
+/// out unrelated session state.
+const MAX_VIDEO_STATE_SNAPSHOT_BYTES = 256 * 1024;
+
+/// Compact all sniff-related maps into a single URL-keyed observation tuple:
+/// [url, flags, kind, sequence, observedAt, firstSeenAt, wholeMediaSize].
+/// flags: 1 = manifest sniff, 2 = media sniff, 4 = whole-file media candidate.
+function compactVideoObservations(snapshot) {
+  const byFrame = new Map();
+  const ensure = (frameId, url) => {
+    if (!Number.isInteger(frameId) || frameId < 0 ||
+        typeof url !== "string" || !fitsGrabUrl(url)) return null;
+    let records = byFrame.get(frameId);
+    if (!records) byFrame.set(frameId, records = new Map());
+    const key = videoUrlIdentityKey(url);
+    let record = records.get(key);
+    if (!record) {
+      record = [url, 0, null, null, null, null, null];
+      records.set(key, record);
+    } else {
+      // Keep the most recently observed auth-token variant without changing
+      // the stable resource identity or duplicating the URL in metadata maps.
+      record[0] = url;
+    }
+    return record;
+  };
+  const mark = (pairs, flag) => {
+    for (const [frameId, urls] of pairs) {
+      for (const url of urls) {
+        const record = ensure(frameId, url);
+        if (record) record[1] |= flag;
+      }
+    }
+  };
+  mark(snapshot.sniffedFrames, 1);
+  mark(snapshot.mediaFrames, 2);
+  mark(snapshot.wholeMediaFrames, 4);
+
+  const find = (frameId, key) => {
+    const records = byFrame.get(frameId);
+    if (!records) return null;
+    const direct = records.get(key);
+    if (direct) return direct;
+    // Path-only keys can exist in older in-memory state after an upgrade.
+    for (const record of records.values()) {
+      if (urlPathKey(record[0]) === key) return record;
+    }
+    return null;
+  };
+  const attach = (pairs, index, valid) => {
+    for (const [frameId, entries] of pairs) {
+      for (const [key, value] of entries) {
+        const record = find(frameId, key);
+        if (record && valid(value, record)) record[index] = value;
+      }
+    }
+  };
+  attach(snapshot.kindsFrames, 2, (value) =>
+    value === "manifest" || value === "media");
+  attach(snapshot.sniffSequences, 3, (value) =>
+    Number.isSafeInteger(value) && value >= 0);
+  attach(snapshot.sniffTimes, 4, (value) =>
+    Number.isFinite(value) && value >= 0);
+  attach(snapshot.sniffFirstSeen, 5, (value) =>
+    Number.isFinite(value) && value >= 0);
+  attach(snapshot.mediaSizesFrames, 6, (value, record) =>
+    (record[1] & 4) !== 0 &&
+    Number.isSafeInteger(value) &&
+    value >= MIN_WHOLE_VIDEO_MEDIA_BYTES);
+
+  const observations = [];
+  for (const [frameId, records] of byFrame) {
+    const out = [...records.values()].filter((record) => record[1] !== 0);
+    if (out.length) observations.push([frameId, out]);
+  }
+  return observations;
+}
+
+function videoStateSnapshotByteLength(snapshot) {
+  return new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
+}
+
+/// Remove old, page-controlled records until the complete serialized object
+/// fits the per-tab budget. Preserve the top frame and retirement markers as
+/// long as possible; old child-frame observations go first.
+function fitVideoStateSnapshot(snapshot) {
+  let size = videoStateSnapshotByteLength(snapshot);
+  const overageFraction = () => Math.max(
+    1,
+    Math.ceil(Math.max(1, size - MAX_VIDEO_STATE_SNAPSHOT_BYTES) /
+      Math.max(1, size) * 100),
+  ) / 100;
+
+  while (size > MAX_VIDEO_STATE_SNAPSHOT_BYTES) {
+    const candidates = [];
+    for (const [frameId, records] of snapshot.observations) {
+      for (const record of records) {
+        candidates.push({
+          frameId,
+          record,
+          observedAt: Number.isFinite(record[5]) ? record[5]
+            : Number.isFinite(record[4]) ? record[4]
+            : Number.isSafeInteger(record[3]) ? record[3] : 0,
+        });
+      }
+    }
+    if (candidates.length === 0) break;
+    candidates.sort((a, b) =>
+      Number(a.frameId === 0) - Number(b.frameId === 0) ||
+      a.observedAt - b.observedAt);
+    const count = Math.max(1, Math.ceil(candidates.length * Math.min(0.5, overageFraction())));
+    const removed = new Set(candidates.slice(0, count).map((entry) => entry.record));
+    snapshot.observations = snapshot.observations
+      .map(([frameId, records]) => [frameId, records.filter((record) => !removed.has(record))])
+      .filter(([, records]) => records.length > 0);
+    size = videoStateSnapshotByteLength(snapshot);
+  }
+
+  while (size > MAX_VIDEO_STATE_SNAPSHOT_BYTES) {
+    const candidates = [];
+    for (const [frameId, retired] of snapshot.retiredFrames) {
+      for (let index = 0; index < retired.previousVideos.length; index += 1) {
+        const video = retired.previousVideos[index];
+        candidates.push({
+          frameId,
+          retired,
+          index,
+          observedAt: Number.isFinite(video.loadStartedAt) ? video.loadStartedAt : 0,
+        });
+      }
+    }
+    if (candidates.length === 0) break;
+    candidates.sort((a, b) =>
+      Number(a.frameId === 0) - Number(b.frameId === 0) ||
+      a.observedAt - b.observedAt);
+    const count = Math.max(1, Math.ceil(candidates.length * Math.min(0.5, overageFraction())));
+    const removed = new Map();
+    for (const item of candidates.slice(0, count)) {
+      let indexes = removed.get(item.retired);
+      if (!indexes) removed.set(item.retired, indexes = new Set());
+      indexes.add(item.index);
+    }
+    for (const [retired, indexes] of removed) {
+      retired.previousVideos = retired.previousVideos.filter((_, index) => !indexes.has(index));
+    }
+    size = videoStateSnapshotByteLength(snapshot);
+  }
+
+  while (size > MAX_VIDEO_STATE_SNAPSHOT_BYTES) {
+    const candidates = [];
+    for (const [frameId, videos] of snapshot.frames) {
+      for (let index = 0; index < videos.length; index += 1) {
+        const video = videos[index];
+        candidates.push({
+          frameId,
+          index,
+          observedAt: Number.isFinite(video.loadStartedAt) ? video.loadStartedAt : 0,
+        });
+      }
+    }
+    if (candidates.length === 0) break;
+    candidates.sort((a, b) =>
+      Number(a.frameId === 0) - Number(b.frameId === 0) ||
+      a.observedAt - b.observedAt);
+    const count = Math.max(1, Math.ceil(candidates.length * Math.min(0.5, overageFraction())));
+    const removed = new Map();
+    for (const item of candidates.slice(0, count)) {
+      let indexes = removed.get(item.frameId);
+      if (!indexes) removed.set(item.frameId, indexes = new Set());
+      indexes.add(item.index);
+    }
+    snapshot.frames = snapshot.frames
+      .map(([frameId, videos]) => [
+        frameId,
+        videos.filter((_, index) => !(removed.get(frameId) || new Set()).has(index)),
+      ])
+      .filter(([, videos]) => videos.length > 0);
+    size = videoStateSnapshotByteLength(snapshot);
+  }
+
+  if (size > MAX_VIDEO_STATE_SNAPSHOT_BYTES) {
+    snapshot.retiredFrames = snapshot.retiredFrames.map(([frameId, retired]) => [
+      frameId,
+      { ...retired, previousVideos: [] },
+    ]);
+    size = videoStateSnapshotByteLength(snapshot);
+  }
+  if (size > MAX_VIDEO_STATE_SNAPSHOT_BYTES) {
+    snapshot.retiredFrames = [];
+    snapshot.frames = [];
+    snapshot.observations = [];
+    snapshot.title = "";
+  }
+  return snapshot;
+}
+
+function snapshotVideoFinds(finds) {
+  const legacy = snapshotVideoFindsV2(finds);
+  const snapshot = {
+    version: 3,
+    frames: legacy.frames,
+    observations: compactVideoObservations(legacy),
+    sniffSequence: legacy.sniffSequence,
+    retiredFrames: legacy.retiredFrames,
+    title: legacy.title,
+  };
+  return fitVideoStateSnapshot(snapshot);
+}
+
+/// Expand and validate v3 observations into the v2 in-memory representation.
+/// The existing restore pipeline then applies its established per-frame,
+/// per-item, URL and metadata validation before publishing state.
+function expandCompactVideoSnapshot(saved) {
+  const expanded = {
+    ...saved,
+    version: 2,
+    sniffedFrames: [],
+    mediaFrames: [],
+    wholeMediaFrames: [],
+    mediaSizesFrames: [],
+    kindsFrames: [],
+    sniffSequences: [],
+    sniffTimes: [],
+    sniffFirstSeen: [],
+  };
+  const sniffed = new Map();
+  const media = new Map();
+  const whole = new Map();
+  const sizes = new Map();
+  const kinds = new Map();
+  const sequences = new Map();
+  const times = new Map();
+  const firstSeen = new Map();
+  const seenFrames = new Set();
+  let remainingSniffed = MAX_VIDEO_ITEMS;
+  let remainingMedia = MAX_VIDEO_FRAMES * MAX_MEDIA_SNIFFS_PER_FRAME;
+  let remainingWhole = MAX_VIDEO_FRAMES * MAX_MEDIA_SNIFFS_PER_FRAME;
+  let remainingKinds = 200;
+  const setFrame = (map, frameId) => {
+    let value = map.get(frameId);
+    if (!value) map.set(frameId, value = []);
+    return value;
+  };
+
+  for (const pair of Array.isArray(saved.observations) ? saved.observations : []) {
+    if (
+      !Array.isArray(pair) || pair.length !== 2 ||
+      !Number.isInteger(pair[0]) || pair[0] < 0 ||
+      !Array.isArray(pair[1]) || seenFrames.has(pair[0]) ||
+      seenFrames.size >= MAX_VIDEO_FRAMES
+    ) continue;
+    const frameId = pair[0];
+    seenFrames.add(frameId);
+    let frameSniffed = 0;
+    let frameMedia = 0;
+    let frameWhole = 0;
+    const seenUrls = new Set();
+
+    for (const entry of pair[1].slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME)) {
+      if (
+        !Array.isArray(entry) || entry.length !== 7 ||
+        typeof entry[0] !== "string" || !fitsGrabUrl(entry[0]) ||
+        !Number.isInteger(entry[1]) || entry[1] <= 0 || entry[1] > 7
+      ) continue;
+      const [url, flags, kind, sequence, observedAt, firstSeenAt, size] = entry;
+      const key = videoUrlIdentityKey(url);
+      if (seenUrls.has(key)) continue;
+      seenUrls.add(key);
+
+      if (flags & 1) {
+        if (remainingSniffed > 0 && frameSniffed < MAX_MANIFESTS_PER_FRAME) {
+          setFrame(sniffed, frameId).push(url);
+          remainingSniffed -= 1;
+          frameSniffed += 1;
+        }
+      }
+      if (flags & 2) {
+        if (remainingMedia > 0 && frameMedia < MAX_MEDIA_SNIFFS_PER_FRAME) {
+          setFrame(media, frameId).push(url);
+          remainingMedia -= 1;
+          frameMedia += 1;
+        }
+      }
+      if (flags & 4) {
+        if (
+          (flags & 2) !== 0 && remainingWhole > 0 &&
+          frameWhole < MAX_MEDIA_SNIFFS_PER_FRAME &&
+          classifyStream(url, "") === "media" &&
+          !isSegmentLikeVideoUrl(url) &&
+          Number.isSafeInteger(size) && size >= MIN_WHOLE_VIDEO_MEDIA_BYTES
+        ) {
+          setFrame(whole, frameId).push(url);
+          let frameSizes = sizes.get(frameId);
+          if (!frameSizes) sizes.set(frameId, frameSizes = []);
+          frameSizes.push([key, size]);
+          remainingWhole -= 1;
+          frameWhole += 1;
+        }
+      }
+      if (kind === "manifest" || kind === "media") {
+        if (remainingKinds > 0) {
+          let frameKinds = kinds.get(frameId);
+          if (!frameKinds) kinds.set(frameId, frameKinds = []);
+          frameKinds.push([key, kind]);
+          remainingKinds -= 1;
+        }
+      }
+      if (Number.isSafeInteger(sequence) && sequence >= 0) {
+        let frameSequences = sequences.get(frameId);
+        if (!frameSequences) sequences.set(frameId, frameSequences = []);
+        frameSequences.push([key, sequence]);
+        expanded.sniffSequence = Math.max(expanded.sniffSequence || 0, sequence);
+      }
+      if (Number.isFinite(observedAt) && observedAt >= 0) {
+        let frameTimes = times.get(frameId);
+        if (!frameTimes) times.set(frameId, frameTimes = []);
+        frameTimes.push([key, observedAt]);
+      }
+      if (Number.isFinite(firstSeenAt) && firstSeenAt >= 0) {
+        let frameFirstSeen = firstSeen.get(frameId);
+        if (!frameFirstSeen) firstSeen.set(frameId, frameFirstSeen = []);
+        frameFirstSeen.push([key, firstSeenAt]);
+      }
+    }
+  }
+
+  const toPairs = (map) => [...map].map(([frameId, entries]) => [frameId, entries]);
+  expanded.sniffedFrames = toPairs(sniffed);
+  expanded.mediaFrames = toPairs(media);
+  expanded.wholeMediaFrames = toPairs(whole);
+  expanded.mediaSizesFrames = toPairs(sizes);
+  expanded.kindsFrames = toPairs(kinds);
+  expanded.sniffSequences = toPairs(sequences);
+  expanded.sniffTimes = toPairs(times);
+  expanded.sniffFirstSeen = toPairs(firstSeen);
+  return expanded;
+}
+
 /// Restores one snapshot list of [frameId, payload] pairs into a Map,
 /// skipping malformed or duplicate frames and stopping at the frame budget.
 /// `parse` returns the value to store, or null to drop the frame.
@@ -755,7 +1095,10 @@ async function restoreVideoFinds(tabId) {
       const key = videoStateKey(tabId);
       const result = await chrome.storage.session.get(key);
       if (restoredVideoFinds.has(tabId)) return;
-      const saved = result && result[key];
+      const rawSaved = result && result[key];
+      const saved = rawSaved && typeof rawSaved === "object" && rawSaved.version === 3
+        ? expandCompactVideoSnapshot(rawSaved)
+        : rawSaved;
       if (saved && typeof saved === "object" && saved.version === 2) {
         const frames = new Map();
         let remaining = MAX_VIDEO_ITEMS;
