@@ -4309,6 +4309,30 @@ describe("HLS master playlist filtering", () => {
     );
   });
 
+  test("HLS child filtering preserves separate query-identified streams", async () => {
+    const bg = loadBackground(makeChrome());
+    const master = "https://cdn.example.com/live/master.m3u8?id=alpha";
+    const matchingChild = "https://cdn.example.com/live/chunklist.m3u8?id=alpha";
+    const separateChild = "https://cdn.example.com/live/chunklist.m3u8?id=beta";
+    const candidates = [master, matchingChild, separateChild];
+    const inspector = async (url) => url === master
+      ? {
+          is_master: true,
+          child_keys: ["https://cdn.example.com/live/chunklist.m3u8"],
+        }
+      : { is_master: false, child_keys: [] };
+
+    assert.deepEqual(
+      await bg.preferMasterPlaylists(
+        candidates,
+        "https://page.example/watch",
+        candidates,
+        inspector,
+      ),
+      [master, separateChild],
+    );
+  });
+
   test("only browser-sniffed public playlists use the paired Grab inspector", async () => {
     const pageReportedMaster = "https://page-selected.example/private/master.m3u8";
     const browserSniffedMaster = "https://cdn.example.com/observed/master.m3u8";

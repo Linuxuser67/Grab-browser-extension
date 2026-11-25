@@ -612,6 +612,9 @@ function hlsChildPlaylistKeys(text, masterUrl) {
 /// syntactically private hosts retain the existing private-page-only local path.
 /// Unknown playlists, unrelated streams, DASH manifests, and direct files stay.
 function hlsPlaylistNameHints(urls) {
+  // A parent and child can share their path with a separate stream whose ID
+  // lives in the query string. Group name hints by the retained query identity
+  // so a master for one stream cannot hide another stream's rendition URL.
   const mastersByFolder = new Map();
   const childrenByFolder = new Map();
   for (const url of urls || []) {
@@ -624,25 +627,35 @@ function hlsPlaylistNameHints(urls) {
     const basename = parsed.pathname.split("/").filter(Boolean).pop() || "";
     const parent = parsed.pathname.slice(0, Math.max(1, parsed.pathname.lastIndexOf("/")));
     const folder = parsed.origin + parent;
-    const key = urlPathKey(url);
-    if (/^(?:master|index|playlist|hlsplaylist|stream)(?:[_-][a-z0-9]+)?\.(?:m3u8|m3u)$/i.test(basename)) {
-      let masters = mastersByFolder.get(folder);
-      if (!masters) mastersByFolder.set(folder, masters = new Set());
-      masters.add(key);
-    } else if (/^(?:chunklist|prog_index)(?:[_-].*)?\.(?:m3u8|m3u)$/i.test(basename)) {
-      let children = childrenByFolder.get(folder);
-      if (!children) childrenByFolder.set(folder, children = new Set());
-      children.add(key);
+    const identity = videoUrlIdentityKey(url);
+    const queryIdentity = videoUrlQueryIdentityKey(url);
+    const isMaster =
+      /^(?:master|index|playlist|hlsplaylist|stream)(?:[_-][a-z0-9]+)?\.(?:m3u8|m3u)$/i.test(basename);
+    const isChild =
+      /^(?:chunklist|prog_index)(?:[_-].*)?\.(?:m3u8|m3u)$/i.test(basename);
+
+    if (isMaster) {
+      let variants = mastersByFolder.get(folder);
+      if (!variants) mastersByFolder.set(folder, variants = new Map());
+      let identities = variants.get(queryIdentity);
+      if (!identities) variants.set(queryIdentity, identities = new Set());
+      identities.add(identity);
+    } else if (isChild) {
+      let variants = childrenByFolder.get(folder);
+      if (!variants) childrenByFolder.set(folder, variants = new Map());
+      let identities = variants.get(queryIdentity);
+      if (!identities) variants.set(queryIdentity, identities = new Set());
+      identities.add(identity);
     }
   }
 
   const hintedChildren = new Set();
-  for (const [folder, masters] of mastersByFolder) {
-    // More than one plausible master in a directory makes the hint ambiguous.
-    if (masters.size !== 1) continue;
-    const [master] = masters;
-    for (const child of childrenByFolder.get(folder) || []) {
-      if (child !== master) hintedChildren.add(child);
+  for (const [folder, masterVariants] of mastersByFolder) {
+    // Multiple stream IDs in one directory make the folder hint ambiguous.
+    if (masterVariants.size !== 1) continue;
+    const [queryIdentity] = masterVariants.keys();
+    for (const child of (childrenByFolder.get(folder)?.get(queryIdentity) || [])) {
+      hintedChildren.add(child);
     }
   }
   return hintedChildren;
@@ -792,14 +805,27 @@ async function preferMasterPlaylists(
   for (const url of manifests) {
     const inspection = results.get(url);
     if (!inspection || inspection.is_master !== true) continue;
-    masterKeys.add(urlPathKey(url));
-    for (const key of inspection.child_keys) childKeys.add(key);
+    masterKeys.add(videoUrlIdentityKey(url));
+
+    // The inspection API deliberately returns path-only child keys so it
+    // never echoes signed query strings. Re-associate those paths with the
+    // browser-observed candidates only when their retained query identity
+    // matches this master; otherwise a sibling stream can be hidden.
+    const masterQueryIdentity = videoUrlQueryIdentityKey(url);
+    for (const childPath of inspection.child_keys) {
+      for (const candidate of manifests) {
+        if (
+          urlPathKey(candidate) === childPath &&
+          videoUrlQueryIdentityKey(candidate) === masterQueryIdentity
+        ) childKeys.add(videoUrlIdentityKey(candidate));
+      }
+    }
   }
 
   if (childKeys.size === 0) return urls || [];
   return (urls || []).filter((url) => {
     if (!isHlsPlaylistUrl(url)) return true;
-    const key = urlPathKey(url);
+    const key = videoUrlIdentityKey(url);
     return masterKeys.has(key) || !childKeys.has(key);
   });
 }
@@ -1205,6 +1231,18 @@ function videoUrlIdentityKey(url) {
       (retainedParameters ? `?${retainedParameters}` : "");
   } catch {
     return url;
+  }
+}
+
+/// Retained non-auth query parameters identify a stream variant. Used when
+/// matching path-only child keys returned by the paired HLS inspection API.
+function videoUrlQueryIdentityKey(url) {
+  try {
+    const parsed = new URL(url);
+    const pathPrefix = parsed.origin + parsed.pathname;
+    return videoUrlIdentityKey(url).slice(pathPrefix.length);
+  } catch {
+    return "";
   }
 }
 
