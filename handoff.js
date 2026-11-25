@@ -783,13 +783,20 @@ async function wakeGrabAndWait(url, tabId, incognito, ctx) {
   let resolvedCookieStoreId;
   let shouldPrepareCookies = false;
   if (secret && incognito !== true) {
-    if (!(await hasCookiePermission())) {
+    // Permission and preference reads are independent. Run them together so
+    // neither adds serial delay before the source cookie store is resolved.
+    const [cookiePermission, forwardingEnabled] = await Promise.all([
+      hasCookiePermission(),
+      loadForwardCookies(),
+    ]);
+    if (!cookiePermission) {
       if (ctx && typeof ctx === "object") {
         ctx.cookieWarning =
           COOKIE_WARNINGS.permission;
       }
-    } else if (await loadForwardCookies()) {
+    } else if (forwardingEnabled) {
       try {
+        // The original tab's store must be captured before grab:// navigation.
         resolvedCookieStoreId = await resolveStoreId(ctx);
         shouldPrepareCookies = true;
       } catch {

@@ -2349,6 +2349,82 @@ describe("HTTP handoff to Grab", () => {
     );
   });
 
+  test("cold-start overlaps cookie permission and forwarding preference checks", async () => {
+    await pair();
+    await chrome.storage.local.set({ forwardCookies: true });
+
+    let releasePermission;
+    let releasePreference;
+    const permissionGate = new Promise((resolve) => {
+      releasePermission = resolve;
+    });
+    const preferenceGate = new Promise((resolve) => {
+      releasePreference = resolve;
+    });
+    let permissionStarted = false;
+    let preferenceStarted = false;
+    let launched = false;
+
+    chrome.permissions = {
+      contains: async () => {
+        permissionStarted = true;
+        await permissionGate;
+        return true;
+      },
+    };
+    const originalLocalGet = chrome.storage.local.get;
+    chrome.storage.local.get = async (defaults) => {
+      if (defaults && Object.hasOwn(defaults, "forwardCookies")) {
+        preferenceStarted = true;
+        await preferenceGate;
+      }
+      return originalLocalGet(defaults);
+    };
+
+    mockColdStart();
+    const coldStartUpdate = chrome.tabs.update;
+    chrome.tabs.update = (a, b) => {
+      const target = b !== undefined ? b : a;
+      const update = typeof target === "string" ? target : target && target.url;
+      if (update === "grab://https/") launched = true;
+      return coldStartUpdate(a, b);
+    };
+
+    let fakeNow = 1_000;
+    const realNow = Date.now;
+    Date.now = () => fakeNow;
+    bg._setWakeTimeout(1000);
+    bg._setSleep(async (ms) => { fakeNow += ms; });
+    let pendingWake;
+    try {
+      pendingWake = bg.wakeGrabAndWait(
+        "https://example.com/file.zip",
+        7,
+        false,
+        { tabId: 7 },
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(permissionStarted, true, "the permission check started");
+      assert.equal(preferenceStarted, true, "the preference read started concurrently");
+      assert.equal(launched, false, "launch waits for the source cookie policy");
+
+      releasePermission();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(launched, false, "the preference read is still required");
+
+      releasePreference();
+      assert.equal(await pendingWake, true);
+      assert.equal(launched, true, "Grab launches once both checks finish");
+    } finally {
+      releasePermission();
+      releasePreference();
+      if (pendingWake) await pendingWake.catch(() => {});
+      Date.now = realNow;
+      bg._setSleep((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+      chrome.storage.local.get = originalLocalGet;
+    }
+  });
+
   test("cold-start wake launches Grab before awaiting the cookie snapshot", async () => {
     await pair();
     await chrome.storage.local.set({ forwardCookies: true });
