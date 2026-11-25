@@ -1418,7 +1418,7 @@ describe("cross-frame video URL deduplication", () => {
     assert.equal(badges.at(-1)[1].text, "1");
   });
 
-  test("rotating non-auth query parameters on the same manifest deduplicate across frames", async () => {
+  test("preserves non-auth query identities for the same manifest across frames", async () => {
     const chrome = makeChrome();
     const bg = loadBackground(chrome);
     const tabId = 175;
@@ -1456,7 +1456,7 @@ describe("cross-frame video URL deduplication", () => {
 
     assert.deepEqual(
       await bg.resolvedVideoUrls(tabId),
-      [observations[1].url],
+      observations.map((observation) => observation.url),
     );
   });
 

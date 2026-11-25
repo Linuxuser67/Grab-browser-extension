@@ -51,7 +51,9 @@ function trackedFrameIds(f) {
   for (const id of f.sniffSequencesByFrame.keys()) ids.add(id);
   for (const id of f.sniffTimesByFrame.keys()) ids.add(id);
   for (const id of f.sniffFirstSeenByFrame.keys()) ids.add(id);
-  for (const id of f.rotatingQueryParamsByFrame.keys()) ids.add(id);
+  if (f.rotatingQueryParamsByFrame instanceof Map) {
+    for (const id of f.rotatingQueryParamsByFrame.keys()) ids.add(id);
+  }
   for (const id of f.retiredFrames.keys()) ids.add(id);
   return ids;
 }
@@ -68,7 +70,9 @@ function dropFrame(f, frameId) {
   f.sniffSequencesByFrame.delete(frameId);
   f.sniffTimesByFrame.delete(frameId);
   f.sniffFirstSeenByFrame.delete(frameId);
-  f.rotatingQueryParamsByFrame.delete(frameId);
+  if (f.rotatingQueryParamsByFrame instanceof Map) {
+    f.rotatingQueryParamsByFrame.delete(frameId);
+  }
   f.retiredFrames.delete(frameId);
 }
 
@@ -1309,7 +1313,7 @@ async function restoreVideoFinds(tabId) {
 
         const mediaSizesByFrame = restoreFrameMap(saved, "mediaSizesFrames", (frameId, entries) => {
           const wholeKeys = new Set((wholeMediaByFrame.get(frameId) || []).flatMap((url) => [
-            urlPathKey(url), videoUrlIdentityKey(url),
+            urlPathKey(url), videoUrlIdentityKey(url, saved, frameId),
           ]));
           const sizes = restoreKeyedValues(
             entries.slice(0, MAX_MEDIA_SNIFFS_PER_FRAME),
@@ -1346,7 +1350,7 @@ async function restoreVideoFinds(tabId) {
             sniffSequencesByFrame.set(frameId, sequences);
           }
           for (const url of urls) {
-            const key = videoUrlIdentityKey(url);
+            const key = videoUrlIdentityKey(url, saved, frameId);
             if (!sequences.has(key) && !sequences.has(urlPathKey(url))) {
               sequences.set(key, ++sniffSequence);
             }
@@ -1391,7 +1395,10 @@ async function restoreVideoFinds(tabId) {
           const available = new Set([
             ...(sniffedByFrame.get(frameId) || []),
             ...(mediaByFrame.get(frameId) || []),
-          ].flatMap((url) => [urlPathKey(url), videoUrlIdentityKey(url)]));
+          ].flatMap((url) => [
+            urlPathKey(url),
+            videoUrlIdentityKey(url, saved, frameId),
+          ]));
           const times = restoreKeyedValues(
             entries.slice(0, MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME),
             MAX_MANIFESTS_PER_FRAME + MAX_MEDIA_SNIFFS_PER_FRAME,
