@@ -268,8 +268,8 @@ function removeFrameSniffsAtOrBefore(finds, frameId, sequence, preserveKeys = ne
   if (kinds) {
     for (const key of removedKeys) {
       const stillPresent =
-        (finds.sniffedByFrame.get(frameId) || []).some((url) => videoUrlIdentityKey(url) === key) ||
-        (finds.mediaByFrame.get(frameId) || []).some((url) => videoUrlIdentityKey(url) === key);
+        (finds.sniffedByFrame.get(frameId) || []).some((url) => videoUrlIdentityKey(url, finds, frameId) === key) ||
+        (finds.mediaByFrame.get(frameId) || []).some((url) => videoUrlIdentityKey(url, finds, frameId) === key);
       if (!stillPresent) kinds.delete(key);
     }
     if (kinds.size === 0) finds.kindsByFrame.delete(frameId);
@@ -1169,7 +1169,7 @@ function restoreKeyedValues(candidates, limit, valid) {
   return out;
 }
 
-function rekeyRestoredVideoMetadata(map, urlsForFrame) {
+function rekeyRestoredVideoMetadata(map, urlsForFrame, finds) {
   if (!(map instanceof Map)) return;
   for (const [frameId, values] of map) {
     if (!(values instanceof Map)) continue;
@@ -1177,8 +1177,8 @@ function rekeyRestoredVideoMetadata(map, urlsForFrame) {
     const migrated = new Map();
     for (const [key, value] of values) {
       const url = urls.find((candidate) =>
-        urlPathKey(candidate) === key || videoUrlIdentityKey(candidate) === key);
-      migrated.set(url ? videoUrlIdentityKey(url) : key, value);
+        urlPathKey(candidate) === key || videoUrlIdentityKey(candidate, finds, frameId) === key);
+      migrated.set(url ? videoUrlIdentityKey(url, finds, frameId) : key, value);
     }
     map.set(frameId, migrated);
   }
@@ -1447,11 +1447,11 @@ async function restoreVideoFinds(tabId) {
           ...(mediaByFrame.get(frameId) || []),
           ...(wholeMediaByFrame.get(frameId) || []),
         ];
-        rekeyRestoredVideoMetadata(kindsByFrame, urlsForFrame);
-        rekeyRestoredVideoMetadata(mediaSizesByFrame, urlsForFrame);
-        rekeyRestoredVideoMetadata(sniffSequencesByFrame, urlsForFrame);
-        rekeyRestoredVideoMetadata(sniffTimesByFrame, urlsForFrame);
-        rekeyRestoredVideoMetadata(sniffFirstSeenByFrame, urlsForFrame);
+        rekeyRestoredVideoMetadata(kindsByFrame, urlsForFrame, saved);
+        rekeyRestoredVideoMetadata(mediaSizesByFrame, urlsForFrame, saved);
+        rekeyRestoredVideoMetadata(sniffSequencesByFrame, urlsForFrame, saved);
+        rekeyRestoredVideoMetadata(sniffTimesByFrame, urlsForFrame, saved);
+        rekeyRestoredVideoMetadata(sniffFirstSeenByFrame, urlsForFrame, saved);
 
         const restored = {
           frames,

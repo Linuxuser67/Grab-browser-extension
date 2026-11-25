@@ -4396,8 +4396,8 @@ describe("HLS master playlist filtering", () => {
     );
     assert.deepEqual(await bg.resolvedVideoUrlsForFrame(tabId, 0), observed);
 
-    const stored = await chrome.storage.session.get("grabVideoFinds:" + tabId);
-    assert.equal(stored["grabVideoFinds:" + tabId].rotatingQueryParams.length, 1);
+    const stored = await chrome.storage.session.get("videoFinds:v2:" + tabId);
+    assert.equal(stored["videoFinds:v2:" + tabId].rotatingQueryParams.length, 1);
 
     const restartedChrome = makeChrome({ session: chrome._session });
     const restarted = loadBackground(restartedChrome);

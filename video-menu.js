@@ -611,7 +611,7 @@ function hlsChildPlaylistKeys(text, masterUrl) {
 /// reference. Public hosts are inspected by Grab through its guarded resolver;
 /// syntactically private hosts retain the existing private-page-only local path.
 /// Unknown playlists, unrelated streams, DASH manifests, and direct files stay.
-function hlsPlaylistNameHints(urls) {
+function hlsPlaylistNameHints(urls, finds = null, frameId = null) {
   // A parent and child can share their path with a separate stream whose ID
   // lives in the query string. Group name hints by the retained query identity
   // so a master for one stream cannot hide another stream's rendition URL.
@@ -701,7 +701,7 @@ function isHlsRenditionPlaylistPath(path) {
 /// attaching their media element are handled. Marker evidence is taken only
 /// from the path below the parent, so a marker in a shared directory cannot
 /// turn an unrelated newer master into a "child".
-function nestedHlsPlaylistChildKeys(urls, firstSeenTimes) {
+function nestedHlsPlaylistChildKeys(urls, firstSeenTimes, finds = null, frameId = null) {
   if (!(firstSeenTimes instanceof Map)) return new Set();
   const playlists = [];
   for (const url of urls || []) {
@@ -804,23 +804,23 @@ async function preferMasterPlaylists(
   await Promise.all(workers);
 
   const masterKeys = new Set();
-  const childKeys = hlsPlaylistNameHints(manifests);
+  const childKeys = hlsPlaylistNameHints(manifests, finds, frameId);
   for (const url of manifests) {
     const inspection = results.get(url);
     if (!inspection || inspection.is_master !== true) continue;
-    masterKeys.add(videoUrlIdentityKey(url));
+    masterKeys.add(videoUrlIdentityKey(url, finds, frameId));
 
     // The inspection API deliberately returns path-only child keys so it
     // never echoes signed query strings. Re-associate those paths with the
     // browser-observed candidates only when their retained query identity
     // matches this master; otherwise a sibling stream can be hidden.
-    const masterQueryIdentity = videoUrlQueryIdentityKey(url);
+    const masterQueryIdentity = videoUrlQueryIdentityKey(url, finds, frameId);
     for (const childPath of inspection.child_keys) {
       for (const candidate of manifests) {
         if (
           urlPathKey(candidate) === childPath &&
-          videoUrlQueryIdentityKey(candidate) === masterQueryIdentity
-        ) childKeys.add(videoUrlIdentityKey(candidate));
+          videoUrlQueryIdentityKey(candidate, finds, frameId) === masterQueryIdentity
+        ) childKeys.add(videoUrlIdentityKey(candidate, finds, frameId));
       }
     }
   }
@@ -892,7 +892,7 @@ function mergeVideoFinds(domVideos, sniffedUrls, kinds, finds = null, frameId = 
       const folder = manifestFolderKey(item.url, kind);
       key =
         (folder && familyFor.get(`${folder}\u0000${videoUrlIdentityKey(item.url, finds, frameId)}`)) ||
-        videoUrlIdentityKey(item.url);
+        videoUrlIdentityKey(item.url, finds, frameId);
     } else {
       try {
         const p = new URL(item.url);
@@ -1169,11 +1169,14 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) 
   return uniqueMedia.length === 1 ? uniqueMedia[0] : null;
 }
 
-function videoUrlCandidateObservedAt(finds, url) {
-  const key = videoUrlIdentityKey(url);
+function videoUrlCandidateObservedAt(finds, url, frameId = null) {
   let newest = Number.NEGATIVE_INFINITY;
 
-  for (const [frameId, videos] of finds.frames) {
+  const observedFrameIds = Number.isInteger(frameId)
+    ? [frameId]
+    : [...finds.frames.keys(), ...(finds.sniffedByFrame instanceof Map ? finds.sniffedByFrame.keys() : [])];
+  for (const observedFrameId of new Set(observedFrameIds)) {
+    const videos = finds.frames.get(observedFrameId) || [];
     for (const video of videos || []) {
       if (
         video &&
@@ -1182,28 +1185,28 @@ function videoUrlCandidateObservedAt(finds, url) {
       ) newest = Math.max(newest, video.loadStartedAt);
     }
     const sniffed = finds.sniffedByFrame instanceof Map
-      ? finds.sniffedByFrame.get(frameId) || []
+      ? finds.sniffedByFrame.get(observedFrameId) || []
       : [];
     const media = finds.mediaByFrame instanceof Map
-      ? finds.mediaByFrame.get(frameId) || []
+      ? finds.mediaByFrame.get(observedFrameId) || []
       : [];
     const observedUrls = [...sniffed, ...media];
     if (observedUrls.includes(url)) {
       const times = finds.sniffTimesByFrame instanceof Map
-        ? finds.sniffTimesByFrame.get(frameId)
+        ? finds.sniffTimesByFrame.get(observedFrameId)
         : null;
       const observedAt = times instanceof Map
-        ? times.get(videoUrlIdentityKey(url, finds, frameId))
+        ? times.get(videoUrlIdentityKey(url, finds, observedFrameId))
         : null;
       if (Number.isFinite(observedAt)) newest = Math.max(newest, observedAt);
     }
   }
 
   // A network-only frame can hold a manifest without a DOM report.
-  for (const [frameId, observedUrls] of finds.sniffedByFrame || []) {
-    if (finds.frames.has(frameId) || !observedUrls.includes(url)) continue;
+  for (const [observedFrameId, observedUrls] of finds.sniffedByFrame || []) {
+    if ((Number.isInteger(frameId) && observedFrameId !== frameId) || finds.frames.has(observedFrameId) || !observedUrls.includes(url)) continue;
     const times = finds.sniffTimesByFrame instanceof Map
-      ? finds.sniffTimesByFrame.get(frameId)
+      ? finds.sniffTimesByFrame.get(observedFrameId)
       : null;
     const observedAt = times instanceof Map
       ? times.get(videoUrlIdentityKey(url, finds, frameId))
@@ -1213,8 +1216,8 @@ function videoUrlCandidateObservedAt(finds, url) {
   return newest;
 }
 
-function videoUrlCandidatePriority(finds, url) {
-  const kind = manifestKind(url) || detectedKindForUrl(finds, url);
+function videoUrlCandidatePriority(finds, url, frameId = null) {
+  const kind = manifestKind(url) || detectedKindForUrl(finds, url, frameId);
   return kind === "hls" ? 30
     : kind === "manifest" ? 25
     : kind === "dash" ? 20
@@ -1427,13 +1430,13 @@ function videoUrlQueryIdentityKey(url, finds = null, frameId = null) {
 
 /// Deduplicate streams across frames while retaining non-auth query parameters.
 /// Keep the highest-ranked URL; ties prefer the most recently observed resource.
-function dedupeVideoUrlsByPath(urls, finds) {
+function dedupeVideoUrlsByPath(urls, finds, frameId = null) {
   const selected = new Map();
   for (const url of urls || []) {
     if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
-    const key = videoUrlIdentityKey(url, finds);
-    const priority = videoUrlCandidatePriority(finds, url);
-    const observedAt = videoUrlCandidateObservedAt(finds, url);
+    const key = videoUrlIdentityKey(url, finds, frameId);
+    const priority = videoUrlCandidatePriority(finds, url, frameId);
+    const observedAt = videoUrlCandidateObservedAt(finds, url, frameId);
     const previous = selected.get(key);
     if (
       !previous ||
@@ -1454,6 +1457,7 @@ async function resolvedVideoUrlsForFrame(tabId, frameId) {
   return dedupeVideoUrlsByPath(
     await menuVideoCandidatesForFrame(finds, frameId, tabId),
     finds,
+    frameId,
   );
 }
 
@@ -1554,14 +1558,17 @@ async function resolvedVideoUrls(tabId) {
   return dedupeVideoUrlsByPath(urls, finds).slice(0, MAX_VIDEO_ITEMS);
 }
 
-function detectedKindForUrl(finds, url) {
+function detectedKindForUrl(finds, url, frameId = null) {
   if (finds && finds.kindsByFrame instanceof Map) {
-    for (const [frameId, kinds] of finds.kindsByFrame) {
-      const kind = kinds.get(videoUrlIdentityKey(url, finds, frameId));
+    const entries = Number.isInteger(frameId)
+      ? [[frameId, finds.kindsByFrame.get(frameId)]]
+      : [...finds.kindsByFrame];
+    for (const [id, kinds] of entries) {
+      const kind = kinds instanceof Map ? kinds.get(videoUrlIdentityKey(url, finds, id)) : null;
       if (kind) return kind;
     }
   }
-  const key = videoUrlIdentityKey(url, finds);
+  const key = videoUrlIdentityKey(url, finds, frameId);
   return finds && finds.kinds instanceof Map ? finds.kinds.get(key) || null : null;
 }
 
@@ -1570,7 +1577,6 @@ function detectedKindForUrl(finds, url) {
 /// selection, so labels cannot leak across simultaneous players.
 function videoTitleForUrl(finds, url) {
   if (!finds || !(finds.frames instanceof Map)) return "";
-  const key = videoUrlIdentityKey(url);
   const labels = new Set();
 
   for (const [frameId, videos] of finds.frames) {
@@ -1597,6 +1603,8 @@ function videoTitleForUrl(finds, url) {
           candidates,
           sniffTimes,
           firstSeenTimes,
+          finds,
+          frameId,
         ).some((candidate) => videoUrlIdentityKey(candidate, finds, frameId) === frameKey);
       }
       if (matches) labels.add(title);
@@ -1722,8 +1730,8 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
     kinds = new Map();
     f.kindsByFrame.set(sourceFrame, kinds);
   }
-  const key = videoUrlIdentityKey(url, f, sourceFrame)
-  if (kinds.get(key) !== kind; {
+  const key = videoUrlIdentityKey(url, f, sourceFrame);
+  if (kinds.get(key) !== kind) {
     kinds.set(key, kind);
     changed = true;
   }
@@ -1731,7 +1739,7 @@ function noteSniffed(tabId, frameId, url, kind, observedAt = Date.now(), wholeMe
   const hadPriorObservation =
     sequences.has(key) ||
     (f.sniffedByFrame.get(sourceFrame) || []).some((candidate) => videoUrlIdentityKey(candidate, f, sourceFrame) === key) ||
-    (f.mediaByFrame.get(sourceFrame) || []).some((candidate) => videoUrlIdentityKey(candidate) === key);
+    (f.mediaByFrame.get(sourceFrame) || []).some((candidate) => videoUrlIdentityKey(candidate, f, sourceFrame) === key);
 
   const listMap = kind === "manifest" ? f.sniffedByFrame : f.mediaByFrame;
   let urls = listMap.get(sourceFrame);
