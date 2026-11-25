@@ -42,6 +42,46 @@ test("Chromium and Firefox background scripts use the same load order", () => {
   );
 });
 
+describe("storage access hardening", () => {
+  test("restricts local and sync storage to trusted contexts when supported", () => {
+    const chrome = makeChrome();
+    const calls = [];
+    for (const name of ["local", "sync"]) {
+      chrome.storage[name].setAccessLevel = (options) => {
+        calls.push([name, options]);
+        return Promise.resolve();
+      };
+    }
+
+    loadBackground(chrome);
+
+    assert.deepEqual(calls, [
+      ["local", { accessLevel: "TRUSTED_CONTEXTS" }],
+      ["sync", { accessLevel: "TRUSTED_CONTEXTS" }],
+    ]);
+  });
+
+  test("works when the browser does not expose setAccessLevel", () => {
+    const chrome = makeChrome();
+    assert.equal(chrome.storage.local.setAccessLevel, undefined);
+    assert.equal(chrome.storage.sync.setAccessLevel, undefined);
+    assert.doesNotThrow(() => loadBackground(chrome));
+  });
+
+  test("handles access-level API failures without interrupting worker startup", async () => {
+    const chrome = makeChrome();
+    chrome.storage.local.setAccessLevel = () => {
+      throw new Error("access-level API unavailable");
+    };
+    chrome.storage.sync.setAccessLevel = () =>
+      Promise.reject(new Error("access-level API unavailable"));
+
+    assert.doesNotThrow(() => loadBackground(chrome));
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+});
+
+
 /// Minimal chrome mock: captures listeners, records calls, backs
 /// chrome.storage.session with a Map. Pass a shared `shared` object to
 /// simulate a worker restart (new worker, same session storage).
