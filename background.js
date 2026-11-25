@@ -62,7 +62,12 @@ const GRAB_SCHEME = "grab://";
 // restarts whenever it idles, and a per-worker timestamp would postdate the
 // startTime of the very download that woke it.
 chrome.runtime.onStartup.addListener(() => {
-  chrome.storage.session.set({ browserStartTime: Date.now() });
+  try {
+    const saved = chrome.storage.session.set({ browserStartTime: Date.now() });
+    if (saved && typeof saved.catch === "function") saved.catch(() => {});
+  } catch {
+    // Session storage may be full; interception still fails safe without this marker.
+  }
   syncVideoScript();
 });
 
