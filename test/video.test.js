@@ -1282,7 +1282,7 @@ describe("per-video menu candidates", () => {
       const times = new Map();
       const firstSeen = new Map();
       for (let index = 0; index < 20; index += 1) {
-        const url = \`https://cdn.example.com/\${frameId}/master-\${index}.m3u8?id=\${index}&pad=\${padding}\`;
+        const url = "https://cdn.example.com/" + frameId + "/master-" + index + ".m3u8?id=" + index + "&pad=" + padding;
         manifests.push(url);
         const key = bg.videoUrlIdentityKey(url);
         kinds.set(key, "manifest");
@@ -1291,7 +1291,7 @@ describe("per-video menu candidates", () => {
         firstSeen.set(key, Date.now() - index * 1000);
       }
       for (let index = 0; index < 8; index += 1) {
-        const url = \`https://cdn.example.com/\${frameId}/file-\${index}.mp4?id=\${index}&pad=\${padding}\`;
+        const url = "https://cdn.example.com/" + frameId + "/file-" + index + ".mp4?id=" + index + "&pad=" + padding;
         media.push(url);
         const key = bg.videoUrlIdentityKey(url);
         kinds.set(key, "media");
