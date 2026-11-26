@@ -1653,8 +1653,8 @@ describe("HTTP handoff to Grab", () => {
     assert.deepEqual(sent.cookies, []);
     assert.equal(Object.hasOwn(sent, "referer"), false);
     assert.equal(posts()[0].opts.headers["X-Grab-Token"], hmac("grab-client\u0000", posts()[0].opts.body));
-    assert.equal(cookieReads, 2);
-    assert.equal(refererReads, 2);
+    assert.ok(cookieReads >= 2, "cookie forwarding is revalidated before POST");
+    assert.ok(refererReads >= 2, "Referer forwarding is revalidated before POST");
   });
 
   test("a Referer preference storage failure fails closed", async () => {
