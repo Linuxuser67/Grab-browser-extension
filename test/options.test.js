@@ -41,9 +41,11 @@ function makeElement(id) {
 function makeOptions({
   storedCode = VALID_CODE,
   forwardCookies = true,
+  forwardReferer,
   cookiePermission = true,
   delayInitialLoad = false,
   delayToggleLoad = false,
+  delayRefererLoad = false,
 } = {}) {
   const elements = new Map();
   const pendingMessages = [];
@@ -70,6 +72,17 @@ function makeOptions({
         releaseToggleRead = resolve;
       })
     : null;
+  let refererReadStartedResolve;
+  let releaseRefererRead;
+  let refererReadConsumed = false;
+  const refererReadStarted = new Promise((resolve) => {
+    refererReadStartedResolve = resolve;
+  });
+  const refererReadGate = delayRefererLoad
+    ? new Promise((resolve) => {
+        releaseRefererRead = resolve;
+      })
+    : null;
 
   const document = {
     getElementById(id) {
@@ -80,8 +93,9 @@ function makeOptions({
 
   const requests = [];
   let releaseCalls = 0;
-  // Local storage holds the pairing code and the cookie-forwarding toggle.
+  // Local storage holds the pairing code and independent forwarding toggles.
   const local = { pairingCode: storedCode, forwardCookies };
+  if (forwardReferer !== undefined) local.forwardReferer = forwardReferer;
   const chrome = {
     runtime: {
       sendMessage(message) {
@@ -113,6 +127,16 @@ function makeOptions({
             toggleReadConsumed = true;
             toggleReadStartedResolve();
             await toggleReadGate;
+          }
+          if (
+            delayRefererLoad &&
+            defaults &&
+            Object.hasOwn(defaults, "forwardReferer") &&
+            !refererReadConsumed
+          ) {
+            refererReadConsumed = true;
+            refererReadStartedResolve();
+            await refererReadGate;
           }
           return result;
         },
@@ -159,6 +183,8 @@ function makeOptions({
     releaseInitialRead,
     toggleReadStarted,
     releaseToggleRead,
+    refererReadStarted,
+    releaseRefererRead,
     local,
     get savedCode() {
       return savedCode;
@@ -274,7 +300,7 @@ test("saving a new code shows Saved first and then the verification result", asy
 
   assert.equal(
     status.textContent,
-    "Verified — Grab recognizes this code. Cookie access is not granted, so handoffs are URL-only.",
+    "Verified — Grab recognizes this code. Cookie access is not granted, so site cookies are not forwarded.",
   );
 });
 
@@ -322,6 +348,40 @@ test("the cookie-forwarding toggle works without a pairing code", async () => {
   await toggle.listeners.get("change")();
   assert.equal(ui.local.forwardCookies, false);
   assert.equal(ui.savedCode, "");
+});
+
+test("Referer forwarding defaults to on and saves independently", async () => {
+  const ui = makeOptions();
+  const toggle = ui.elements.get("forwardReferer");
+  await waitFor(() => toggle.checked === true, "Referer forwarding should default to on");
+  assert.equal(ui.local.forwardReferer, undefined, "a missing preference preserves the enabled default");
+  toggle.checked = false;
+  await toggle.listeners.get("change")();
+  assert.equal(ui.local.forwardReferer, false);
+  assert.equal(ui.local.forwardCookies, true, "Referer preference must not change cookie forwarding");
+  assert.equal(ui.savedCode, VALID_CODE, "Referer preference must not change pairing");
+});
+
+test("Referer forwarding works without a pairing code", async () => {
+  const ui = makeOptions({ storedCode: "", forwardReferer: true });
+  const toggle = ui.elements.get("forwardReferer");
+  await waitFor(() => toggle.checked === true, "Referer forwarding did not load");
+  toggle.checked = false;
+  await toggle.listeners.get("change")();
+  assert.equal(ui.local.forwardReferer, false);
+  assert.equal(ui.savedCode, "");
+});
+
+test("a Referer toggle change before its stored value loads is not overwritten", async () => {
+  const ui = makeOptions({ forwardReferer: false, delayRefererLoad: true });
+  const toggle = ui.elements.get("forwardReferer");
+  await ui.refererReadStarted;
+  toggle.checked = true;
+  await toggle.listeners.get("change")();
+  ui.releaseRefererRead();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(toggle.checked, true, "the user's choice wins over a stale Referer read");
+  assert.equal(ui.local.forwardReferer, true);
 });
 
 test("a toggle change before the stored value loads is not overwritten", async () => {

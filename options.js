@@ -9,11 +9,14 @@ const pairingBtn = document.getElementById("savePairing");
 const pairingStatusEl = document.getElementById("pairingStatus");
 const forwardCookiesEl = document.getElementById("forwardCookies");
 const forwardCookiesStatusEl = document.getElementById("forwardCookiesStatus");
+const forwardRefererEl = document.getElementById("forwardReferer");
+const forwardRefererStatusEl = document.getElementById("forwardRefererStatus");
 
 let pairingStatusRevision = 0;
 // Bumped whenever the user changes the toggle, so a slow initial read cannot
 // overwrite their choice.
 let forwardCookiesRevision = 0;
+let forwardRefererRevision = 0;
 
 function showPairingStatus(text) {
   pairingStatusEl.textContent = text;
@@ -84,9 +87,9 @@ async function verifySavedPairing(code, cookieAccessGranted, revision) {
       ? cookieAccessGranted === true
         ? "Cookie access is granted."
         : cookieAccessGranted === false
-          ? "Cookie access is not granted, so handoffs are URL-only."
+          ? "Cookie access is not granted, so site cookies are not forwarded."
           : "Cookie permission status is unavailable."
-      : "Cookie forwarding is off, so handoffs stay URL-only.";
+      : "Cookie forwarding is off, so site cookies are not forwarded.";
     showPairingStatus(`Verified — Grab recognizes this code. ${cookieStatus}`);
   } else if (reply && reply.state === "unverified") {
     showPairingStatus(
@@ -210,8 +213,30 @@ forwardCookiesEl.addEventListener("change", async () => {
   }
   forwardCookiesStatusEl.textContent = enabled
     ? "Cookie forwarding is on."
-    : "Cookie forwarding is off; handoffs stay URL-only.";
+    : "Cookie forwarding is off; site cookies are not sent.";
+});
+
+async function loadForwardRefererToggle() {
+  const revision = forwardRefererRevision;
+  const enabled = await loadForwardReferer();
+  if (revision === forwardRefererRevision) forwardRefererEl.checked = enabled;
+}
+
+forwardRefererEl.addEventListener("change", async () => {
+  forwardRefererRevision += 1;
+  const enabled = forwardRefererEl.checked;
+  try {
+    await saveForwardReferer(enabled);
+  } catch {
+    forwardRefererEl.checked = !enabled;
+    forwardRefererStatusEl.textContent = "Could not save this setting.";
+    return;
+  }
+  forwardRefererStatusEl.textContent = enabled
+    ? "Referer forwarding is on."
+    : "Referer forwarding is off; source-page Referer is omitted.";
 });
 
 loadPairing();
 loadForwardCookiesToggle();
+loadForwardRefererToggle();

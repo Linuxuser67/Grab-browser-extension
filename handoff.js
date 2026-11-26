@@ -1,4 +1,4 @@
-// Grab browser extension: pairing, cookies, and URL handoff.
+// Grab browser extension: pairing, handoff metadata, and URL handoff.
 // Loaded by background.js (Chrome importScripts) or listed before it
 // in manifest.firefox.json; all files share one global scope.
 
@@ -69,8 +69,8 @@ async function withHlsInspectionSlot(operation) {
 }
 
 /// Launches Grab without handing it a download. The follow-up HTTP handoff
-/// carries the source-page referrer and, when enabled, the prepared cookie
-/// snapshot; the grab:// fallback can carry only the target URL.
+/// carries the source-page Referer when enabled and, independently, the
+/// prepared cookie snapshot when cookie forwarding is enabled.
 const GRAB_WAKE_URL = "grab://https/";
 /// How long to wait for a cold-started Grab to answer its local server.
 /// GTK startup and queue restoration can outlast a short browser-side timeout;
@@ -683,7 +683,8 @@ async function postToGrab(url, ctx) {
     // generates a new nonce, so a network retry can never replay an earlier body.
     // Source-page context is sent only over the paired, authenticated
     // handoff. Unpaired explicit sends intentionally remain URL-only.
-    const referer = secret
+    const forwardReferer = secret && await loadForwardReferer();
+    const referer = forwardReferer
       ? normalizeReferer(ctx && typeof ctx === "object" ? ctx.referer : undefined)
       : undefined;
     const requestMetadata = {
@@ -701,15 +702,21 @@ async function postToGrab(url, ctx) {
     sentCookieCount = fitted.count;
     headers = { "Content-Type": "application/json" };
     if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
-    // A toggle flipped off while the body was built must not send a jar the
-    // user just withdrew: rebuild and re-sign the URL-only body.
-    if (sentCookieCount > 0 && !(await loadForwardCookies())) {
-      const bare = fitHandoffBody(url, [], userAgent, requestMetadata);
-      if (bare === null) return 413;
-      body = bare.body;
-      sentCookieCount = 0;
+    // Revalidate both privacy choices at the POST boundary. Rebuild from the
+    // currently permitted metadata, then sign exactly the body being sent.
+    if (secret) {
+      const [forwardCookies, forwardReferer] = await Promise.all([
+        loadForwardCookies(),
+        loadForwardReferer(),
+      ]);
+      if (!forwardCookies) cookies = [];
+      if (!forwardReferer) delete requestMetadata.referer;
+      const finalBody = fitHandoffBody(url, cookies, userAgent, requestMetadata);
+      if (finalBody === null) return 413;
+      body = finalBody.body;
+      sentCookieCount = finalBody.count;
       headers = { "Content-Type": "application/json" };
-      if (secret) headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
+      headers["X-Grab-Token"] = await hmacHex(secret, CLIENT_CONTEXT, body);
     }
   } catch {
     return 0; // Crypto failed; POST never sent, safe to fall back.
@@ -791,10 +798,10 @@ async function prepareHandoffCookies(url, ctx, resolvedStoreId = resolveStoreId(
 }
 
 /// Launch Grab without a URL, then wait for its local server to answer.
-/// Cookie forwarding is optional: the wake is also needed to preserve the
-/// source-page referrer when there are no cookies, forwarding is disabled, or
-/// the request comes from an incognito tab. Paired listeners must prove their
-/// identity before the retry; unpaired retries stay URL-only.
+/// Cookie forwarding is optional: the wake is also needed to preserve an
+/// enabled source-page Referer when cookie forwarding is disabled or the
+/// request comes from an incognito tab. Paired listeners prove their identity
+/// before the retry; unpaired retries stay URL-only.
 async function wakeGrabAndWait(url, tabId, incognito, ctx) {
   const secret = await getPairingCode();
 
@@ -926,7 +933,9 @@ async function explicitSend(url, tabId, incognito, sourceReferer) {
   if (!toGrabUrl(url)) return;
   // The warned-tab set is rebuilt from session storage after a worker restart.
   await warnedTabsReady;
-  const referer = normalizeReferer(sourceReferer);
+  const referer = (await loadForwardReferer())
+    ? normalizeReferer(sourceReferer)
+    : undefined;
   const ctx = {
     tabId,
     incognito,

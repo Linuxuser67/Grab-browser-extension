@@ -1586,6 +1586,90 @@ describe("HTTP handoff to Grab", () => {
     assert.deepEqual(JSON.parse(post.opts.body).cookies, []);
   });
 
+  test("a paired handoff includes the source-page Referer by default", async () => {
+    mockPairedGrab();
+    await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: false });
+    const ctx = { referer: "https://example.com/watch/episode?id=42" };
+    assert.equal(await bg.postToGrab("https://cdn.example.com/video.m3u8", ctx), 200);
+    const post = posts()[0];
+    const sent = JSON.parse(post.opts.body);
+    assert.equal(sent.referer, "https://example.com/");
+    assert.equal(post.opts.headers["X-Grab-Token"], hmac("grab-client\u0000", post.opts.body));
+  });
+
+  test("a paired handoff omits source-page Referer when forwarding is disabled", async () => {
+    mockPairedGrab();
+    await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: false, forwardReferer: false });
+    const ctx = { referer: "https://example.com/watch/episode?id=42" };
+    assert.equal(await bg.postToGrab("https://cdn.example.com/video.m3u8", ctx), 200);
+    const post = posts()[0];
+    const sent = JSON.parse(post.opts.body);
+    assert.equal(Object.hasOwn(sent, "referer"), false);
+    assert.equal(post.opts.headers["X-Grab-Token"], hmac("grab-client\u0000", post.opts.body));
+  });
+
+  test("a Referer toggle changed during handoff construction strips and re-signs metadata", async () => {
+    mockPairedGrab();
+    await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: false, forwardReferer: true });
+    const originalGet = chrome.storage.local.get;
+    let toggleReads = 0;
+    chrome.storage.local.get = async (defaults) => {
+      if (defaults && Object.hasOwn(defaults, "forwardReferer")) {
+        toggleReads += 1;
+        return { ...defaults, forwardReferer: toggleReads === 1 };
+      }
+      return originalGet(defaults);
+    };
+    const ctx = { referer: "https://example.com/watch/episode?id=42" };
+    assert.equal(await bg.postToGrab("https://cdn.example.com/video.m3u8", ctx), 200);
+    assert.equal(toggleReads, 2);
+    const post = posts()[0];
+    assert.equal(Object.hasOwn(JSON.parse(post.opts.body), "referer"), false);
+    assert.equal(post.opts.headers["X-Grab-Token"], hmac("grab-client\u0000", post.opts.body));
+  });
+
+  test("disabling both forwarding settings during handoff removes cookies and Referer", async () => {
+    mockPairedGrab();
+    await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: true, forwardReferer: true });
+    chrome.permissions = { contains: async () => true };
+    chrome.cookies.getAll = async () => [{ name: "sid", value: "v", domain: "example.com" }];
+    const originalGet = chrome.storage.local.get;
+    let cookieReads = 0;
+    let refererReads = 0;
+    chrome.storage.local.get = async (defaults) => {
+      if (defaults && Object.hasOwn(defaults, "forwardCookies")) {
+        cookieReads += 1;
+        return { ...defaults, forwardCookies: cookieReads === 1 };
+      }
+      if (defaults && Object.hasOwn(defaults, "forwardReferer")) {
+        refererReads += 1;
+        return { ...defaults, forwardReferer: refererReads === 1 };
+      }
+      return originalGet(defaults);
+    };
+    const ctx = { referer: "https://example.com/watch/episode?id=42" };
+    assert.equal(await bg.postToGrab("https://cdn.example.com/video.m3u8", ctx), 200);
+    const sent = JSON.parse(posts()[0].opts.body);
+    assert.deepEqual(sent.cookies, []);
+    assert.equal(Object.hasOwn(sent, "referer"), false);
+    assert.equal(posts()[0].opts.headers["X-Grab-Token"], hmac("grab-client\u0000", posts()[0].opts.body));
+    assert.equal(cookieReads, 2);
+    assert.equal(refererReads, 2);
+  });
+
+  test("a Referer preference storage failure fails closed", async () => {
+    mockPairedGrab();
+    await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: false });
+    const originalGet = chrome.storage.local.get;
+    chrome.storage.local.get = async (defaults) => {
+      if (defaults && Object.hasOwn(defaults, "forwardReferer")) throw new Error("storage unavailable");
+      return originalGet(defaults);
+    };
+    const ctx = { referer: "https://example.com/watch/episode?id=42" };
+    assert.equal(await bg.postToGrab("https://cdn.example.com/video.m3u8", ctx), 200);
+    assert.equal(Object.hasOwn(JSON.parse(posts()[0].opts.body), "referer"), false);
+  });
+
   test("a paired handoff skips cookie permission and reads when forwarding is off", async () => {
     mockPairedGrab();
     await chrome.storage.local.set({ pairingCode: SECRET, forwardCookies: false });

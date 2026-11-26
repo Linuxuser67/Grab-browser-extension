@@ -103,6 +103,14 @@ test("cookie forwarding defaults to on and round-trips through local storage", a
   assert.equal(await context.loadForwardCookies(), false);
 });
 
+test("Referer forwarding defaults to on and round-trips through local storage", async () => {
+  const { state, context } = setup({ local: {} });
+  assert.equal(await context.loadForwardReferer(), true, "existing installs keep forwarding enabled");
+  await context.saveForwardReferer(false);
+  assert.equal(state.local.forwardReferer, false);
+  assert.equal(await context.loadForwardReferer(), false);
+});
+
 test("releaseUnusedPermissions: nothing in use drops everything optional", async () => {
   const { state, context } = setup({ sync: { detectVideos: false } });
   await context.releaseUnusedPermissions();

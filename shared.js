@@ -51,7 +51,32 @@ async function saveForwardCookies(enabled) {
   await chrome.storage.local.set({ forwardCookies: !!enabled });
 }
 
+/// Whether the extension may include the source-page Referer in handoffs.
+/// The toggle is independent of cookies and defaults on to preserve existing behavior.
+async function loadForwardReferer() {
+  try {
+    const stored = await chrome.storage.local.get({ forwardReferer: true });
+    return stored.forwardReferer !== false;
+  } catch {
+    return false; // Unknown state: do not forward source-page context.
+  }
+}
+
+/// Store the source-page Referer forwarding toggle.
+async function saveForwardReferer(enabled) {
+  await chrome.storage.local.set({ forwardReferer: !!enabled });
+}
+
 // Export for the test hook (Node) without breaking browser globals.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { SHARED_DEFAULTS, SHARED_PAGE_ORIGINS, SHARED_PAIRING_CODE_RE, normalizePairingCode, loadForwardCookies, saveForwardCookies };
+  module.exports = {
+    SHARED_DEFAULTS,
+    SHARED_PAGE_ORIGINS,
+    SHARED_PAIRING_CODE_RE,
+    normalizePairingCode,
+    loadForwardCookies,
+    saveForwardCookies,
+    loadForwardReferer,
+    saveForwardReferer,
+  };
 }

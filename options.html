@@ -131,7 +131,7 @@
         display: inline-block;
         margin-left: 8px;
       }
-      /* Separate the cookie toggle from the Save & verify row above it. */
+      /* Separate forwarding toggles from the Save & verify row above them. */
       #savePairing ~ .setting {
         margin-top: 16px;
       }
@@ -234,10 +234,9 @@
             aria-describedby="pairingHelp pairingStatus"
           />
           <p class="hint" id="pairingHelp">
-            With a code, the extension checks that it is talking to Grab, signs what
-            it sends, and shares the site's cookies — while cookie forwarding is on
-            below — so Grab can download pages that need them. Without one, only
-            links are sent. Leave empty to unpair.
+            With a code, the extension verifies Grab and signs handoffs. Site cookies
+            and the source-page Referer can be forwarded independently using the
+            settings below. Without a code, only links are sent. Leave empty to unpair.
           </p>
         </div>
         <button type="button" id="savePairing">Save &amp; verify</button>
@@ -249,11 +248,23 @@
             <span>Share site cookies with Grab</span>
           </label>
           <p class="hint">
-            When on, a paired handoff sends the site's cookies so Grab can
-            download pages that need them. Turn this off to hand over links only,
-            even while paired.
+            When on, paired handoffs send the site's cookies so Grab can download
+            pages that need them. Turn this off to omit cookies; Referer forwarding
+            is controlled separately.
           </p>
           <p class="hint" id="forwardCookiesStatus" role="status" aria-live="polite"></p>
+        </div>
+
+        <div class="setting">
+          <label class="checkbox">
+            <input type="checkbox" id="forwardReferer" />
+            <span>Share the source-page Referer with Grab</span>
+          </label>
+          <p class="hint">
+            When on, paired handoffs include the source page's origin as the Referer.
+            Turn this off to omit it, without changing cookie forwarding.
+          </p>
+          <p class="hint" id="forwardRefererStatus" role="status" aria-live="polite"></p>
         </div>
       </fieldset>
 
