@@ -1435,7 +1435,7 @@ function sniffedHeader(headers, name) {
 /// Accept only language tags at the end of the filename. Page titles commonly
 /// contain short words ("The.Last.of.Us") that resemble language codes; taking
 /// the first matching token mislabels those titles as subtitle languages.
-const CAPTION_LANGUAGE_SUFFIX = /^(?:[a-z]{2,3})(?:-[A-Z]{2}|-[A-Z][a-z]{3})?$/;
+const CAPTION_LANGUAGE_SUFFIX = /(?:^|_)((?:[a-z]{2,3}|[A-Z]{2,3})(?:[-_][A-Za-z]{2}|-[A-Za-z]{4})?)$/;
 const CAPTION_LANGUAGE_NON_LANGUAGE = /^(?:captions?|subtitles?|sub|cc|sdh|forced|full|track|stream|video|default)$/i;
 
 function normalizedCaptionLanguage(value) {
@@ -1451,13 +1451,14 @@ function normalizedCaptionLanguage(value) {
 
 function captionLanguageFor(url, contentLanguage = "") {
   const name = fileNameOf(url).replace(/\.(?:vtt|srt)$/i, "");
-  const tokens = name.split(/[._ ]+/).filter(Boolean);
+  const tokens = name.split(/[. ]+/).filter(Boolean);
   while (
     tokens.length > 0 &&
     CAPTION_LANGUAGE_NON_LANGUAGE.test(tokens[tokens.length - 1])
   ) tokens.pop();
   const suffix = tokens[tokens.length - 1] || "";
-  if (CAPTION_LANGUAGE_SUFFIX.test(suffix)) return suffix;
+  const language = CAPTION_LANGUAGE_SUFFIX.exec(suffix);
+  if (language) return normalizedCaptionLanguage(language[1]);
   return normalizedCaptionLanguage(contentLanguage);
 }
 
