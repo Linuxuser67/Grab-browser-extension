@@ -68,7 +68,9 @@ async function hasVideoAccess() {
 /// is absent, let cookies.getAll decide. On API errors, callers choose whether
 /// an unknown state should be shown as false (handoff) or null (Options UI).
 async function hasCookiePermission(unknownResult = false) {
-  if (typeof chrome.permissions?.contains !== "function") return true;
+  if (typeof chrome.permissions?.contains !== "function") {
+    return unknownResult === null ? null : true;
+  }
   try {
     return await chrome.permissions.contains({
       permissions: ["cookies"],

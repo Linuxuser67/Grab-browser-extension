@@ -266,5 +266,6 @@ test("missing Permissions API preserves cookie-read fallback but disables video 
   chrome.permissions.contains = undefined;
 
   assert.equal(await context.hasCookiePermission(), true);
+  assert.equal(await context.hasCookiePermission(null), null);
   assert.equal(await context.hasVideoAccess(), false);
 });

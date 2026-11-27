@@ -24,7 +24,10 @@ def background_scripts():
     )
     if not match:
         raise ValueError("background.js has no canonical BACKGROUND_SCRIPTS array")
-    scripts = json.loads(match.group(1))
+    # JavaScript arrays commonly use a trailing comma; remove it before
+    # decoding the JSON-compatible string array.
+    serialized = re.sub(r",\s*]", "]", match.group(1))
+    scripts = json.loads(serialized)
     if not isinstance(scripts, list) or not all(isinstance(item, str) for item in scripts):
         raise ValueError("BACKGROUND_SCRIPTS must be a JSON array of paths")
     if len(scripts) != len(set(scripts)):
