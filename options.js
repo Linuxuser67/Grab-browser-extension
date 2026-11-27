@@ -31,20 +31,6 @@ function isCurrentPairingOperation(revision, code) {
   );
 }
 
-/// Cookie forwarding needs the optional "cookies" permission and access to web
-/// pages (cookies.getAll is limited to sites the extension can access).
-async function hasCookiePermission() {
-  try {
-    return await chrome.permissions.contains({
-      permissions: ["cookies"],
-      origins: SHARED_PAGE_ORIGINS,
-    });
-  } catch {
-    // The permission state is unknown, not necessarily denied.
-    return null;
-  }
-}
-
 /// The background worker runs the same nonce/HMAC handshake used before a
 /// paired handoff. A saved or well-formed code alone is never "Verified".
 async function verifySavedPairing(code, cookieAccessGranted, revision) {
@@ -127,7 +113,7 @@ async function loadPairing() {
   }
 
   showPairingStatus("Saved; verifying with Grab…");
-  const cookieAccessGranted = await hasCookiePermission();
+  const cookieAccessGranted = await hasCookiePermission(null);
   if (!isCurrentPairingOperation(revision, code)) return;
   await verifySavedPairing(code, cookieAccessGranted, revision);
 }
@@ -178,7 +164,7 @@ async function savePairing() {
   }
   if (!isCurrentPairingOperation(revision, code)) return;
 
-  const cookieAccessGranted = await hasCookiePermission();
+  const cookieAccessGranted = await hasCookiePermission(null);
   await verifySavedPairing(code, cookieAccessGranted, revision);
 }
 

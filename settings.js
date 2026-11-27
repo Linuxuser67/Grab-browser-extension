@@ -29,19 +29,6 @@ async function saveSettings(raw) {
   await chrome.storage.sync.set(normalizeSettings(raw));
 }
 
-/// True when everything video detection needs is granted: access to web pages
-/// (for the detector) and webRequest (for sniffing blob: players' streams).
-async function hasVideoAccess() {
-  try {
-    return await chrome.permissions.contains({
-      permissions: ["webRequest"],
-      origins: SHARED_PAGE_ORIGINS,
-    });
-  } catch {
-    return false;
-  }
-}
-
 /// Ask for what video detection needs: page access (so the detector can run)
 /// and webRequest (so streams behind blob: players can be sniffed). Must run
 /// from a click/change handler with no await ahead of it, to keep the user

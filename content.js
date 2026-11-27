@@ -63,11 +63,6 @@ function allVideos(root, onShadowRoot) {
   return out;
 }
 
-/// Pure over a document-like: [{src, blob, height?}] for each qualifying <video>.
-/// `isActive` decides which videos count as active; the live wiring passes
-/// `isActiveVideo`. Tests pass explicit predicates. Pierces shadow roots via allVideos.
-/// `knownRoots` switches to a shallow scan: the document plus those roots only
-/// (already wired during an earlier deep walk). Null means a deep walk.
 function videoElementTitle(video) {
   if (!video || typeof video.getAttribute !== "function") return "";
   const clean = (value) => {
@@ -110,6 +105,11 @@ function videoElementTitle(video) {
   return clean(caption && caption.textContent);
 }
 
+/// Pure over a document-like: [{src, blob, height?}] for each qualifying <video>.
+/// `isActive` decides which videos count as active; the live wiring passes
+/// `isActiveVideo`. Tests pass explicit predicates. Pierces shadow roots via allVideos.
+/// `knownRoots` switches to a shallow scan: the document plus those roots only
+/// (already wired during an earlier deep walk). Null means a deep walk.
 function collectVideos(doc, isActive, onShadowRoot, onVideo, getVideoMetadata, knownRoots = null) {
   const out = [];
   const videos = knownRoots === null

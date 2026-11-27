@@ -51,7 +51,35 @@ async function saveForwardCookies(enabled) {
   await chrome.storage.local.set({ forwardCookies: !!enabled });
 }
 
+/// True when video detection has both the optional webRequest permission and
+/// access to HTTP(S) pages.
+async function hasVideoAccess() {
+  try {
+    return await chrome.permissions.contains({
+      permissions: ["webRequest"],
+      origins: SHARED_PAGE_ORIGINS,
+    });
+  } catch {
+    return false;
+  }
+}
+
+/// Cookie permission has one compatibility exception: if the Permissions API
+/// is absent, let cookies.getAll decide. On API errors, callers choose whether
+/// an unknown state should be shown as false (handoff) or null (Options UI).
+async function hasCookiePermission(unknownResult = false) {
+  if (typeof chrome.permissions?.contains !== "function") return true;
+  try {
+    return await chrome.permissions.contains({
+      permissions: ["cookies"],
+      origins: SHARED_PAGE_ORIGINS,
+    });
+  } catch {
+    return unknownResult;
+  }
+}
+
 // Export for the test hook (Node) without breaking browser globals.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { SHARED_DEFAULTS, SHARED_PAGE_ORIGINS, SHARED_PAIRING_CODE_RE, normalizePairingCode, loadForwardCookies, saveForwardCookies };
+  module.exports = { SHARED_DEFAULTS, SHARED_PAGE_ORIGINS, SHARED_PAIRING_CODE_RE, normalizePairingCode, loadForwardCookies, saveForwardCookies, hasVideoAccess, hasCookiePermission };
 }

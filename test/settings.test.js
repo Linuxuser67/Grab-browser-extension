@@ -85,7 +85,7 @@ function setup({
   const context = vm.createContext({ chrome, document: doc, setTimeout, clearTimeout });
   vm.runInContext(SHARED_SOURCE, context, { filename: "shared.js" });
   vm.runInContext(SETTINGS_SOURCE, context, { filename: "settings.js" });
-  return { state, elements, context, doc };
+  return { state, elements, context, doc, chrome };
 }
 
 test("shared.js declares the optional page origins once", () => {
@@ -232,4 +232,39 @@ test("the popup saves normally when access is already granted", async () => {
   assert.equal(state.requests.length, 0);
   assert.equal(state.optionsOpened, 0);
   assert.equal(state.sync.detectVideos, true);
+});
+
+
+test("video and cookie permission checks share the canonical queries", async () => {
+  const { context, chrome } = setup({ grant: true });
+  const queries = [];
+  chrome.permissions.contains = async (query) => {
+    queries.push(query);
+    return true;
+  };
+
+  assert.equal(await context.hasVideoAccess(), true);
+  assert.equal(await context.hasCookiePermission(), true);
+  assert.deepEqual(queries, [
+    { permissions: ["webRequest"], origins: ORIGINS },
+    { permissions: ["cookies"], origins: ORIGINS },
+  ]);
+});
+
+test("cookie permission callers can distinguish denied from unknown", async () => {
+  const { context, chrome } = setup();
+  chrome.permissions.contains = async () => {
+    throw new Error("permission state unavailable");
+  };
+
+  assert.equal(await context.hasCookiePermission(), false);
+  assert.equal(await context.hasCookiePermission(null), null);
+});
+
+test("missing Permissions API preserves cookie-read fallback but disables video access", async () => {
+  const { context, chrome } = setup();
+  chrome.permissions.contains = undefined;
+
+  assert.equal(await context.hasCookiePermission(), true);
+  assert.equal(await context.hasVideoAccess(), false);
 });
