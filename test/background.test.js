@@ -1999,7 +1999,7 @@ describe("HTTP handoff to Grab", () => {
     const restartedChrome = makeChrome(shared);
     const restartedBg = loadBackground(restartedChrome);
     await restartedBg.warnedTabsReady;
-    await restartedChrome._listeners["contextMenus.onClicked"](
+    await restartedChrome._listeners["menus.onClicked"](
       { menuItemId: "grabVideo:0" },
       { id: tabId, url: "https://example.com/watch", incognito: false },
     );
