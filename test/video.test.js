@@ -117,7 +117,7 @@ function makeChrome(shared) {
           for (const [k, v] of Object.entries(obj)) session.set(k, v);
         },
         remove: async (key) => {
-          session.delete(key);
+          for (const item of Array.isArray(key) ? key : [key]) session.delete(item);
         },
       },
     },
@@ -1270,6 +1270,90 @@ describe("per-video menu candidates", () => {
         `${url} is a possible full media resource`,
       );
     }
+  });
+
+  test("aggregate video snapshots stay within budget and evict the oldest tabs first", async () => {
+    const shared = {
+      session: new Map([
+        ["claimedDownload:77", true],
+        ["warnedTabs", [77]],
+      ]),
+    };
+    const chrome = makeChrome(shared);
+    const bg = loadBackground(chrome);
+    const now = Date.now();
+    const padding = "p".repeat(1700);
+
+    // Model valid compact v3 snapshots near the 256 KiB per-tab ceiling.
+    // A large number of ordinary tabs must not consume the whole session area.
+    for (let tabId = 0; tabId < 220; tabId += 1) {
+      const observations = Array.from({ length: 20 }, (_, index) => [
+        `https://cdn.example.com/${tabId}/master-${index}.m3u8?pad=${padding}`,
+        1,
+        "manifest",
+        index + 1,
+        now - index,
+        now - index,
+        null,
+      ]);
+      shared.session.set("videoFinds:v2:" + tabId, {
+        version: 3,
+        savedAt: now - (220 - tabId) * 1000,
+        frames: [],
+        observations: [[0, observations]],
+        sniffSequence: 20,
+        retiredFrames: [],
+        rotatingQueryParams: [],
+        title: "",
+      });
+    }
+
+    const storedVideoBytes = () => [...shared.session.entries()]
+      .filter(([key]) => /^videoFinds:(?:v2:)?\\d+$/.test(key))
+      .reduce((total, [key, value]) =>
+        total +
+        new TextEncoder().encode(key).byteLength +
+        new TextEncoder().encode(JSON.stringify(value)).byteLength +
+        64,
+      0);
+    assert.ok(
+      storedVideoBytes() > bg.MAX_PERSISTED_VIDEO_STATE_BYTES,
+      "the pre-existing snapshots exceed the aggregate budget",
+    );
+
+    const emptyFinds = () => ({
+      frames: new Map(),
+      sniffedByFrame: new Map(),
+      mediaByFrame: new Map(),
+      wholeMediaByFrame: new Map(),
+      mediaSizesByFrame: new Map(),
+      kindsByFrame: new Map(),
+      sniffSequencesByFrame: new Map(),
+      sniffTimesByFrame: new Map(),
+      sniffFirstSeenByFrame: new Map(),
+      rotatingQueryParamsByFrame: new Map(),
+      retiredFrames: new Map(),
+      sniffSequence: 0,
+      title: "",
+    });
+    const newTabs = [1000, 1001, 1002];
+    for (const tabId of newTabs) bg._videoFinds.set(tabId, emptyFinds());
+
+    // Independent tab events can persist concurrently. Their writes must
+    // share the same eviction budget rather than each checking a stale total.
+    await Promise.all(newTabs.map((tabId) => bg._persistVideoFinds(tabId)));
+
+    assert.ok(
+      storedVideoBytes() <= bg.MAX_PERSISTED_VIDEO_STATE_BYTES,
+      "all persisted video snapshots share one aggregate storage budget",
+    );
+    assert.equal(shared.session.has("videoFinds:v2:0"), false, "oldest state is evicted first");
+    assert.equal(shared.session.has("videoFinds:v2:219"), true, "the newest old tab is retained");
+    for (const tabId of newTabs) {
+      assert.equal(shared.session.has("videoFinds:v2:" + tabId), true);
+    }
+    assert.equal(shared.session.get("claimedDownload:77"), true, "interception state is not evicted");
+    assert.deepEqual(shared.session.get("warnedTabs"), [77], "other session state is not evicted");
   });
 
   test("serialized video snapshots stay within 256 KiB with adversarial URL volume", () => {

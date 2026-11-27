@@ -148,14 +148,118 @@ const restoredVideoFinds = new Set();
 const restoringVideoFinds = new Map();
 const videoStateWrites = new Map();
 
+// storage.session is shared by every tab and by download-interception state.
+// Serialize video writes across tabs and retain only a bounded, least-recently
+// saved set of snapshots. This leaves most of the browser quota for other keys.
+const MAX_PERSISTED_VIDEO_STATE_BYTES = 6 * 1024 * 1024;
+let videoStateStorageWrites = Promise.resolve();
+let videoStateStorageIndex = null;
+let videoStateStorageIndexPromise = null;
+
+function videoStateStorageEntryByteLength(key, value) {
+  const encoder = new TextEncoder();
+  let valueBytes = 0;
+  try {
+    const serialized = JSON.stringify(value);
+    if (typeof serialized === "string") valueBytes = encoder.encode(serialized).byteLength;
+  } catch {
+    // Malformed stored state is treated as large so it is evicted early.
+    valueBytes = MAX_VIDEO_STATE_SNAPSHOT_BYTES;
+  }
+  // Include the storage key and conservative per-entry bookkeeping overhead.
+  return valueBytes + encoder.encode(key).byteLength + 64;
+}
+
+async function loadVideoStateStorageIndex() {
+  if (videoStateStorageIndex) return videoStateStorageIndex;
+  if (!videoStateStorageIndexPromise) {
+    videoStateStorageIndexPromise = chrome.storage.session.get(null).then((stored) => {
+      const index = new Map();
+      for (const [key, value] of Object.entries(stored || {})) {
+        if (videoStateTabId(key) === null) continue;
+        index.set(key, {
+          byteLength: videoStateStorageEntryByteLength(key, value),
+          savedAt: Number.isFinite(value && value.savedAt) ? value.savedAt : 0,
+        });
+      }
+      videoStateStorageIndex = index;
+      return index;
+    }).catch((error) => {
+      videoStateStorageIndexPromise = null;
+      throw error;
+    });
+  }
+  return videoStateStorageIndexPromise;
+}
+
+function enqueueVideoStateStorageWrite(write) {
+  const next = videoStateStorageWrites.catch(() => {}).then(write);
+  videoStateStorageWrites = next.catch(() => {});
+  return next;
+}
+
 function enqueueVideoStateWrite(tabId, write) {
   const previous = videoStateWrites.get(tabId) || Promise.resolve();
-  const next = previous.catch(() => {}).then(write);
+  const next = previous.catch(() => {})
+    .then(() => enqueueVideoStateStorageWrite(write));
   videoStateWrites.set(tabId, next);
   next.finally(() => {
     if (videoStateWrites.get(tabId) === next) videoStateWrites.delete(tabId);
   }).catch(() => {});
   return next;
+}
+
+async function storeVideoStateSnapshot(tabId, snapshot) {
+  try {
+    const index = await loadVideoStateStorageIndex();
+    const key = videoStateKey(tabId);
+    const legacyKey = "videoFinds:" + tabId;
+    const newEntry = {
+      byteLength: videoStateStorageEntryByteLength(key, snapshot),
+      savedAt: Number.isFinite(snapshot.savedAt) ? snapshot.savedAt : Date.now(),
+    };
+    const previousBytes = index.get(key)?.byteLength || 0;
+    let projectedBytes = newEntry.byteLength;
+    for (const [storedKey, entry] of index) {
+      if (storedKey !== key) projectedBytes += entry.byteLength;
+    }
+    projectedBytes -= previousBytes;
+
+    const removeKeys = [];
+    const legacyEntry = index.get(legacyKey);
+    if (legacyEntry) {
+      removeKeys.push(legacyKey);
+      projectedBytes -= legacyEntry.byteLength;
+    }
+
+    const oldestFirst = [...index.entries()]
+      .filter(([storedKey]) => storedKey !== key && storedKey !== legacyKey)
+      .sort((left, right) =>
+        left[1].savedAt - right[1].savedAt ||
+        left[1].byteLength - right[1].byteLength
+      );
+    for (const [storedKey, entry] of oldestFirst) {
+      if (projectedBytes <= MAX_PERSISTED_VIDEO_STATE_BYTES) break;
+      removeKeys.push(storedKey);
+      projectedBytes -= entry.byteLength;
+    }
+    if (projectedBytes > MAX_PERSISTED_VIDEO_STATE_BYTES) {
+      throw new Error("video state cannot fit the aggregate session-storage budget");
+    }
+
+    if (removeKeys.length > 0) {
+      await chrome.storage.session.remove(removeKeys);
+      for (const removedKey of removeKeys) index.delete(removedKey);
+    }
+    await chrome.storage.session.set({ [key]: snapshot });
+    index.set(key, newEntry);
+  } catch (error) {
+    // A failed storage operation may have removed only part of the eviction
+    // set. Rebuild the index from session storage before the next write.
+    videoStateStorageIndex = null;
+    videoStateStorageIndexPromise = null;
+    throw error;
+  }
 }
 
 function validBlobUrl(value) {
@@ -693,9 +797,7 @@ function snapshotVideoFindsV2(finds) {
 }
 
 
-/// Maximum serialized session snapshot size per tab. This is deliberately
-/// far below Chrome's current session-storage quota so one page cannot crowd
-/// out unrelated session state.
+/// Maximum serialized snapshot size for one tab.
 const MAX_VIDEO_STATE_SNAPSHOT_BYTES = 256 * 1024;
 
 /// Compact all sniff-related maps into a single URL-keyed observation tuple:
@@ -995,6 +1097,7 @@ function snapshotVideoFinds(finds) {
     retiredFrames: legacy.retiredFrames,
     rotatingQueryParams: snapshotRotatingQueryParams(finds),
     title: legacy.title,
+    savedAt: Date.now(),
   };
   return fitVideoStateSnapshot(snapshot);
 }
@@ -1508,9 +1611,7 @@ async function persistVideoFinds(tabId) {
   restoredVideoFinds.add(tabId);
   const snapshot = snapshotVideoFinds(finds);
   try {
-    await enqueueVideoStateWrite(tabId, () =>
-      chrome.storage.session.set({ [videoStateKey(tabId)]: snapshot })
-    );
+    await enqueueVideoStateWrite(tabId, () => storeVideoStateSnapshot(tabId, snapshot));
   } catch {
     // Fresh reports can still rebuild the menu if session storage fails.
   }
@@ -1520,7 +1621,16 @@ function forgetVideoFinds(tabId) {
   if (!Number.isInteger(tabId) || tabId < 0) return;
   restoredVideoFinds.add(tabId);
   return enqueueVideoStateWrite(tabId, async () => {
-    await chrome.storage.session.remove(videoStateKey(tabId));
-    await chrome.storage.session.remove("videoFinds:" + tabId);
+    const keys = [videoStateKey(tabId), "videoFinds:" + tabId];
+    try {
+      await chrome.storage.session.remove(keys);
+      if (videoStateStorageIndex) {
+        for (const key of keys) videoStateStorageIndex.delete(key);
+      }
+    } catch (error) {
+      videoStateStorageIndex = null;
+      videoStateStorageIndexPromise = null;
+      throw error;
+    }
   }).catch(() => {});
 }

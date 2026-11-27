@@ -206,7 +206,7 @@ function makeChrome(shared) {
           for (const [k, v] of Object.entries(obj)) session.set(k, v);
         },
         remove: async (key) => {
-          session.delete(key);
+          for (const item of Array.isArray(key) ? key : [key]) session.delete(item);
         },
       },
     },
