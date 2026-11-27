@@ -1540,14 +1540,15 @@ function captionCandidatesForStream(tabId, frameId, url, peerUrls = []) {
     if (nearestIdentity !== targetIdentity) continue;
     matches.push(caption);
   }
+  const targetAnchor = targetVideo
+    ? targetVideo.loadStartedAt
+    : anchors.find((anchor) =>
+      videoUrlIdentityKey(anchor.url, finds, frameId) === targetIdentity
+    )?.observedAt;
   return matches
     .sort((a, b) =>
-      Math.abs(a.observedAt - (targetVideo?.loadStartedAt ?? anchors.find(
-        (anchor) => videoUrlIdentityKey(anchor.url, finds, frameId) === targetIdentity,
-      )?.observedAt ?? 0)) -
-      Math.abs(b.observedAt - (targetVideo?.loadStartedAt ?? anchors.find(
-        (anchor) => videoUrlIdentityKey(anchor.url, finds, frameId) === targetIdentity,
-      )?.observedAt ?? 0)))
+      Math.abs(a.observedAt - (targetAnchor ?? 0)) -
+      Math.abs(b.observedAt - (targetAnchor ?? 0)))
     .slice(0, 4);
 }
 
