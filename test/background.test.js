@@ -34,7 +34,7 @@ test("Chromium and Firefox background scripts use the same load order", () => {
   const background = fs.readFileSync(BG_PATH, "utf8");
   const scriptsMatch = /const BACKGROUND_SCRIPTS = Object\.freeze\((\[[\s\S]*?\])\);/.exec(background);
   assert.ok(scriptsMatch, "Chrome must declare BACKGROUND_SCRIPTS");
-  const chromeScripts = JSON.parse(scriptsMatch[1]);
+  const chromeScripts = JSON.parse(scriptsMatch[1].replace(/,\s*]/g, "]"));
   const firefoxManifest = JSON.parse(fs.readFileSync(FIREFOX_MANIFEST_PATH, "utf8"));
   assert.deepEqual(
     firefoxManifest.background.scripts,

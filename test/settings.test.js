@@ -245,7 +245,7 @@ test("video and cookie permission checks share the canonical queries", async () 
 
   assert.equal(await context.hasVideoAccess(), true);
   assert.equal(await context.hasCookiePermission(), true);
-  assert.deepEqual(queries, [
+  assert.deepEqual(JSON.parse(JSON.stringify(queries)), [
     { permissions: ["webRequest"], origins: ORIGINS },
     { permissions: ["cookies"], origins: ORIGINS },
   ]);

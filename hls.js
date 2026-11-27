@@ -217,6 +217,7 @@ async function inspectHlsPlaylistWithGrab(value, verifiedSecret = null) {
 const hlsPlaylistTextCache = new Map();
 const HLS_PLAYLIST_TEXT_LIMIT = 256 * 1024;
 const HLS_PLAYLIST_FETCH_TIMEOUT_MS = 5000;
+const HLS_PLAYLIST_FETCH_CONCURRENCY = 4;
 
 // Public playlist inspections are read-only classifications. Keep both
 // successful and failed results briefly so live-playlist re-requests and
