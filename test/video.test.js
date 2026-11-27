@@ -1284,8 +1284,8 @@ describe("per-video menu candidates", () => {
     const now = Date.now();
     const padding = "p".repeat(1700);
 
-    // Model valid compact v3 snapshots near the 256 KiB per-tab ceiling.
-    // A large number of ordinary tabs must not consume the whole session area.
+    // Model compact v3 snapshots containing long page-controlled URLs.
+    // Many ordinary tabs must not consume the whole session area.
     for (let tabId = 0; tabId < 220; tabId += 1) {
       const observations = Array.from({ length: 20 }, (_, index) => [
         `https://cdn.example.com/${tabId}/master-${index}.m3u8?pad=${padding}`,
@@ -1309,7 +1309,7 @@ describe("per-video menu candidates", () => {
     }
 
     const storedVideoBytes = () => [...shared.session.entries()]
-      .filter(([key]) => /^videoFinds:(?:v2:)?\\d+$/.test(key))
+      .filter(([key]) => /^videoFinds:(?:v2:)?\d+$/.test(key))
       .reduce((total, [key, value]) =>
         total +
         new TextEncoder().encode(key).byteLength +

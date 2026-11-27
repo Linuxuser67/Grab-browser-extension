@@ -149,8 +149,8 @@ const restoringVideoFinds = new Map();
 const videoStateWrites = new Map();
 
 // storage.session is shared by every tab and by download-interception state.
-// Serialize video writes across tabs and retain only a bounded, least-recently
-// saved set of snapshots. This leaves most of the browser quota for other keys.
+// Chrome 112+ and current Firefox provide a 10 MiB quota; cap video snapshots
+// at 6 MiB so at least 4 MiB remains for other session keys.
 const MAX_PERSISTED_VIDEO_STATE_BYTES = 6 * 1024 * 1024;
 let videoStateStorageWrites = Promise.resolve();
 let videoStateStorageIndex = null;
