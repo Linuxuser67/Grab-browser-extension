@@ -2855,6 +2855,193 @@ describe("HTTP handoff to Grab", () => {
   });
 });
 
+describe("caption handoff contract (E2)", () => {
+  const SECRET = "ab".repeat(32);
+  let chrome, bg, calls;
+  const hmac = (context, message) =>
+    nodeCrypto.createHmac("sha256", Buffer.from(SECRET, "hex"))
+      .update(context + message).digest("hex");
+  const posts = () => calls.filter((call) => call.opts.method === "POST");
+  const sentBody = () => JSON.parse(posts()[0].opts.body);
+
+  /// A Grab that proves pairing on /hello and accepts /add. `features` is
+  /// omitted unless a test supplies it, matching today's Grab response.
+  function mockGrab({ features, addStatus = 200 } = {}) {
+    calls = [];
+    globalThis.fetch = async (url, opts = {}) => {
+      calls.push({ url, opts });
+      if (url.includes("/hello")) {
+        const nonce = new URL(url).searchParams.get("n");
+        return {
+          status: 200,
+          ok: true,
+          json: async () => ({
+            proof: hmac("grab-server\u0000", nonce),
+            ...(features === undefined ? {} : { features }),
+          }),
+        };
+      }
+      return {
+        status: addStatus,
+        ok: addStatus >= 200 && addStatus < 300,
+        headers: { get: () => null },
+      };
+    };
+  }
+  async function pairWithGrab(options) {
+    mockGrab(options);
+    await chrome.storage.local.set({ pairingCode: SECRET });
+  }
+
+  beforeEach(() => {
+    chrome = makeChrome();
+    bg = loadBackground(chrome);
+  });
+
+  test("a paired handoff carries detected captions in Grab's exact shape", async () => {
+    await pairWithGrab();
+    const tabId = 41;
+    const url = "https://cdn.example.com/captions.en.vtt?token=abc";
+    bg.noteCaption(tabId, 3, url, "text/vtt", 2001, "en");
+    await bg.handOff("https://example.com/f.zip", {
+      tabId,
+      frameId: 3,
+      referer: "https://site.example/watch/42?id=7",
+    }, []);
+
+    const post = posts()[0];
+    const body = sentBody();
+    assert.deepEqual(body.captions, [{
+      url,
+      headers: [
+        ["Referer", "https://site.example/"],
+        ["Origin", "https://site.example"],
+        ["Accept-Language", "en"],
+      ],
+      language: "en",
+      format: "vtt",
+    }]);
+    assert.equal(
+      post.opts.headers["X-Grab-Token"],
+      hmac("grab-client\u0000", post.opts.body),
+      "the signed body includes the captions",
+    );
+  });
+
+  test("an unpaired handoff omits captions even when they were detected", async () => {
+    mockGrab();
+    bg.noteCaption(42, 0, "https://cdn.example.com/captions.en.vtt", "text/vtt", 1, "en");
+    await bg.handOff("https://example.com/f.zip", { tabId: 42 }, []);
+    assert.equal("captions" in sentBody(), false, "legacy URL-only body is preserved");
+    assert.equal(posts()[0].opts.headers["X-Grab-Token"], undefined);
+  });
+
+  test("captions are newest-first, deduped by path and language, and formatted from URL or type", async () => {
+    const tabId = 43;
+    bg.noteCaption(tabId, 0, "https://cdn.example.com/en.vtt?token=1", "text/vtt", 1000, "en");
+    bg.noteCaption(tabId, 0, "https://cdn.example.com/en.vtt?token=2", "text/vtt", 4000, "en");
+    bg.noteCaption(tabId, 0, "https://cdn.example.com/subtitles/session", "text/webvtt", 3000, "");
+    bg.noteCaption(tabId, 0, "https://cdn.example.com/fr.srt", "", 2000, "fr");
+
+    const captions = bg.prepareHandoffCaptions({ tabId });
+    assert.deepEqual(captions.map((candidate) => candidate.url), [
+      "https://cdn.example.com/en.vtt?token=2",
+      "https://cdn.example.com/subtitles/session",
+      "https://cdn.example.com/fr.srt",
+    ], "the stale token-rotated URL does not take a slot");
+    assert.deepEqual(captions.map((candidate) => candidate.format), ["vtt", "vtt", "srt"]);
+    assert.deepEqual(captions.map((candidate) => candidate.language), ["en", "und", "fr"]);
+    assert.deepEqual(captions[1].headers, [], "no source referer was supplied");
+  });
+
+  test("caption headers are allowlisted and bounded before they reach Grab", () => {
+    const pairs = [
+      ["Referer", "https://site.example/"],
+      ["Cookie", "sid=secret"],
+      ["Authorization", "Bearer abc"],
+      ["accept-language", "en"],
+      ...Array.from({ length: 20 }, (_, index) => ["Origin", `https://o${index}.example`]),
+      ["Referer", "x".repeat(9000)],
+    ];
+    const headers = bg.limitHandoffCaptionHeaders(pairs);
+    assert.ok(headers.length <= bg.MAX_CAPTION_HEADERS);
+    assert.ok(headers.every(([name]) =>
+      ["referer", "origin", "accept-language", "authorization"].includes(name.toLowerCase())));
+    const bytes = headers.reduce(
+      (total, [name, value]) => total +
+        new TextEncoder().encode(name).length + new TextEncoder().encode(value).length,
+      0,
+    );
+    assert.ok(bytes <= bg.MAX_CAPTION_HEADER_BYTES);
+    assert.ok(headers.some(([name]) => name === "Authorization"));
+    assert.equal(headers.some(([, value]) => value.startsWith("x".repeat(9000))), false);
+  });
+
+  test("caption URLs outside Grab's validation are dropped, not sent", async () => {
+    const tabId = 44;
+    bg.noteCaption(tabId, 0, "https://cdn.example.com/a.vtt", "text/vtt", 1000, "en");
+    bg.noteCaption(tabId, 0, "http://cdn.example.com/b.vtt", "text/vtt", 2000, "en");
+    bg.noteCaption(tabId, 0, "https://localhost/c.vtt", "text/vtt", 3000, "en");
+    bg.noteCaption(tabId, 0, "https://cdn.example.com/notes.txt", "text/plain", 4000, "en");
+    assert.deepEqual(
+      bg.prepareHandoffCaptions({ tabId }).map((caption) => caption.url),
+      ["https://cdn.example.com/a.vtt"],
+    );
+  });
+
+  test("the body stays inside the byte budget and never exceeds four captions", () => {
+    const caption = (index) => ({
+      url: `https://cdn.example.com/cap${index}.vtt`,
+      headers: [], language: "en", format: "vtt",
+    });
+    const capped = bg.fitHandoffBody(
+      "https://example.com/f.zip", [], navigator.userAgent, {},
+      Array.from({ length: 6 }, (_, index) => caption(index)),
+    );
+    assert.equal(JSON.parse(capped.body).captions.length, bg.MAX_HANDOFF_CAPTIONS);
+
+    const heavy = Array.from({ length: 4 }, (_, index) => ({
+      ...caption(index),
+      headers: [["Authorization", "Bearer " + "a".repeat(8200)]],
+    }));
+    const fitted = bg.fitHandoffBody(
+      "https://example.com/f.zip",
+      [{ name: "sid", value: "v", domain: "example.com" }],
+      navigator.userAgent, {}, heavy,
+    );
+    assert.ok(fitted, "the body still fits");
+    assert.ok(Buffer.byteLength(fitted.body) <= bg.MAX_HANDOFF_BODY_BYTES);
+    assert.ok(JSON.parse(fitted.body).captions.length < 4, "oldest captions are dropped last");
+    assert.equal(capped.count, 0);
+  });
+
+  test("an unknown features field in /hello does not block paired captions", async () => {
+    await pairWithGrab({ features: { captions: false, future: true } });
+    bg.noteCaption(45, 0, "https://cdn.example.com/en.vtt", "text/vtt", 1, "en");
+    await bg.handOff("https://example.com/f.zip", { tabId: 45 }, []);
+    assert.equal(sentBody().captions.length, 1, "pairing alone authorizes the handoff");
+  });
+
+  test("automatic interception carries captions when the download has tab context", async () => {
+    chrome = makeChrome({
+      syncSettings: { interceptDownloads: true, minSizeMB: 0, skipTypes: "" },
+    });
+    bg = loadBackground(chrome);
+    await pairWithGrab();
+    const tabId = 46;
+    bg.noteCaption(tabId, 2, "https://cdn.example.com/en.vtt", "text/vtt", 1, "en");
+    await chrome._listeners["downloads.onCreated"]({
+      id: 91,
+      url: "https://example.com/big.iso",
+      fileSize: 1024,
+      tabId,
+      frameId: 2,
+    });
+    assert.equal(posts().length, 1);
+    assert.equal(sentBody().captions.length, 1);
+  });
+});
+
 describe("interception across worker restarts and fast downloads", () => {
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 

@@ -65,6 +65,10 @@ async function interceptDownload(item) {
     // The browser supplies the actual referrer used for this download.
     referer: item.referrer,
     requirePairing: true,
+    // DownloadItem has no tab id in Chrome; browsers that do expose one can
+    // still carry their detected captions into the paired handoff.
+    ...(Number.isInteger(item.tabId) && item.tabId >= 0 ? { tabId: item.tabId } : {}),
+    ...(Number.isInteger(item.frameId) && item.frameId >= 0 ? { frameId: item.frameId } : {}),
   };
   const status = await postToGrabWithRetry(url, ctx);
   if (status !== 200) return;

@@ -33,6 +33,16 @@ function _setWakeTimeout(ms) {
 
 const MAX_HANDOFF_COOKIES = 100;
 const MAX_HANDOFF_BODY_BYTES = 32 * 1024;
+// Grab's A1 /add validation limits, mirrored here so an invalid track cannot
+// turn an otherwise valid URL handoff into a 400.
+const MAX_HANDOFF_CAPTIONS = 4;
+const MAX_CAPTION_URL_BYTES = 2048;
+const MAX_CAPTION_HEADERS = 16;
+const MAX_CAPTION_HEADER_BYTES = 8192;
+const MAX_CAPTION_LANGUAGE_BYTES = 35;
+const CAPTION_HEADER_NAMES = new Set([
+  "referer", "origin", "accept-language", "authorization",
+]);
 
 /// Keep repeated cookie-omission explanations consistent across warm and cold sends.
 const COOKIE_WARNINGS = Object.freeze({
@@ -185,6 +195,8 @@ async function verifyGrab(secret) {
   );
   if (!ok) return false;
   const expected = await hmacHex(secret, SERVER_CONTEXT, nonce);
+  // Additive /hello fields (e.g. a future `features` map) are ignored: proof
+  // alone decides identity, and old Grab replies without them still work.
   return constantTimeEqual(body && body.proof, expected);
 }
 
@@ -251,26 +263,135 @@ function limitHandoffCookies(cookies) {
     .map(({ cookie }) => cookie);
 }
 
-function serializeHandoffBody(url, cookies, userAgent, requestMetadata) {
+const utf8Bytes = (value) => new TextEncoder().encode(value).length;
+
+/// Keep only headers Grab accepts for a caption fetch. Values are never
+/// logged: an oversized or unlisted pair is dropped, not reported.
+function limitHandoffCaptionHeaders(pairs) {
+  if (!Array.isArray(pairs)) return [];
+  const retained = [];
+  let bytes = 0;
+  for (const pair of pairs) {
+    if (!Array.isArray(pair) || pair.length < 2) continue;
+    const [name, value] = pair;
+    if (typeof name !== "string" || typeof value !== "string") continue;
+    if (!CAPTION_HEADER_NAMES.has(name.toLowerCase())) continue;
+    const size = utf8Bytes(name) + utf8Bytes(value);
+    if (
+      retained.length >= MAX_CAPTION_HEADERS ||
+      bytes + size > MAX_CAPTION_HEADER_BYTES
+    ) continue;
+    retained.push([name, value]);
+    bytes += size;
+  }
+  return retained;
+}
+
+function handoffCaptionFormat(parsedUrl, contentType) {
+  const extension = /\.([A-Za-z0-9]+)$/.exec(parsedUrl.pathname);
+  if (extension && /^(vtt|srt)$/i.test(extension[1])) return extension[1].toLowerCase();
+  const type = String(contentType || "").toLowerCase();
+  if (type.includes("vtt")) return "vtt";
+  if (type.includes("srt") || type.includes("subrip")) return "srt";
+  return "";
+}
+
+function handoffCaptionLanguage(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text.length <= MAX_CAPTION_LANGUAGE_BYTES && /^[A-Za-z0-9-]+$/.test(text)
+    ? text
+    : "und";
+}
+
+/// Caption metadata from the bounded per-frame sniff state, shaped for Grab's
+/// A1 /add contract. Callers must already have a pairing secret. Only the
+/// source-page origin is forwarded as Referer/Origin; no new browser API and
+/// no response bodies are involved.
+function prepareHandoffCaptions(ctx, referer) {
+  const tabId = ctx && ctx.tabId;
+  if (!Number.isInteger(tabId) || tabId < 0) return [];
+  const candidates = captionCandidatesForFrame(tabId, ctx && ctx.frameId);
+  const sourceHeaders = [];
+  if (referer) {
+    sourceHeaders.push(["Referer", referer]);
+    try {
+      sourceHeaders.push(["Origin", new URL(referer).origin]);
+    } catch {}
+  }
+  const seen = new Set();
+  const captions = [];
+  // E1 stores oldest first; prefer the newest token-rotated re-fetch.
+  const ordered = candidates
+    .map((candidate, index) => ({ candidate, index }))
+    .sort((a, b) =>
+      b.candidate.observedAt - a.candidate.observedAt || b.index - a.index
+    );
+  for (const { candidate } of ordered) {
+    if (!candidate || typeof candidate.url !== "string") continue;
+    if (utf8Bytes(candidate.url) > MAX_CAPTION_URL_BYTES) continue;
+    let parsed;
+    try {
+      parsed = new URL(candidate.url);
+    } catch {
+      continue;
+    }
+    // Grab rejects non-HTTPS and private hosts at /add; dropping them here
+    // keeps one bad track from failing the whole URL handoff.
+    if (
+      parsed.protocol !== "https:" ||
+      !parsed.hostname ||
+      parsed.username ||
+      parsed.password ||
+      isPrivateNetworkHost(parsed.hostname)
+    ) continue;
+    const language = handoffCaptionLanguage(candidate.language);
+    const format = handoffCaptionFormat(parsed, candidate.contentType);
+    if (!format) continue;
+    const key = `${parsed.origin}${parsed.pathname}|${language.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    captions.push({
+      url: candidate.url,
+      headers: limitHandoffCaptionHeaders([
+        ...sourceHeaders,
+        ...(language !== "und" ? [["Accept-Language", language]] : []),
+      ]),
+      language,
+      format,
+    });
+    if (captions.length >= MAX_HANDOFF_CAPTIONS) break;
+  }
+  return captions;
+}
+
+function serializeHandoffBody(url, cookies, userAgent, requestMetadata, captions) {
+  const tracks = Array.isArray(captions)
+    ? captions.slice(0, MAX_HANDOFF_CAPTIONS)
+    : [];
   return JSON.stringify({
     url,
     cookies,
     user_agent: userAgent,
     ...(requestMetadata || {}),
+    ...(tracks.length ? { captions: tracks } : {}),
   });
 }
 
 /// Fit a handoff body into the server's byte budget, dropping the least
 /// valuable cookies first. Returns { body, count } (count = cookies actually
 /// serialized) or null when even the URL alone is too large.
-function fitHandoffBody(url, cookies, userAgent, requestMetadata) {
-  const byteLength = (value) => new TextEncoder().encode(value).length;
+function fitHandoffBody(url, cookies, userAgent, requestMetadata, captions) {
+  const byteLength = utf8Bytes;
+  const tracks = Array.isArray(captions)
+    ? captions.slice(0, MAX_HANDOFF_CAPTIONS)
+    : [];
+  const serialize = (keptCookies, keptCaptions) =>
+    serializeHandoffBody(url, keptCookies, userAgent, requestMetadata, keptCaptions);
   const fit = (body, count) =>
     byteLength(body) <= MAX_HANDOFF_BODY_BYTES ? { body, count } : null;
-  let body = serializeHandoffBody(url, cookies, userAgent, requestMetadata);
-  if (byteLength(body) <= MAX_HANDOFF_BODY_BYTES) {
-    return fit(body, cookies.length);
-  }
+  let body = serialize(cookies, tracks);
+  let fits = byteLength(body) <= MAX_HANDOFF_BODY_BYTES;
+  if (fits) return fit(body, cookies.length);
 
   const dropOrder = cookies
     .map((cookie, index) => ({
@@ -284,13 +405,26 @@ function fitHandoffBody(url, cookies, userAgent, requestMetadata) {
   const retained = new Set(cookies.map((_, index) => index));
   for (const candidate of dropOrder) {
     retained.delete(candidate.index);
-    body = serializeHandoffBody(
-      url,
+    body = serialize(
       cookies.filter((_, index) => retained.has(index)),
-      userAgent,
-      requestMetadata
+      tracks
     );
-    if (byteLength(body) <= MAX_HANDOFF_BODY_BYTES) break;
+    if (byteLength(body) <= MAX_HANDOFF_BODY_BYTES) {
+      fits = true;
+      break;
+    }
+  }
+  // Captions are a last resort after the auth cookies: drop oldest first.
+  const retainedCaptions = new Set(tracks.map((_, index) => index));
+  if (!fits) {
+    for (let index = tracks.length - 1; index >= 0; index -= 1) {
+      retainedCaptions.delete(index);
+      body = serialize(
+        cookies.filter((_, i) => retained.has(i)),
+        tracks.filter((_, i) => retainedCaptions.has(i))
+      );
+      if (byteLength(body) <= MAX_HANDOFF_BODY_BYTES) break;
+    }
   }
   return fit(body, retained.size);
 }
@@ -462,6 +596,9 @@ async function postToGrab(url, ctx) {
     const referer = secret
       ? normalizeReferer(ctx && typeof ctx === "object" ? ctx.referer : undefined)
       : undefined;
+    // Caption metadata is paired-only, like cookies and the source-page
+    // Referer. Unpaired sends keep the legacy URL-only body.
+    const captions = secret ? prepareHandoffCaptions(ctx, referer) : [];
     const requestMetadata = {
       ...(referer ? { referer } : {}),
       ...(secret
@@ -471,7 +608,7 @@ async function postToGrab(url, ctx) {
           }
         : {}),
     };
-    const fitted = fitHandoffBody(url, cookies, userAgent, requestMetadata);
+    const fitted = fitHandoffBody(url, cookies, userAgent, requestMetadata, captions);
     if (fitted === null) return 413; // Do not send a body Grab will reject.
     body = fitted.body;
     sentCookieCount = fitted.count;
@@ -480,7 +617,7 @@ async function postToGrab(url, ctx) {
     // A toggle flipped off while the body was built must not send a jar the
     // user just withdrew: rebuild and re-sign the URL-only body.
     if (sentCookieCount > 0 && !(await loadForwardCookies())) {
-      const bare = fitHandoffBody(url, [], userAgent, requestMetadata);
+      const bare = fitHandoffBody(url, [], userAgent, requestMetadata, captions);
       if (bare === null) return 413;
       body = bare.body;
       sentCookieCount = 0;
@@ -698,7 +835,7 @@ async function flagTab(tabId, title) {
 /// isn't reachable at all (connection failure). If Grab responded — even
 /// with 409 (card opened or declined) or 408 — it handled the URL; falling
 /// back would duplicate the handoff.
-async function explicitSend(url, tabId, incognito, sourceReferer) {
+async function explicitSend(url, tabId, incognito, sourceReferer, frameId) {
   if (!toGrabUrl(url)) return;
   // The warned-tab set is rebuilt from session storage after a worker restart.
   await warnedTabsReady;
@@ -707,6 +844,7 @@ async function explicitSend(url, tabId, incognito, sourceReferer) {
     tabId,
     incognito,
     ...(referer && referer !== url ? { referer } : {}),
+    ...(Number.isInteger(frameId) && frameId >= 0 ? { frameId } : {}),
   };
   let status = await postToGrabWithRetry(url, ctx);
   if (status === 0 && (await wakeGrabAndWait(url, tabId, incognito, ctx))) {
@@ -790,7 +928,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     // Try the paired HTTP handoff first (sends cookies, waits for Grab's
     // real answer); fall back to the grab:// navigation only when Grab isn't
     // reachable at all.
-    if (url) await explicitSend(url, tab && tab.id, tab && tab.incognito === true, tab && tab.url);
+    if (url) await explicitSend(url, tab && tab.id, tab && tab.incognito === true, tab && tab.url, info.frameId);
     return;
   }
   if (id !== "sendToGrab") return;
@@ -812,6 +950,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   // URL. Match the exact element and originating frame; never choose the first
   // stream found elsewhere in the tab.
   let target = candidates.find((u) => toGrabUrl(u));
+  let captionFrameId = info.frameId;
   if (
     info.mediaType === "video" &&
     tab &&
@@ -821,6 +960,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   ) {
     await restoreVideoFinds(tab.id);
     const matched = findVideoForSource(tab.id, info.srcUrl, info.frameId);
+    if (matched) captionFrameId = matched.frameId;
     if (matched && matched.video.blobUrl === info.srcUrl) {
       if (matched.video.blob === true) {
         const detected = await resolvedBlobVideoUrlForFrame(tab.id, matched.frameId, matched.video);
@@ -846,6 +986,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       tab && tab.id,
       tab && tab.incognito === true,
       sourceReferer !== target ? sourceReferer : undefined,
+      captionFrameId,
     );
   }
 });
