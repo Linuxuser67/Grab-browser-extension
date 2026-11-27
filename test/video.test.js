@@ -287,6 +287,7 @@ describe("classifyStream", () => {
   });
 
   test("audio-typed HLS responses and non-video thumbnails are ignored", () => {
+    // Caption .vtt responses are now classified separately (see caption tests).
     assert.equal(
       bg.classifyStream("https://cdn.example.com/audio/playlist.m3u8", "audio/x-mpegurl"),
       null,
@@ -316,7 +317,6 @@ describe("classifyStream", () => {
       null,
     );
     for (const url of [
-      "https://cdn.example.com/subtitles/captions.vtt",
       "https://cdn.example.com/thumbnails/storyboard.jpg",
       "https://cdn.example.com/thumbnails/poster.webp",
     ]) assert.equal(bg.classifyStream(url, ""), null, url);
@@ -5424,5 +5424,149 @@ describe("warned tabs survive a worker restart", () => {
     const bg = loadBackground(makeChrome(shared));
     await bg.warnedTabsReady;
     assert.deepEqual([...bg._warnedTabs], [3]);
+  });
+});
+
+describe("caption sniffing", () => {
+  const sniff = (chrome, tabId, url, headers = [], frameId = 0, timeStamp = 1000) =>
+    chrome._listeners["webRequest.onResponseStarted"]({
+      tabId, frameId, url, timeStamp, responseHeaders: headers,
+    });
+  const header = (name, value) => ({ name, value });
+
+  test("classifies caption responses without changing manifest or media behavior", () => {
+    const bg = loadBackground(makeChrome());
+    for (const [url, contentType, expected] of [
+      ["https://cdn.example.com/captions.en.vtt", "text/vtt", "caption"],
+      ["https://cdn.example.com/captions.srt", "application/x-subrip", "caption"],
+      ["https://cdn.example.com/subtitles/session", "text/webvtt", "caption"],
+      ["https://cdn.example.com/captions.en.vtt?token=1", "text/plain", "caption"],
+      ["https://cdn.example.com/captions.en.vtt", "", "caption"],
+      ["https://cdn.example.com/notes.txt", "text/plain", null],
+      ["https://cdn.example.com/notes", "text/plain", null],
+      ["https://cdn.example.com/page?file=captions.vtt", "", null],
+      ["https://cdn.example.com/live/master.m3u8", "text/plain", "manifest"],
+      ["https://cdn.example.com/v/clip.mp4", "video/mp4", "media"],
+    ]) assert.equal(bg.classifyStream(url, contentType), expected, `${url} (${contentType})`);
+  });
+
+  test("a .vtt response is recorded as a bounded per-frame candidate with no body fetch or menu row", async () => {
+    const originalFetch = globalThis.fetch;
+    let fetches = 0;
+    globalThis.fetch = async () => {
+      fetches += 1;
+      return { ok: true, text: async () => "" };
+    };
+    try {
+      const chrome = makeChrome();
+      const bg = loadBackground(chrome);
+      const tabId = 401;
+      const url = "https://cdn.example.com/captions.en.vtt?token=1";
+      await sniff(chrome, tabId, url, [
+        header("content-type", "text/vtt"),
+        header("content-language", "fr"),
+      ], 0, 1234);
+
+      assert.deepEqual(bg.captionCandidatesForFrame(tabId, 0), [{
+        url, contentType: "text/vtt", observedAt: 1234, language: "en",
+      }]);
+      assert.deepEqual(bg.captionCandidatesForFrame(tabId, 3), [], "other frames stay empty");
+      const finds = bg._videoFinds.get(tabId);
+      assert.equal(finds.sniffedByFrame.has(0), false, "captions do not become manifests");
+      assert.equal(finds.kindsByFrame.has(0), false, "captions add no menu rows");
+      assert.equal(fetches, 0, "the response body is never fetched");
+      assert.equal(
+        chrome._calls.some(([name, id]) => name === "menus.create" && String(id).startsWith("grabVideo:")),
+        false,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("generic text/plain responses are ignored", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    await sniff(chrome, 402, "https://cdn.example.com/notes.txt", [
+      header("content-type", "text/plain"),
+    ]);
+    assert.equal(bg._videoFinds.has(402), false);
+    assert.deepEqual(bg.captionCandidatesForFrame(402, 0), []);
+  });
+
+  test("per-frame and per-tab caps evict the oldest candidates", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const tabId = 403;
+    const caption = (frame, index) =>
+      `https://cdn.example.com/f${frame}/cap-${index}.vtt`;
+
+    for (let index = 0; index < 6; index += 1) {
+      await sniff(chrome, tabId, caption(0, index), [], 0, 1000 + index);
+    }
+    assert.deepEqual(
+      bg.captionCandidatesForFrame(tabId, 0).map((candidate) => candidate.url),
+      [2, 3, 4, 5].map((index) => caption(0, index)),
+    );
+
+    for (let index = 0; index < 4; index += 1) {
+      await sniff(chrome, tabId, caption(1, index), [], 1, 2000 + index);
+    }
+    assert.equal(bg.captionCandidatesForFrame(tabId, 0).length, 4);
+    assert.equal(bg.captionCandidatesForFrame(tabId, 1).length, 4);
+
+    await sniff(chrome, tabId, caption(2, 0), [], 2, 3000);
+    assert.deepEqual(
+      bg.captionCandidatesForFrame(tabId, 0).map((candidate) => candidate.url),
+      [3, 4, 5].map((index) => caption(0, index)),
+      "the oldest tab-wide observation is evicted first",
+    );
+    assert.equal(bg.captionCandidatesForFrame(tabId, 1).length, 4);
+    assert.deepEqual(
+      bg.captionCandidatesForFrame(tabId, 2).map((candidate) => candidate.url),
+      [caption(2, 0)],
+    );
+  });
+
+  test("language comes from the filename, falling back to Content-Language", async () => {
+    const chrome = makeChrome();
+    const bg = loadBackground(chrome);
+    const tabId = 404;
+    await sniff(chrome, tabId, "https://cdn.example.com/captions.en.vtt", [
+      header("content-language", "fr"),
+    ], 0, 1000);
+    await sniff(chrome, tabId, "https://cdn.example.com/captions.vtt", [
+      header("content-language", "pt-BR, fr"),
+    ], 0, 1001);
+    await sniff(chrome, tabId, "https://cdn.example.com/movie.fr-FR.srt", [
+      header("content-type", "application/x-subrip"),
+    ], 0, 1002);
+    await sniff(chrome, tabId, "https://cdn.example.com/subtitles.vtt", [], 0, 1003);
+
+    assert.deepEqual(
+      bg.captionCandidatesForFrame(tabId, 0).map((candidate) => candidate.language),
+      ["en", "pt-BR", "fr-FR", ""],
+    );
+  });
+
+  test("caption candidates survive a worker restart with defensive validation", async () => {
+    const shared = {};
+    const chrome = makeChrome(shared);
+    const bg = loadBackground(chrome);
+    const tabId = 405;
+    const url = "https://cdn.example.com/captions.de.vtt";
+    await sniff(chrome, tabId, url, [header("content-type", "text/vtt")], 7, 1500);
+
+    // Corrupt one stored entry; the restored read must drop it, not throw.
+    const key = "videoFinds:v2:" + tabId;
+    const stored = shared.session.get(key);
+    stored.captions[0][1].push({ url: 42, observedAt: "yesterday" });
+    shared.session.set(key, stored);
+
+    const restarted = loadBackground(makeChrome(shared));
+    await restarted._restoreVideoFinds(tabId);
+    assert.deepEqual(restarted.captionCandidatesForFrame(tabId, 7), [{
+      url, contentType: "text/vtt", observedAt: 1500, language: "de",
+    }]);
   });
 });

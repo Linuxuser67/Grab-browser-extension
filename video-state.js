@@ -8,6 +8,12 @@ const MAX_VIDEO_FRAMES = 32;
 const MAX_VIDEO_TITLE_LENGTH = 512;
 const MAX_MANIFESTS_PER_FRAME = 20;
 const MAX_MEDIA_SNIFFS_PER_FRAME = 8;
+// Caption sniffing is detection/storage only: bounded so a page cannot fill
+// session storage with subtitle tracks from many frames.
+const MAX_CAPTIONS_PER_FRAME = 4;
+const MAX_CAPTIONS_PER_TAB = 8;
+const MAX_CAPTION_CONTENT_TYPE_LENGTH = 64;
+const MAX_CAPTION_LANGUAGE_LENGTH = 16;
 const ADAPTIVE_QUERY_VARIANT_WINDOW_MS = 30_000;
 const ADAPTIVE_QUERY_VARIANT_LIMIT = 3;
 const ADAPTIVE_QUERY_PARAMETER_LIMIT = 16;
@@ -27,6 +33,7 @@ function createVideoFinds() {
     mediaByFrame: new Map(),
     wholeMediaByFrame: new Map(),
     mediaSizesByFrame: new Map(),
+    captionsByFrame: new Map(),
     kindsByFrame: new Map(),
     sniffSequencesByFrame: new Map(),
     sniffTimesByFrame: new Map(),
@@ -48,6 +55,7 @@ function trackedFrameIds(f) {
     f.mediaByFrame,
     f.wholeMediaByFrame,
     f.mediaSizesByFrame,
+    f.captionsByFrame,
     f.kindsByFrame,
     f.sniffSequencesByFrame,
     f.sniffTimesByFrame,
@@ -71,6 +79,7 @@ function dropFrame(f, frameId) {
     f.mediaByFrame,
     f.wholeMediaByFrame,
     f.mediaSizesByFrame,
+    f.captionsByFrame,
     f.kindsByFrame,
     f.sniffSequencesByFrame,
     f.sniffTimesByFrame,
@@ -618,6 +627,100 @@ function normalizeVideoReport(rawVideos, maximum) {
   return out;
 }
 
+// --- Caption candidates ----------------------------------------------------
+//
+// Captions are separate .vtt/.srt responses sniffed for the later handoff.
+// Only metadata is kept here; response bodies are never fetched or stored.
+
+function normalizeCaptionEntry(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  if (typeof entry.url !== "string" || !fitsGrabUrl(entry.url)) return null;
+  if (!Number.isFinite(entry.observedAt) || entry.observedAt < 0) return null;
+  return {
+    url: entry.url,
+    contentType: typeof entry.contentType === "string"
+      ? entry.contentType.slice(0, MAX_CAPTION_CONTENT_TYPE_LENGTH) : "",
+    observedAt: entry.observedAt,
+    language: typeof entry.language === "string"
+      ? entry.language.slice(0, MAX_CAPTION_LANGUAGE_LENGTH) : "",
+  };
+}
+
+/// Enforce both caption budgets in place, evicting the oldest observation
+/// first. Shared by live sniffing and the defensive snapshot restore.
+function boundCaptionsByFrame(captionsByFrame) {
+  for (const [frameId, entries] of [...captionsByFrame]) {
+    const valid = Array.isArray(entries)
+      ? entries.slice(-MAX_CAPTIONS_PER_FRAME).map(normalizeCaptionEntry).filter(Boolean)
+      : [];
+    if (valid.length) captionsByFrame.set(frameId, valid);
+    else captionsByFrame.delete(frameId);
+  }
+  let total = 0;
+  for (const entries of captionsByFrame.values()) total += entries.length;
+  while (total > MAX_CAPTIONS_PER_TAB) {
+    let oldestFrame = null;
+    let oldestIndex = -1;
+    let oldestAt = Infinity;
+    for (const [frameId, entries] of captionsByFrame) {
+      for (let index = 0; index < entries.length; index += 1) {
+        if (entries[index].observedAt < oldestAt) {
+          oldestAt = entries[index].observedAt;
+          oldestFrame = frameId;
+          oldestIndex = index;
+        }
+      }
+    }
+    if (oldestFrame === null) break;
+    captionsByFrame.get(oldestFrame).splice(oldestIndex, 1);
+    total -= 1;
+  }
+  for (const [frameId, entries] of [...captionsByFrame]) {
+    if (entries.length === 0) captionsByFrame.delete(frameId);
+  }
+}
+
+/// Record one sniffed caption response for a tab/frame. Returns true when the
+/// bounded candidate list changed (so the caller can persist it).
+function noteCaption(tabId, frameId, url, contentType, observedAt, language) {
+  if (!Number.isInteger(tabId) || tabId < 0) return false;
+  const entry = normalizeCaptionEntry({ url, contentType, observedAt, language });
+  if (!entry) return false;
+  let f = videoFinds.get(tabId);
+  if (!f) {
+    f = createVideoFinds();
+    videoFinds.set(tabId, f);
+  }
+  if (!(f.captionsByFrame instanceof Map)) f.captionsByFrame = new Map();
+  const sourceFrame = Number.isInteger(frameId) && frameId >= 0 ? frameId : 0;
+  let entries = f.captionsByFrame.get(sourceFrame);
+  if (!Array.isArray(entries)) f.captionsByFrame.set(sourceFrame, entries = []);
+  const index = entries.findIndex((candidate) => candidate.url === entry.url);
+  let changed = true;
+  if (index >= 0) {
+    const prior = entries[index];
+    changed = prior.contentType !== entry.contentType ||
+      prior.observedAt !== entry.observedAt ||
+      prior.language !== entry.language;
+    entries[index] = entry;
+  } else {
+    entries.push(entry);
+  }
+  boundCaptionsByFrame(f.captionsByFrame);
+  return changed;
+}
+
+/// Defensive read of current caption candidates for a tab/frame, so later
+/// handoff work sees only well-formed metadata (like the video find helpers).
+function captionCandidatesForFrame(tabId, frameId = 0) {
+  const f = videoFinds.get(tabId);
+  if (!f || !(f.captionsByFrame instanceof Map)) return [];
+  const sourceFrame = Number.isInteger(frameId) && frameId >= 0 ? frameId : 0;
+  const entries = f.captionsByFrame.get(sourceFrame);
+  if (!Array.isArray(entries)) return [];
+  return entries.slice(-MAX_CAPTIONS_PER_FRAME).map(normalizeCaptionEntry).filter(Boolean);
+}
+
 function snapshotVideoFindsV2(finds) {
   const frames = [];
   let remainingVideos = MAX_VIDEO_ITEMS;
@@ -813,6 +916,19 @@ function snapshotVideoFindsV2(finds) {
     }]);
   }
 
+  const captionsFrames = [];
+  for (const [frameId, entries] of finds.captionsByFrame instanceof Map
+    ? finds.captionsByFrame : []) {
+    if (captionsFrames.length >= MAX_VIDEO_FRAMES) break;
+    const out = [];
+    for (const entry of entries || []) {
+      const valid = normalizeCaptionEntry(entry);
+      if (valid && !out.some((item) => item.url === valid.url)) out.push(valid);
+      if (out.length >= MAX_CAPTIONS_PER_FRAME) break;
+    }
+    if (out.length) captionsFrames.push([frameId, out]);
+  }
+
   return {
     version: 2,
     frames,
@@ -820,6 +936,7 @@ function snapshotVideoFindsV2(finds) {
     mediaFrames,
     wholeMediaFrames,
     mediaSizesFrames,
+    captionsFrames,
     kindsFrames,
     sniffSequences,
     sniffTimes,
@@ -1129,6 +1246,7 @@ function snapshotVideoFinds(finds) {
     version: 3,
     frames: legacy.frames,
     observations: compactVideoObservations(legacy, finds),
+    captions: legacy.captionsFrames,
     sniffSequence: legacy.sniffSequence,
     retiredFrames: legacy.retiredFrames,
     rotatingQueryParams: snapshotRotatingQueryParams(finds),
@@ -1471,6 +1589,16 @@ async function restoreVideoFinds(tabId) {
           return sizes.size ? sizes : null;
         });
 
+        const captionsByFrame = restoreFrameMap(saved, "captions", (frameId, entries) => {
+          const out = [];
+          for (const entry of entries.slice(-MAX_CAPTIONS_PER_FRAME)) {
+            const valid = normalizeCaptionEntry(entry);
+            if (valid && !out.some((item) => item.url === valid.url)) out.push(valid);
+          }
+          return out.length ? out : null;
+        });
+        boundCaptionsByFrame(captionsByFrame);
+
         let sniffSequence =
           Number.isSafeInteger(saved.sniffSequence) && saved.sniffSequence >= 0
             ? saved.sniffSequence
@@ -1615,6 +1743,7 @@ async function restoreVideoFinds(tabId) {
           mediaByFrame,
           wholeMediaByFrame,
           mediaSizesByFrame,
+          captionsByFrame,
           kindsByFrame,
           sniffSequencesByFrame,
           sniffTimesByFrame,
