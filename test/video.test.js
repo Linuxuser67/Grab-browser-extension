@@ -1634,6 +1634,33 @@ describe("cross-frame video URL deduplication", () => {
   });
 });
 
+describe("caption anchor ranking", () => {
+  test("returns the uniquely closest anchor inside the attribution window", () => {
+    const bg = loadBackground(makeChrome());
+    const nearest = { url: "https://cdn.example.com/first.m3u8", observedAt: 1000 };
+    const anchors = [
+      nearest,
+      { url: "https://cdn.example.com/second.m3u8", observedAt: 5000 },
+    ];
+    assert.equal(bg.nearestCaptionAnchor(anchors, 1100), nearest);
+  });
+
+  test("rejects anchors outside the window and equally close anchors", () => {
+    const bg = loadBackground(makeChrome());
+    const anchors = [
+      { url: "https://cdn.example.com/first.m3u8", observedAt: 1000 },
+      { url: "https://cdn.example.com/second.m3u8", observedAt: 5000 },
+    ];
+    assert.equal(bg.nearestCaptionAnchor(anchors, 100000), null);
+    assert.equal(
+      bg.nearestCaptionAnchor(anchors, 3000),
+      null,
+      "equally close anchors are ambiguous",
+    );
+    assert.equal(bg.nearestCaptionAnchor(anchors, Number.NaN), null);
+  });
+});
+
 describe("collectVideos (content script)", () => {
   let content;
   beforeEach(() => {

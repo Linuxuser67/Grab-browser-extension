@@ -237,6 +237,7 @@ if (typeof module !== "undefined" && module.exports) {
     noteCaption,
     captionCandidatesForFrame,
     captionCandidatesForStream,
+    nearestCaptionAnchor,
     normalizeCaptionCandidates,
     MAX_CAPTIONS_PER_FRAME,
     MAX_CAPTIONS_PER_TAB,

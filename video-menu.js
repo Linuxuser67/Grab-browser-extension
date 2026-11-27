@@ -1462,6 +1462,31 @@ function captionLanguageFor(url, contentLanguage = "") {
   return normalizedCaptionLanguage(contentLanguage);
 }
 
+/// Select the unique nearest playback/session anchor for one caption event.
+/// A nearest match outside the attribution window or tied with another anchor
+/// is intentionally ambiguous and must not be assigned to any stream.
+function nearestCaptionAnchor(anchors, observedAt) {
+  if (!Number.isFinite(observedAt)) return null;
+  const ranked = (anchors || [])
+    .filter((anchor) => anchor && Number.isFinite(anchor.observedAt))
+    .map((anchor) => ({
+      anchor,
+      distance: Math.abs(anchor.observedAt - observedAt),
+    }))
+    .sort((a, b) => a.distance - b.distance);
+  if (
+    ranked.length === 0 ||
+    ranked[0].distance > VIDEO_MANIFEST_ATTRIBUTION_WINDOW_MS ||
+    (
+      ranked.length > 1 &&
+      ranked[1].distance - ranked[0].distance <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
+    )
+  ) {
+    return null;
+  }
+  return ranked[0].anchor;
+}
+
 /// Return only subtitle responses plausibly associated with this stream. A
 /// frame can host more than one player, so timestamps must identify the same
 /// playback session; ambiguous candidates are discarded rather than shared.
@@ -1526,18 +1551,11 @@ function captionCandidatesForStream(tabId, frameId, url, peerUrls = []) {
   const matches = [];
   for (const caption of captions) {
     if (!Number.isFinite(caption.observedAt)) continue;
-    const ranked = anchors
-      .map((anchor) => ({
-        ...anchor,
-        distance: Math.abs(anchor.observedAt - caption.observedAt),
-      }))
-      .sort((a, b) => a.distance - b.distance);
-    if (ranked.length === 0 || ranked[0].distance > VIDEO_MANIFEST_ATTRIBUTION_WINDOW_MS) continue;
-    if (
-      ranked.length > 1 &&
-      ranked[1].distance - ranked[0].distance <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
-    ) continue;
-    const nearestIdentity = targetVideo ? ranked[0].video : videoUrlIdentityKey(ranked[0].url, finds, frameId);
+    const nearest = nearestCaptionAnchor(anchors, caption.observedAt);
+    if (!nearest) continue;
+    const nearestIdentity = targetVideo
+      ? nearest.video
+      : videoUrlIdentityKey(nearest.url, finds, frameId);
     if (nearestIdentity !== targetIdentity) continue;
     matches.push(caption);
   }
