@@ -5560,6 +5560,16 @@ describe("caption sniffing", () => {
       bg.captionLanguageFor("https://cdn.example.com/movie.fr-FR.forced.vtt"),
       "fr-FR",
     );
+    assert.equal(
+      bg.captionLanguageFor("https://cdn.example.com/movie.EN.vtt"),
+      "en",
+      "all-uppercase language codes are normalized",
+    );
+    assert.equal(
+      bg.captionLanguageFor("https://cdn.example.com/movie.en_us.vtt"),
+      "en-US",
+      "underscore-separated region tags are normalized",
+    );
   });
 
   test("caption candidates stay with their frame and nearest playback session", () => {
