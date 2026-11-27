@@ -77,10 +77,10 @@ async function tabOriginForHlsFetch(tabId) {
 }
 
 /// Classify a sniffed response URL: "manifest" for HLS/DASH playlists,
-/// "media" for direct video files, null for everything else (segments,
-/// audio, images, pages). Manifests win on content type alone because some
-/// are served extensionless; extensionless media is NOT guessed because
-/// DASH segments look exactly like that.
+/// "media" for direct video files, "caption" for .vtt/.srt subtitle responses,
+/// null for everything else (segments, audio, images, pages). Manifests win on
+/// content type alone because some are served extensionless; extensionless
+/// media is NOT guessed because DASH segments look exactly like that.
 function isAudioOnlyPlaylistUrl(url, contentType = "") {
   try {
     const pathname = new URL(url).pathname.toLowerCase();
@@ -129,6 +129,12 @@ function classifyStream(url, contentType) {
     return "manifest";
   }
   if (/\.(mp4|m4v|webm|ogv|mov|mkv)$/.test(path)) return "media";
+  // Captions are fetched as separate .vtt/.srt responses. text/plain alone is
+  // never enough: ordinary text files must stay unclassified.
+  if (/\.(vtt|srt)$/.test(path)) return "caption";
+  if (ct === "text/vtt" || ct === "text/webvtt" || ct === "application/x-subrip") {
+    return "caption";
+  }
   return null;
 }
 
@@ -1406,6 +1412,23 @@ function sniffedHeader(headers, name) {
   return "";
 }
 
+/// Best-effort caption language: a BCP-47-looking token in the filename first
+/// ("captions.en.vtt" -> "en"), then the Content-Language header. Never guess
+/// from directory names or arbitrary words.
+const CAPTION_LANGUAGE_TOKEN = /^[a-z]{2,3}(?:-[a-z]{2,4})?$/i;
+const CAPTION_LANGUAGE_IN_NAME = /(?:^|[._ ])([a-z]{2,3}(?:-[a-z]{2,4})?)(?=$|[._ ])/gi;
+const CAPTION_NON_LANGUAGE = /^(?:captions?|subtitles?|sub|cc|sdh|forced|full|track|stream|video|default)$/i;
+function captionLanguageFor(url, contentLanguage = "") {
+  const name = fileNameOf(url).replace(/\.(?:vtt|srt)$/i, "");
+  for (const match of name.matchAll(CAPTION_LANGUAGE_IN_NAME)) {
+    if (!CAPTION_NON_LANGUAGE.test(match[1])) return match[1];
+  }
+  const header = String(contentLanguage || "").split(",")[0].trim().split(";")[0].trim();
+  return CAPTION_LANGUAGE_TOKEN.test(header) && !CAPTION_NON_LANGUAGE.test(header)
+    ? header
+    : "";
+}
+
 /// Origin + pathname of a URL, ignoring query strings and fragments.
 /// Used to dedupe and match playlists whose auth tokens rotate.
 /// (Path-key technique ported from jvillegasd/media-bridge, MIT,
@@ -1898,6 +1921,24 @@ async function onSniffedResponse(details) {
   );
   if (kind === null) return;
   await restoreVideoFinds(details.tabId);
+  // Captions are stored as bounded candidates for the later handoff; they do
+  // not become menu rows or trigger a player rescan.
+  if (kind === "caption") {
+    const contentType = sniffedHeader(details.responseHeaders, "content-type");
+    const added = noteCaption(
+      details.tabId,
+      details.frameId,
+      details.url,
+      contentType,
+      Number.isFinite(details.timeStamp) ? details.timeStamp : Date.now(),
+      captionLanguageFor(
+        details.url,
+        sniffedHeader(details.responseHeaders, "content-language"),
+      ),
+    );
+    if (added) await persistVideoFinds(details.tabId);
+    return;
+  }
   const changed = noteSniffed(
     details.tabId,
     details.frameId,
