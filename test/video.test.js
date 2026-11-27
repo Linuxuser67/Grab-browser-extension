@@ -1375,6 +1375,35 @@ describe("per-video menu candidates", () => {
     assert.deepEqual(shared.session.get("warnedTabs"), [77], "other session state is not evicted");
   });
 
+  test("video persistence yields when non-video session data uses the reserved headroom", async () => {
+    const otherState = "d".repeat(8 * 1024 * 1024);
+    const shared = {
+      session: new Map([["activeDownloadState", otherState]]),
+    };
+    const chrome = makeChrome(shared);
+    const bg = loadBackground(chrome);
+    bg._videoFinds.set(100, {
+      frames: new Map(),
+      sniffedByFrame: new Map(),
+      mediaByFrame: new Map(),
+      wholeMediaByFrame: new Map(),
+      mediaSizesByFrame: new Map(),
+      kindsByFrame: new Map(),
+      sniffSequencesByFrame: new Map(),
+      sniffTimesByFrame: new Map(),
+      sniffFirstSeenByFrame: new Map(),
+      rotatingQueryParamsByFrame: new Map(),
+      retiredFrames: new Map(),
+      sniffSequence: 0,
+      title: "",
+    });
+
+    await bg._persistVideoFinds(100);
+
+    assert.equal(shared.session.has("videoFinds:v2:100"), false);
+    assert.equal(shared.session.get("activeDownloadState"), otherState);
+  });
+
   test("serialized video snapshots stay within 256 KiB with adversarial URL volume", () => {
     const bg = loadBackground(makeChrome());
     const frames = new Map();

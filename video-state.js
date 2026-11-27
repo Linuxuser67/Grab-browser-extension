@@ -224,25 +224,18 @@ async function storeVideoStateSnapshot(tabId, snapshot) {
       byteLength: videoStateStorageEntryByteLength(key, snapshot),
       savedAt: Number.isFinite(snapshot.savedAt) ? snapshot.savedAt : Date.now(),
     };
-    const getBytesInUse = typeof storage.getBytesInUse === "function"
-      ? storage.getBytesInUse.bind(storage)
-      : null;
-
-    let projectedSessionBytes = null;
-    if (getBytesInUse) {
-      try {
-        const [currentUsage, previousCurrentBytes] = await Promise.all([
-          getBytesInUse(null),
-          getBytesInUse(key),
-        ]);
-        // A small margin covers differences between the JSON estimate for a
-        // not-yet-written value and the browser's dynamic-allocation estimate.
-        projectedSessionBytes = currentUsage - previousCurrentBytes +
-          Math.ceil(newEntry.byteLength * 1.1);
-      } catch {
-        // Fall back to the aggregate video-only budget if usage cannot be read.
-      }
+    if (typeof storage.getBytesInUse !== "function") {
+      throw new Error("storage.session.getBytesInUse is unavailable");
     }
+    const getBytesInUse = storage.getBytesInUse.bind(storage);
+    const [currentUsage, previousCurrentBytes] = await Promise.all([
+      getBytesInUse(null),
+      getBytesInUse(key),
+    ]);
+    // A margin covers differences between a JSON estimate for a not-yet-written
+    // value and the browser's dynamic-allocation accounting.
+    let projectedSessionBytes = currentUsage - previousCurrentBytes +
+      Math.ceil(newEntry.byteLength * 1.1);
 
     let projectedVideoBytes = newEntry.byteLength;
     for (const [storedKey, entry] of index) {
@@ -254,13 +247,7 @@ async function storeVideoStateSnapshot(tabId, snapshot) {
     if (legacyEntry) {
       removeKeys.push(legacyKey);
       projectedVideoBytes -= legacyEntry.byteLength;
-      if (projectedSessionBytes !== null && getBytesInUse) {
-        try {
-          projectedSessionBytes -= await getBytesInUse(legacyKey);
-        } catch {
-          projectedSessionBytes = null;
-        }
-      }
+      projectedSessionBytes -= await getBytesInUse(legacyKey);
     }
 
     const oldestFirst = [...index.entries()]
@@ -272,22 +259,16 @@ async function storeVideoStateSnapshot(tabId, snapshot) {
     for (const [storedKey, entry] of oldestFirst) {
       if (
         projectedVideoBytes <= MAX_PERSISTED_VIDEO_STATE_BYTES &&
-        (projectedSessionBytes === null || projectedSessionBytes <= MAX_SESSION_STORAGE_BYTES)
+        projectedSessionBytes <= MAX_SESSION_STORAGE_BYTES
       ) break;
       removeKeys.push(storedKey);
       projectedVideoBytes -= entry.byteLength;
-      if (projectedSessionBytes !== null && getBytesInUse) {
-        try {
-          projectedSessionBytes -= await getBytesInUse(storedKey);
-        } catch {
-          projectedSessionBytes = null;
-        }
-      }
+      projectedSessionBytes -= await getBytesInUse(storedKey);
     }
 
     if (
       projectedVideoBytes > MAX_PERSISTED_VIDEO_STATE_BYTES ||
-      (projectedSessionBytes !== null && projectedSessionBytes > MAX_SESSION_STORAGE_BYTES)
+      projectedSessionBytes > MAX_SESSION_STORAGE_BYTES
     ) {
       // Non-video session keys may themselves consume the reserved headroom.
       // In that case, discard this tab's old snapshot and keep the new state
