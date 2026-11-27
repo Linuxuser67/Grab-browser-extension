@@ -10,6 +10,7 @@
 const videoUi = {
   activeTabId: null,
   menuUrls: [],
+  menuFrames: [],
   detectVideosOn: SHARED_DEFAULTS.detectVideos,
 };
 
@@ -1327,7 +1328,7 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
   return urls;
 }
 
-async function resolvedVideoUrls(tabId) {
+async function resolvedVideoCandidates(tabId) {
   const finds = videoFinds.get(tabId);
   if (!finds) return [];
   if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
@@ -1341,12 +1342,31 @@ async function resolvedVideoUrls(tabId) {
     frameIds.add(0);
   }
 
-  const urls = [];
+  const selected = new Map();
   for (const frameId of frameIds) {
     const candidates = await menuVideoCandidatesForFrame(finds, frameId, tabId);
-    urls.push(...candidates);
+    for (const url of candidates) {
+      if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
+      // Keep the same cross-frame identity used by the existing menu
+      // deduplicator, while retaining the frame that supplied the winner.
+      const key = videoUrlIdentityKey(url, finds);
+      const priority = videoUrlCandidatePriority(finds, url, frameId);
+      const observedAt = videoUrlCandidateObservedAt(finds, url, frameId);
+      const previous = selected.get(key);
+      if (
+        !previous ||
+        priority > previous.priority ||
+        (priority === previous.priority && observedAt > previous.observedAt)
+      ) {
+        selected.set(key, { url, frameId, priority, observedAt });
+      }
+    }
   }
-  return dedupeVideoUrlsByPath(urls, finds).slice(0, MAX_VIDEO_ITEMS);
+  return [...selected.values()].slice(0, MAX_VIDEO_ITEMS);
+}
+
+async function resolvedVideoUrls(tabId) {
+  return (await resolvedVideoCandidates(tabId)).map((candidate) => candidate.url);
 }
 
 function detectedKindForUrl(finds, url, frameId = null) {
@@ -1412,21 +1432,123 @@ function sniffedHeader(headers, name) {
   return "";
 }
 
-/// Best-effort caption language: a BCP-47-looking token in the filename first
-/// ("captions.en.vtt" -> "en"), then the Content-Language header. Never guess
-/// from directory names or arbitrary words.
-const CAPTION_LANGUAGE_TOKEN = /^[a-z]{2,3}(?:-[a-z]{2,4})?$/i;
-const CAPTION_LANGUAGE_IN_NAME = /(?:^|[._ ])([a-z]{2,3}(?:-[a-z]{2,4})?)(?=$|[._ ])/gi;
-const CAPTION_NON_LANGUAGE = /^(?:captions?|subtitles?|sub|cc|sdh|forced|full|track|stream|video|default)$/i;
+/// Accept only language tags at the end of the filename. Page titles commonly
+/// contain short words ("The.Last.of.Us") that resemble language codes; taking
+/// the first matching token mislabels those titles as subtitle languages.
+const CAPTION_LANGUAGE_SUFFIX = /^(?:[a-z]{2,3})(?:-[A-Z]{2}|-[A-Z][a-z]{3})?$/;
+const CAPTION_LANGUAGE_NON_LANGUAGE = /^(?:captions?|subtitles?|sub|cc|sdh|forced|full|track|stream|video|default)$/i;
+
+function normalizedCaptionLanguage(value) {
+  const raw = String(value || "").split(",")[0].trim().split(";")[0].trim().replace(/_/g, "-");
+  const match = /^([a-z]{2,3})(?:-([a-z]{2}|[a-z]{4}))?$/i.exec(raw);
+  if (!match) return "";
+  const suffix = match[2]
+    ? match[2].length === 2 ? match[2].toUpperCase()
+      : match[2][0].toUpperCase() + match[2].slice(1).toLowerCase()
+    : "";
+  return match[1].toLowerCase() + (suffix ? `-${suffix}` : "");
+}
+
 function captionLanguageFor(url, contentLanguage = "") {
   const name = fileNameOf(url).replace(/\.(?:vtt|srt)$/i, "");
-  for (const match of name.matchAll(CAPTION_LANGUAGE_IN_NAME)) {
-    if (!CAPTION_NON_LANGUAGE.test(match[1])) return match[1];
+  const tokens = name.split(/[._ ]+/).filter(Boolean);
+  while (
+    tokens.length > 0 &&
+    CAPTION_LANGUAGE_NON_LANGUAGE.test(tokens[tokens.length - 1])
+  ) tokens.pop();
+  const suffix = tokens[tokens.length - 1] || "";
+  if (CAPTION_LANGUAGE_SUFFIX.test(suffix)) return suffix;
+  return normalizedCaptionLanguage(contentLanguage);
+}
+
+/// Return only subtitle responses plausibly associated with this stream. A
+/// frame can host more than one player, so timestamps must identify the same
+/// playback session; ambiguous candidates are discarded rather than shared.
+function captionCandidatesForStream(tabId, frameId, url, peerUrls = []) {
+  if (!Number.isInteger(tabId) || tabId < 0 ||
+      !Number.isInteger(frameId) || frameId < 0 ||
+      typeof url !== "string") return [];
+  const finds = videoFinds.get(tabId);
+  if (!finds) return [];
+  const captions = captionCandidatesForFrame(tabId, frameId);
+  if (captions.length === 0) return [];
+
+  const videos = finds.frames instanceof Map ? finds.frames.get(frameId) || [] : [];
+  let targetVideo = null;
+  if (videos.length > 0) {
+    const manifests = sniffedManifestsForFrame(finds, frameId);
+    const media = wholeMediaUrlsForFrame(finds, frameId);
+    const sniffTimes = sniffTimesForFrame(finds, frameId);
+    const firstSeenTimes = sniffFirstSeenTimesForFrame(finds, frameId);
+    const owners = videos.filter((video) => {
+      if (!video) return false;
+      if (video.src === url) return true;
+      const attributed = [
+        ...attributedManifestUrlsForVideo(
+          videos, video, manifests, sniffTimes, firstSeenTimes, finds, frameId,
+        ),
+        ...attributedManifestUrlsForVideo(
+          videos, video, media, sniffTimes, firstSeenTimes, finds, frameId,
+        ),
+      ];
+      return attributed.some((candidate) =>
+        videoUrlIdentityKey(candidate, finds, frameId) ===
+        videoUrlIdentityKey(url, finds, frameId));
+    });
+    if (owners.length !== 1 || !Number.isFinite(owners[0].loadStartedAt)) return [];
+    targetVideo = owners[0];
   }
-  const header = String(contentLanguage || "").split(",")[0].trim().split(";")[0].trim();
-  return CAPTION_LANGUAGE_TOKEN.test(header) && !CAPTION_NON_LANGUAGE.test(header)
-    ? header
-    : "";
+
+  const anchors = [];
+  if (targetVideo) {
+    for (const video of videos) {
+      if (video && Number.isFinite(video.loadStartedAt)) {
+        anchors.push({ video, observedAt: video.loadStartedAt });
+      }
+    }
+  } else {
+    const streamUrls = [...new Set(
+      (Array.isArray(peerUrls) && peerUrls.length > 0 ? peerUrls : [url])
+        .filter((candidate) => typeof candidate === "string"),
+    )];
+    const firstSeen = sniffFirstSeenTimesForFrame(finds, frameId);
+    const sniffed = sniffTimesForFrame(finds, frameId);
+    for (const streamUrl of streamUrls) {
+      const key = videoUrlIdentityKey(streamUrl, finds, frameId);
+      const observedAt = firstSeen.get(key) ?? sniffed.get(key);
+      if (Number.isFinite(observedAt)) anchors.push({ url: streamUrl, observedAt });
+    }
+  }
+  const targetIdentity = targetVideo
+    ? targetVideo
+    : videoUrlIdentityKey(url, finds, frameId);
+  const matches = [];
+  for (const caption of captions) {
+    if (!Number.isFinite(caption.observedAt)) continue;
+    const ranked = anchors
+      .map((anchor) => ({
+        ...anchor,
+        distance: Math.abs(anchor.observedAt - caption.observedAt),
+      }))
+      .sort((a, b) => a.distance - b.distance);
+    if (ranked.length === 0 || ranked[0].distance > VIDEO_MANIFEST_ATTRIBUTION_WINDOW_MS) continue;
+    if (
+      ranked.length > 1 &&
+      ranked[1].distance - ranked[0].distance <= VIDEO_MANIFEST_ATTRIBUTION_TIE_MS
+    ) continue;
+    const nearestIdentity = targetVideo ? ranked[0].video : videoUrlIdentityKey(ranked[0].url, finds, frameId);
+    if (nearestIdentity !== targetIdentity) continue;
+    matches.push(caption);
+  }
+  return matches
+    .sort((a, b) =>
+      Math.abs(a.observedAt - (targetVideo?.loadStartedAt ?? anchors.find(
+        (anchor) => videoUrlIdentityKey(anchor.url, finds, frameId) === targetIdentity,
+      )?.observedAt ?? 0)) -
+      Math.abs(b.observedAt - (targetVideo?.loadStartedAt ?? anchors.find(
+        (anchor) => videoUrlIdentityKey(anchor.url, finds, frameId) === targetIdentity,
+      )?.observedAt ?? 0)))
+    .slice(0, 4);
 }
 
 /// Origin + pathname of a URL, ignoring query strings and fragments.
@@ -1705,9 +1827,10 @@ async function doRefreshVideoMenu(tabId) {
     if (!videoUi.detectVideosOn) {
       await removeContextMenu(VIDEO_PARENT_ID);
       videoUi.menuUrls = [];
+      videoUi.menuFrames = [];
       lastMenuSignature = null;
       lastMenuSignatureTabId = null;
-      chrome.storage.session.set({ menuUrls: [] }).catch(() => {});
+      chrome.storage.session.set({ menuUrls: [], menuFrames: [] }).catch(() => {});
       if (tabScope(tabId) && !warnedTabs.has(tabId)) {
         const cleared = chrome.action.setBadgeText({ tabId, text: "" });
         if (cleared && typeof cleared.catch === "function") cleared.catch(() => {});
@@ -1717,9 +1840,9 @@ async function doRefreshVideoMenu(tabId) {
     // Combine active DOM video sources with network-observed manifests.
     // Playlist candidates do not require a unique or even discoverable
     // <video> element; individual element clicks remain frame-scoped below.
-    let urls = tabId === videoUi.activeTabId ? await resolvedVideoUrls(tabId) : [];
+    let candidates = tabId === videoUi.activeTabId ? await resolvedVideoCandidates(tabId) : [];
     // The setting can change while the manifest checks above are awaiting.
-    if (!videoUi.detectVideosOn) urls = [];
+    if (!videoUi.detectVideosOn) candidates = [];
     // One entry per video/stream; its rows go straight into the one submenu
     // (see "Menu rows").
     const finds = videoFinds.get(tabId);
@@ -1729,13 +1852,14 @@ async function doRefreshVideoMenu(tabId) {
         .map((v) => [v.src, v.height]),
     );
     const entries = [];
-    for (const u of urls) {
-      entries.push(
-        buildVideoEntry(u, {
-          height: heights.get(u),
-          kind: detectedKindForUrl(finds, u),
+    for (const candidate of candidates) {
+      entries.push({
+        ...buildVideoEntry(candidate.url, {
+          height: heights.get(candidate.url),
+          kind: detectedKindForUrl(finds, candidate.url, candidate.frameId),
         }),
-      );
+        frameId: candidate.frameId,
+      });
     }
     const names = uniqueLabels(
       entries.map((e, i) =>
@@ -1745,7 +1869,11 @@ async function doRefreshVideoMenu(tabId) {
     // Menu item IDs and labels depend on the visible shape, not URL query
     // tokens. Live playlists often rotate those tokens on every request; keep
     // the menu nodes and update only the index-to-URL map in that case.
-    const menuUrls = entries.flatMap((entry) => entry.rows.map((row) => row.url));
+    const menuRows = entries.flatMap((entry) =>
+      entry.rows.map((row) => ({ url: row.url, frameId: entry.frameId })),
+    );
+    const menuUrls = menuRows.map((row) => row.url);
+    const menuFrames = menuRows.map((row) => row.frameId);
     const signature = JSON.stringify([
       tabId,
       names,
@@ -1753,14 +1881,18 @@ async function doRefreshVideoMenu(tabId) {
     ]);
     if (lastMenuSignatureTabId === tabId && lastMenuSignature === signature) {
       const currentUrls = videoUi.menuUrls;
+      const currentFrames = videoUi.menuFrames;
       const urlsChanged =
         currentUrls.length !== menuUrls.length ||
         menuUrls.some((url, index) => url !== currentUrls[index]);
-      if (urlsChanged) {
+      const framesChanged =
+        currentFrames.length !== menuFrames.length ||
+        menuFrames.some((frameId, index) => frameId !== currentFrames[index]);
+      if (urlsChanged || framesChanged) {
         videoUi.menuUrls = menuUrls;
-        // A worker restart restores click targets from session storage. Persist
-        // the latest rotating URL even though the visible menu did not change.
-        chrome.storage.session.set({ menuUrls }).catch(() => {});
+        videoUi.menuFrames = menuFrames;
+        // A worker restart restores both the target URL and its source frame.
+        chrome.storage.session.set({ menuUrls, menuFrames }).catch(() => {});
       }
       return;
     }
@@ -1769,10 +1901,11 @@ async function doRefreshVideoMenu(tabId) {
     // would leave right-click with nothing while it runs.
     await removeContextMenu(VIDEO_PARENT_ID);
     videoUi.menuUrls = menuUrls;
+    videoUi.menuFrames = menuFrames;
     if (entries.length === 0) {
       lastMenuSignatureTabId = tabId;
       lastMenuSignature = signature;
-      chrome.storage.session.set({ menuUrls: [] }).catch(() => {});
+      chrome.storage.session.set({ menuUrls: [], menuFrames: [] }).catch(() => {});
       if (tabScope(tabId) && !warnedTabs.has(tabId)) {
         const result = chrome.action.setBadgeText({ tabId, text: "" });
         if (result && typeof result.catch === "function") {
@@ -1811,7 +1944,10 @@ async function doRefreshVideoMenu(tabId) {
     });
     // Persist for worker restarts: videoUi.menuUrls is in-memory and MV3
     // suspends the worker; a click after a restart must still resolve.
-    chrome.storage.session.set({ menuUrls: videoUi.menuUrls }).catch(() => {});
+    chrome.storage.session.set({
+      menuUrls: videoUi.menuUrls,
+      menuFrames: videoUi.menuFrames,
+    }).catch(() => {});
     const badged = chrome.action.setBadgeText({
       tabId,
       text: String(entries.length),
