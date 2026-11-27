@@ -252,6 +252,7 @@ if (typeof module !== "undefined" && module.exports) {
     mergeVideoFinds,
     findVideoForSource,
     resolvedBlobVideoUrlForFrame,
+    resolvedVideoCandidates,
     resolvedVideoUrlsForFrame,
     menuVideoCandidatesForFrame,
     attributedManifestUrlsForVideo,

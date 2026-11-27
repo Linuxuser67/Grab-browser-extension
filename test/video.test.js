@@ -1548,6 +1548,10 @@ describe("cross-frame video URL deduplication", () => {
       await bg.resolvedVideoUrls(tabId),
       ["https://cdn.example.com/watch/main.mp4?token=new"],
     );
+    const resolvedCandidates = await bg.resolvedVideoCandidates(tabId);
+    assert.equal(resolvedCandidates.length, 1);
+    assert.equal(resolvedCandidates[0].url, "https://cdn.example.com/watch/main.mp4?token=new");
+    assert.equal(resolvedCandidates[0].frameId, 7, "the cross-frame winner retains its source frame");
     const badges = chrome._calls.filter(([name]) => name === "action.setBadgeText");
     assert.equal(badges.at(-1)[1].text, "1");
   });
