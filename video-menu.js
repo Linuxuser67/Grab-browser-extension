@@ -1842,8 +1842,8 @@ function clearAllVideoUi() {
   }
 }
 
-/// Ask a tab's content script to re-sweep for videos (wiring shadow roots).
-/// Debounced per tab, with one retry at ~1.5s in case the player mounts
+/// Ask a frame's content script to re-sweep for videos (wiring shadow roots).
+/// Debounced per tab/frame, with one retry at ~1.5s in case the player mounts
 /// just after the manifest is sniffed.
 const rescanTimers = new Map();
 function requestRescan(tabId, requestedFrameId = 0) {
@@ -1912,8 +1912,8 @@ async function onSniffedResponse(details) {
   await persistVideoFinds(details.tabId);
   onVideoEvent(details.tabId);
   // A sniffed manifest may belong to a shadow-root player whose play
-  // events never reach the document. Nudge the tab to re-sweep (wiring
-  // shadow roots); debounced, with one retry in case the player mounts
+  // events never reach the document. Nudge the requesting frame to re-sweep
+  // (wiring shadow roots); debounced, with one retry in case the player mounts
   // just after the sniff.
   requestRescan(details.tabId, details.frameId);
 }

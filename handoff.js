@@ -769,8 +769,6 @@ async function showCookieWarning(ctx) {
 
 // --- Explicit sends -------------------------------------------------------
 
-// --- Explicit sends ---
-
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const id = info.menuItemId;
   if (typeof id === "string" && id.startsWith(VIDEO_ITEM_PREFIX)) {
