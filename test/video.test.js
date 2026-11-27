@@ -5570,6 +5570,11 @@ describe("caption sniffing", () => {
       "en-US",
       "underscore-separated region tags are normalized",
     );
+    assert.equal(
+      bg.captionLanguageFor("https://cdn.example.com/captions_en_US.vtt"),
+      "en-US",
+      "underscore-separated filename tokens retain the language and region",
+    );
   });
 
   test("caption candidates stay with their frame and nearest playback session", () => {
