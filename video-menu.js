@@ -893,8 +893,11 @@ async function resolvedBlobVideoUrlForFrame(tabId, frameId, targetVideo = null) 
     finds,
     frameId,
   );
-  const uniqueMedia = dedupeVideoUrlsByPath(attributedMedia, finds, frameId);
-  return uniqueMedia.length === 1 ? uniqueMedia[0] : null;
+  const uniqueMedia = dedupeVideoUrlsByPath(
+    attributedMedia.map((url) => ({ url, frameId })),
+    finds,
+  );
+  return uniqueMedia.length === 1 ? uniqueMedia[0].url : null;
 }
 
 function videoUrlCandidateObservedAt(finds, url, frameId = null) {
@@ -1219,13 +1222,19 @@ function videoUrlQueryIdentityKey(url, finds = null, frameId = null) {
   }
 }
 
-/// Deduplicate streams across frames while retaining non-auth query parameters.
-/// Keep the highest-ranked URL; ties prefer the most recently observed resource.
-function dedupeVideoUrlsByPath(urls, finds, frameId = null) {
+/// Deduplicate URL/frame candidates while retaining non-auth query parameters.
+/// Identity may span frames, but ranking always uses the frame that observed
+/// each candidate. Ties prefer the most recently observed resource.
+function dedupeVideoUrlsByPath(candidates, finds, { crossFrame = false } = {}) {
   const selected = new Map();
-  for (const url of urls || []) {
+  for (const candidate of candidates || []) {
+    const url = candidate && candidate.url;
+    const frameId = Number.isInteger(candidate && candidate.frameId)
+      ? candidate.frameId
+      : null;
     if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
-    const key = videoUrlIdentityKey(url, finds, frameId);
+    const identityFrameId = crossFrame ? null : frameId;
+    const key = videoUrlIdentityKey(url, finds, identityFrameId);
     const priority = videoUrlCandidatePriority(finds, url, frameId);
     const observedAt = videoUrlCandidateObservedAt(finds, url, frameId);
     const previous = selected.get(key);
@@ -1234,10 +1243,10 @@ function dedupeVideoUrlsByPath(urls, finds, frameId = null) {
       priority > previous.priority ||
       (priority === previous.priority && observedAt > previous.observedAt)
     ) {
-      selected.set(key, { url, priority, observedAt });
+      selected.set(key, { url, frameId, priority, observedAt });
     }
   }
-  return [...selected.values()].map((candidate) => candidate.url);
+  return [...selected.values()];
 }
 
 async function resolvedVideoUrlsForFrame(tabId, frameId) {
@@ -1245,11 +1254,11 @@ async function resolvedVideoUrlsForFrame(tabId, frameId) {
   if (!finds) return [];
   if (pruneExpiredRetiredFrames(finds)) await persistVideoFinds(tabId);
   if (finds.retiredFrames instanceof Map && finds.retiredFrames.has(frameId)) return [];
+  const candidates = await menuVideoCandidatesForFrame(finds, frameId, tabId);
   return dedupeVideoUrlsByPath(
-    await menuVideoCandidatesForFrame(finds, frameId, tabId),
+    candidates.map((url) => ({ url, frameId })),
     finds,
-    frameId,
-  );
+  ).map((candidate) => candidate.url);
 }
 
 /// Build one candidate per active DOM video. Direct sources are authoritative;
@@ -1322,8 +1331,11 @@ async function menuVideoCandidatesForFrame(finds, frameId, tabId = null) {
       finds,
       frameId,
     );
-    const uniqueMedia = dedupeVideoUrlsByPath(attributedMedia, finds, frameId);
-    if (uniqueMedia.length === 1) urls.push(uniqueMedia[0]);
+    const uniqueMedia = dedupeVideoUrlsByPath(
+      attributedMedia.map((url) => ({ url, frameId })),
+      finds,
+    );
+    if (uniqueMedia.length === 1) urls.push(uniqueMedia[0].url);
   }
   return urls;
 }
@@ -1342,27 +1354,15 @@ async function resolvedVideoCandidates(tabId) {
     frameIds.add(0);
   }
 
-  const selected = new Map();
+  const candidates = [];
   for (const frameId of frameIds) {
-    const candidates = await menuVideoCandidatesForFrame(finds, frameId, tabId);
-    for (const url of candidates) {
-      if (typeof url !== "string" || !fitsGrabUrl(url)) continue;
-      // Keep the same cross-frame identity used by the existing menu
-      // deduplicator, while retaining the frame that supplied the winner.
-      const key = videoUrlIdentityKey(url, finds);
-      const priority = videoUrlCandidatePriority(finds, url, frameId);
-      const observedAt = videoUrlCandidateObservedAt(finds, url, frameId);
-      const previous = selected.get(key);
-      if (
-        !previous ||
-        priority > previous.priority ||
-        (priority === previous.priority && observedAt > previous.observedAt)
-      ) {
-        selected.set(key, { url, frameId, priority, observedAt });
-      }
+    const frameCandidates = await menuVideoCandidatesForFrame(finds, frameId, tabId);
+    for (const url of frameCandidates) {
+      candidates.push({ url, frameId });
     }
   }
-  return [...selected.values()].slice(0, MAX_VIDEO_ITEMS);
+  return dedupeVideoUrlsByPath(candidates, finds, { crossFrame: true })
+    .slice(0, MAX_VIDEO_ITEMS);
 }
 
 async function resolvedVideoUrls(tabId) {
