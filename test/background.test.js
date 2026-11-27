@@ -1940,7 +1940,7 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(body.referer, "https://example.com/");
     assert.equal(
       post.opts.headers["X-Grab-Token"],
-      hmac("grab-client\\u0000", post.opts.body),
+      hmac("grab-client\u0000", post.opts.body),
       "the pairing token covers the caption metadata",
     );
   });
