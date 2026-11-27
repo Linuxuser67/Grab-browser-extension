@@ -1562,6 +1562,31 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(accepted.count, 0);
   });
 
+  test("caption metadata survives cookie trimming in the bounded handoff body", () => {
+    const captions = [{
+      url: "https://cdn.example.com/subtitles.en.vtt?sig=1",
+      headers: [],
+      language: "en",
+      format: "vtt",
+    }];
+    const cookies = Array.from({ length: 100 }, (_, index) => ({
+      name: `cookie-${index}`,
+      value: "v".repeat(500),
+      domain: "example.com",
+    }));
+    const fitted = bg.fitHandoffBody(
+      "https://cdn.example.com/video.m3u8",
+      cookies,
+      navigator.userAgent,
+      { timestamp_ms: 1, nonce: "a".repeat(32) },
+      captions,
+    );
+    assert.ok(fitted, "cookie trimming should make room without dropping captions");
+    assert.ok(Buffer.byteLength(fitted.body) <= 32 * 1024);
+    assert.deepEqual(JSON.parse(fitted.body).captions, captions);
+    assert.ok(fitted.count < cookies.length, "lower-priority cookies are trimmed first");
+  });
+
   test("a stalled response body cannot hold verification open", async () => {
     const realSetTimeout = globalThis.setTimeout;
     // Fire the 3 s deadline at once: the test proves the deadline covers the
@@ -1688,13 +1713,25 @@ describe("HTTP handoff to Grab", () => {
       return originalGet(defaults);
     };
 
+    const captions = [{
+      url: "https://cdn.example.com/en.vtt",
+      headers: [],
+      language: "en",
+      format: "vtt",
+    }];
     const ctx = {
       preparedCookies: [{ name: "sid", value: "v", domain: "example.com" }],
+      captions,
     };
     assert.equal(await bg.postToGrab("https://example.com/f.zip", ctx), 200);
     assert.equal(toggleReads, 2, "the final privacy check observed the toggle changing off");
     const post = posts()[0];
     assert.deepEqual(JSON.parse(post.opts.body).cookies, []);
+    assert.deepEqual(
+      JSON.parse(post.opts.body).captions,
+      captions,
+      "turning off cookie forwarding must not discard caption metadata",
+    );
     assert.equal(
       post.opts.headers["X-Grab-Token"],
       hmac("grab-client\u0000", post.opts.body),
@@ -1868,6 +1905,65 @@ describe("HTTP handoff to Grab", () => {
     assert.equal(await bg.handOff("https://example.com/f.zip", undefined, [0, 0]), false);
     assert.equal(fetchCalls.length, 3, "1 attempt + 2 retries");
     assert.equal(tabsCreated().length, 0);
+  });
+
+  test("paired video sends forward only valid HTTPS caption candidates and sign them", async () => {
+    mockPairedGrab();
+    await pair();
+    await chrome.storage.local.set({ forwardCookies: false });
+    const candidate = {
+      url: "https://subs.example.com/episode.en.vtt?sig=private",
+      contentType: "text/vtt",
+      language: "en",
+    };
+    await bg.explicitSend(
+      "https://cdn.example.com/episode/master.m3u8",
+      7,
+      false,
+      "https://example.com/watch/episode",
+      [
+        candidate,
+        { url: "http://subs.example.com/insecure.vtt", contentType: "text/vtt", language: "en" },
+        { url: "https://subs.example.com/notes.txt", contentType: "text/plain", language: "en" },
+        { url: "https://user:pass@subs.example.com/private.vtt", contentType: "text/vtt", language: "en" },
+      ],
+    );
+    const post = posts().find((call) => call.opts.method === "POST");
+    assert.ok(post);
+    const body = JSON.parse(post.opts.body);
+    assert.deepEqual(body.captions, [{
+      url: candidate.url,
+      headers: [],
+      language: "en",
+      format: "vtt",
+    }]);
+    assert.equal(body.referer, "https://example.com/");
+    assert.equal(
+      post.opts.headers["X-Grab-Token"],
+      hmac("grab-client\u0000", post.opts.body),
+      "the pairing token covers the caption metadata",
+    );
+  });
+
+  test("unpaired video sends remain URL-only even when caption candidates exist", async () => {
+    mockFetch(200);
+    await bg.explicitSend(
+      "https://cdn.example.com/episode/master.m3u8",
+      7,
+      false,
+      "https://example.com/watch/episode",
+      [{
+        url: "https://subs.example.com/episode.en.vtt",
+        contentType: "text/vtt",
+        language: "en",
+      }],
+    );
+    const post = posts()[0];
+    assert.ok(post);
+    const body = JSON.parse(post.opts.body);
+    assert.equal(body.captions, undefined);
+    assert.equal(body.referer, undefined);
+    assert.equal(post.opts.headers["X-Grab-Token"], undefined);
   });
 
   test("normalizeReferer retains only an HTTP(S) origin and rejects unsafe values", () => {

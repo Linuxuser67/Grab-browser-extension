@@ -236,6 +236,8 @@ if (typeof module !== "undefined" && module.exports) {
     captionLanguageFor,
     noteCaption,
     captionCandidatesForFrame,
+    captionCandidatesForStream,
+    normalizeCaptionCandidates,
     MAX_CAPTIONS_PER_FRAME,
     MAX_CAPTIONS_PER_TAB,
     videoName,

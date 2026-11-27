@@ -251,23 +251,72 @@ function limitHandoffCookies(cookies) {
     .map(({ cookie }) => cookie);
 }
 
-function serializeHandoffBody(url, cookies, userAgent, requestMetadata) {
+function normalizeCaptionCandidates(raw) {
+  if (!Array.isArray(raw)) return [];
+  const captions = [];
+  const seen = new Set();
+  for (const candidate of raw.slice(0, 4)) {
+    if (!candidate || typeof candidate !== "object" || typeof candidate.url !== "string") continue;
+    if (new TextEncoder().encode(candidate.url).length > MAX_GRAB_URL_BYTES) continue;
+    let parsed;
+    try {
+      parsed = new URL(candidate.url);
+    } catch {
+      continue;
+    }
+    if (
+      parsed.protocol !== "https:" ||
+      !parsed.hostname ||
+      parsed.username ||
+      parsed.password ||
+      seen.has(candidate.url)
+    ) continue;
+    const path = parsed.pathname.toLowerCase();
+    const contentType = typeof candidate.contentType === "string"
+      ? candidate.contentType.toLowerCase().split(";")[0].trim()
+      : "";
+    const format = path.endsWith(".vtt") || contentType === "text/vtt" || contentType === "text/webvtt"
+      ? "vtt"
+      : path.endsWith(".srt") || contentType === "application/x-subrip"
+        ? "srt"
+        : "";
+    if (!format) continue;
+    const language = typeof candidate.language === "string" &&
+      candidate.language.length <= 35 &&
+      /^[a-zA-Z0-9-]*$/.test(candidate.language)
+      ? candidate.language
+      : "";
+    seen.add(candidate.url);
+    // Browser-supplied response headers are deliberately not forwarded. Grab
+    // applies its own source Referer and authenticated cookie jar.
+    captions.push({
+      url: candidate.url,
+      headers: [],
+      language,
+      format,
+    });
+  }
+  return captions;
+}
+
+function serializeHandoffBody(url, cookies, userAgent, requestMetadata, captions = []) {
   return JSON.stringify({
     url,
     cookies,
     user_agent: userAgent,
     ...(requestMetadata || {}),
+    ...(captions.length > 0 ? { captions } : {}),
   });
 }
 
 /// Fit a handoff body into the server's byte budget, dropping the least
 /// valuable cookies first. Returns { body, count } (count = cookies actually
 /// serialized) or null when even the URL alone is too large.
-function fitHandoffBody(url, cookies, userAgent, requestMetadata) {
+function fitHandoffBody(url, cookies, userAgent, requestMetadata, captions = []) {
   const byteLength = (value) => new TextEncoder().encode(value).length;
   const fit = (body, count) =>
     byteLength(body) <= MAX_HANDOFF_BODY_BYTES ? { body, count } : null;
-  let body = serializeHandoffBody(url, cookies, userAgent, requestMetadata);
+  let body = serializeHandoffBody(url, cookies, userAgent, requestMetadata, captions);
   if (byteLength(body) <= MAX_HANDOFF_BODY_BYTES) {
     return fit(body, cookies.length);
   }
@@ -288,7 +337,8 @@ function fitHandoffBody(url, cookies, userAgent, requestMetadata) {
       url,
       cookies.filter((_, index) => retained.has(index)),
       userAgent,
-      requestMetadata
+      requestMetadata,
+      captions
     );
     if (byteLength(body) <= MAX_HANDOFF_BODY_BYTES) break;
   }
@@ -471,7 +521,10 @@ async function postToGrab(url, ctx) {
           }
         : {}),
     };
-    const fitted = fitHandoffBody(url, cookies, userAgent, requestMetadata);
+    const captions = secret
+      ? normalizeCaptionCandidates(ctx && typeof ctx === "object" ? ctx.captions : [])
+      : [];
+    const fitted = fitHandoffBody(url, cookies, userAgent, requestMetadata, captions);
     if (fitted === null) return 413; // Do not send a body Grab will reject.
     body = fitted.body;
     sentCookieCount = fitted.count;
@@ -480,7 +533,7 @@ async function postToGrab(url, ctx) {
     // A toggle flipped off while the body was built must not send a jar the
     // user just withdrew: rebuild and re-sign the URL-only body.
     if (sentCookieCount > 0 && !(await loadForwardCookies())) {
-      const bare = fitHandoffBody(url, [], userAgent, requestMetadata);
+      const bare = fitHandoffBody(url, [], userAgent, requestMetadata, captions);
       if (bare === null) return 413;
       body = bare.body;
       sentCookieCount = 0;
@@ -698,15 +751,17 @@ async function flagTab(tabId, title) {
 /// isn't reachable at all (connection failure). If Grab responded — even
 /// with 409 (card opened or declined) or 408 — it handled the URL; falling
 /// back would duplicate the handoff.
-async function explicitSend(url, tabId, incognito, sourceReferer) {
+async function explicitSend(url, tabId, incognito, sourceReferer, captionCandidates = []) {
   if (!toGrabUrl(url)) return;
   // The warned-tab set is rebuilt from session storage after a worker restart.
   await warnedTabsReady;
   const referer = normalizeReferer(sourceReferer);
+  const captions = normalizeCaptionCandidates(captionCandidates);
   const ctx = {
     tabId,
     incognito,
     ...(referer && referer !== url ? { referer } : {}),
+    ...(captions.length > 0 ? { captions } : {}),
   };
   let status = await postToGrabWithRetry(url, ctx);
   if (status === 0 && (await wakeGrabAndWait(url, tabId, incognito, ctx))) {
@@ -778,19 +833,44 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     // (master playlists) and may belong to another window's tab.
     // videoUi.menuUrls is in-memory; after a worker restart, read the persisted copy.
     let urls = videoUi.menuUrls;
-    if (urls.length === 0) {
+    let frames = videoUi.menuFrames;
+    if (urls.length === 0 || frames.length !== urls.length) {
       try {
-        const stored = await chrome.storage.session.get("menuUrls");
-        if (Array.isArray(stored.menuUrls)) urls = stored.menuUrls;
+        const stored = await chrome.storage.session.get(["menuUrls", "menuFrames"]);
+        if (urls.length === 0 && Array.isArray(stored.menuUrls)) urls = stored.menuUrls;
+        if (frames.length !== urls.length && Array.isArray(stored.menuFrames)) {
+          frames = stored.menuFrames;
+        }
       } catch {
-        // Fall through with the empty list.
+        // Fall through without attaching captions to an unknown frame.
       }
     }
-    const url = urls[Number(id.slice(VIDEO_ITEM_PREFIX.length))];
-    // Try the paired HTTP handoff first (sends cookies, waits for Grab's
-    // real answer); fall back to the grab:// navigation only when Grab isn't
-    // reachable at all.
-    if (url) await explicitSend(url, tab && tab.id, tab && tab.incognito === true, tab && tab.url);
+    const index = Number(id.slice(VIDEO_ITEM_PREFIX.length));
+    const url = urls[index];
+    const frameId = frames[index];
+    // A detected stream is paired only with captions from the same frame and
+    // playback session. Restore session state before reading those candidates.
+    let captions = [];
+    if (url && tab && Number.isInteger(tab.id) && Number.isInteger(frameId)) {
+      await restoreVideoFinds(tab.id);
+      captions = captionCandidatesForStream(
+        tab.id,
+        frameId,
+        url,
+        urls.filter((_, candidateIndex) => frames[candidateIndex] === frameId),
+      );
+    }
+    // Try the paired HTTP handoff first; fall back to grab:// only if Grab is
+    // unreachable. Unpaired requests remain URL-only inside postToGrab().
+    if (url) {
+      await explicitSend(
+        url,
+        tab && tab.id,
+        tab && tab.incognito === true,
+        tab && tab.url,
+        captions,
+      );
+    }
     return;
   }
   if (id !== "sendToGrab") return;

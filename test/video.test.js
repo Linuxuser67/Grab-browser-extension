@@ -5547,6 +5547,48 @@ describe("caption sniffing", () => {
       bg.captionCandidatesForFrame(tabId, 0).map((candidate) => candidate.language),
       ["en", "pt-BR", "fr-FR", ""],
     );
+    assert.equal(
+      bg.captionLanguageFor("https://cdn.example.com/The.Last.of.Us.en.srt"),
+      "en",
+    );
+    assert.equal(
+      bg.captionLanguageFor("https://cdn.example.com/The.Last.of.Us.srt"),
+      "",
+      "title words must not be mistaken for language tags",
+    );
+    assert.equal(
+      bg.captionLanguageFor("https://cdn.example.com/movie.fr-FR.forced.vtt"),
+      "fr-FR",
+    );
+  });
+
+  test("caption candidates stay with their frame and nearest playback session", () => {
+    const bg = loadBackground(makeChrome());
+    const tabId = 406;
+    const firstUrl = "https://cdn.example.com/first.mp4";
+    const secondUrl = "https://cdn.example.com/second.mp4";
+    bg.noteCaption(tabId, 0, "https://subs.example.com/en.vtt", "text/vtt", 1100, "en");
+    bg.noteCaption(tabId, 0, "https://subs.example.com/ambiguous.vtt", "text/vtt", 3000, "en");
+    bg.noteCaption(tabId, 1, "https://subs.example.com/other-frame.vtt", "text/vtt", 1100, "en");
+    bg._videoFinds.get(tabId).frames.set(0, [
+      { src: firstUrl, loadStartedAt: 1000, elementId: 1 },
+      { src: secondUrl, loadStartedAt: 5000, elementId: 2 },
+    ]);
+    assert.deepEqual(
+      bg.captionCandidatesForStream(tabId, 0, firstUrl).map((candidate) => candidate.url),
+      ["https://subs.example.com/en.vtt"],
+      "the closest player owns the caption; an equally close event is ambiguous",
+    );
+    assert.deepEqual(
+      bg.captionCandidatesForStream(tabId, 0, secondUrl),
+      [],
+      "a caption is not copied to another player in the same frame",
+    );
+    assert.deepEqual(
+      bg.captionCandidatesForStream(tabId, 1, "https://cdn.example.com/frame.mp4"),
+      [],
+      "caption observations are never shared across frames",
+    );
   });
 
   test("caption candidates survive a worker restart with defensive validation", async () => {
