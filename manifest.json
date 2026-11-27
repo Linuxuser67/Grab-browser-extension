@@ -23,7 +23,7 @@
     "http://*/*",
     "https://*/*"
   ],
-  "minimum_chrome_version": "112",
+  "minimum_chrome_version": "102",
   "background": {
     "service_worker": "background.js"
   },

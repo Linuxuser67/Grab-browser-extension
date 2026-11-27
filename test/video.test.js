@@ -108,6 +108,17 @@ function makeChrome(shared) {
         get: async (defaults) => ({ ...defaults, ...syncSettings }),
       },
       session: {
+        QUOTA_BYTES: Number.isSafeInteger(shared.sessionQuota) ? shared.sessionQuota : 10 * 1024 * 1024,
+        getBytesInUse: async (keys) => {
+          const selected = keys === null ? [...session.keys()] : Array.isArray(keys) ? keys : [keys];
+          return selected.reduce((total, key) => {
+            if (!session.has(key)) return total;
+            return total +
+              new TextEncoder().encode(key).byteLength +
+              new TextEncoder().encode(JSON.stringify(session.get(key))).byteLength +
+              64;
+          }, 0);
+        },
         get: async (key) => {
           if (key === null) return Object.fromEntries(session.entries());
           const v = session.get(key);
@@ -1270,6 +1281,14 @@ describe("per-video menu candidates", () => {
         `${url} is a possible full media resource`,
       );
     }
+  });
+
+  test("video-state aggregate budget follows the browser's session quota", () => {
+    const legacy = loadBackground(makeChrome({ sessionQuota: 1024 * 1024 }));
+    assert.equal(legacy.MAX_PERSISTED_VIDEO_STATE_BYTES, Math.floor(1024 * 1024 * 0.6));
+
+    const current = loadBackground(makeChrome({ sessionQuota: 10 * 1024 * 1024 }));
+    assert.equal(current.MAX_PERSISTED_VIDEO_STATE_BYTES, Math.floor(10 * 1024 * 1024 * 0.6));
   });
 
   test("aggregate video snapshots stay within budget and evict the oldest tabs first", async () => {

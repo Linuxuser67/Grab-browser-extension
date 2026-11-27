@@ -197,6 +197,17 @@ function makeChrome(shared) {
         set: async (obj) => Object.assign(localSettings, obj),
       },
       session: {
+        QUOTA_BYTES: Number.isSafeInteger(shared.sessionQuota) ? shared.sessionQuota : 10 * 1024 * 1024,
+        getBytesInUse: async (keys) => {
+          const selected = keys === null ? [...session.keys()] : Array.isArray(keys) ? keys : [keys];
+          return selected.reduce((total, key) => {
+            if (!session.has(key)) return total;
+            return total +
+              new TextEncoder().encode(key).byteLength +
+              new TextEncoder().encode(JSON.stringify(session.get(key))).byteLength +
+              64;
+          }, 0);
+        },
         get: async (key) => {
           if (key === null) return Object.fromEntries(session.entries());
           const v = session.get(key);
