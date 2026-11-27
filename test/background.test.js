@@ -210,6 +210,11 @@ function makeChrome(shared) {
         },
         get: async (key) => {
           if (key === null) return Object.fromEntries(session.entries());
+          if (Array.isArray(key)) {
+            return Object.fromEntries(
+              key.filter((item) => session.has(item)).map((item) => [item, session.get(item)]),
+            );
+          }
           const v = session.get(key);
           return v === undefined ? {} : { [key]: v };
         },
@@ -1942,6 +1947,80 @@ describe("HTTP handoff to Grab", () => {
       post.opts.headers["X-Grab-Token"],
       hmac("grab-client\u0000", post.opts.body),
       "the pairing token covers the caption metadata",
+    );
+  });
+
+  test("video-menu click restores frame-matched captions after a worker restart", async () => {
+    const shared = {
+      localSettings: { pairingCode: SECRET, forwardCookies: false },
+    };
+    chrome = makeChrome(shared);
+    bg = loadBackground(chrome);
+    const tabId = 408;
+    const observedAt = Date.now();
+    const videoFrameUrl = "https://cdn.example.com/frame-three/episode.mp4";
+    const otherFrameUrl = "https://cdn.example.com/frame-zero/other.mp4";
+    const videoFrameCaption = "https://subs.example.com/frame-three/captions.fr.vtt";
+    const otherFrameCaption = "https://subs.example.com/frame-zero/captions.en.vtt";
+
+    await chrome._listeners["tabs.onActivated"]({ tabId });
+    await new Promise((resolve) => setImmediate(resolve));
+    for (const [frameId, url] of [[3, videoFrameCaption], [0, otherFrameCaption]]) {
+      await chrome._listeners["webRequest.onResponseStarted"]({
+        tabId,
+        frameId,
+        url,
+        timeStamp: observedAt,
+        responseHeaders: [{ name: "content-type", value: "text/vtt" }],
+      });
+    }
+
+    const findings = bg._videoFinds.get(tabId);
+    findings.frames.set(3, [{
+      src: videoFrameUrl,
+      blob: false,
+      elementId: 3,
+      loadStartedAt: observedAt,
+    }]);
+    findings.frames.set(0, [{
+      src: otherFrameUrl,
+      blob: false,
+      elementId: 1,
+      loadStartedAt: observedAt,
+    }]);
+    await bg._persistVideoFinds(tabId);
+    await bg._doRefreshVideoMenu(tabId);
+
+    assert.deepEqual(shared.session.get("menuUrls"), [videoFrameUrl, otherFrameUrl]);
+    assert.deepEqual(shared.session.get("menuFrames"), [3, 0]);
+
+    // MV3 may suspend the worker while the menu remains available. The click
+    // must recover the frame mapping and its caption candidates from session.
+    const restartedChrome = makeChrome(shared);
+    const restartedBg = loadBackground(restartedChrome);
+    await restartedBg.warnedTabsReady;
+    await restartedChrome._listeners["contextMenus.onClicked"](
+      { menuItemId: "grabVideo:0" },
+      { id: tabId, url: "https://example.com/watch", incognito: false },
+    );
+
+    const posted = restartedChrome._calls.find(([name]) => name === "handoff");
+    assert.ok(posted, "the selected stream is handed off");
+    assert.deepEqual(posted[2].captions, [{
+      url: videoFrameCaption,
+      headers: [],
+      language: "fr",
+      format: "vtt",
+    }]);
+    assert.equal(
+      posted[2].captions.some((caption) => caption.url === otherFrameCaption),
+      false,
+      "another frame's subtitle is not attached to the selected stream",
+    );
+    assert.equal(
+      restartedChrome._calls.some(([name, url]) => name === "handoff" && url === otherFrameUrl),
+      false,
+      "the selected menu row remains tied to its original URL",
     );
   });
 
