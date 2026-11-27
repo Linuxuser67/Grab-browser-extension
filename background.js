@@ -21,20 +21,24 @@
 // All listeners are registered synchronously at the top level: the worker is
 // ephemeral and Chrome only wakes it for events it registered for on startup.
 
-// The Chrome MV3 service worker loads its sibling scripts here. Firefox lists
-// them in manifest.firefox.json before this file, so the globals already
-// exist there (importScripts only exists in workers).
+// Keep the Chromium and Firefox background load order in one source of truth.
+// gen-firefox-manifest.py reads this array when it writes manifest.firefox.json.
+const BACKGROUND_SCRIPTS = Object.freeze([
+  "shared.js",
+  "handoff.js",
+  "intercept.js",
+  "video-state.js",
+  "hls.js",
+  "video-menu.js",
+]);
+
+// Firefox lists these scripts in manifest.firefox.json. Chrome's MV3 service
+// worker imports the same files here; importScripts exists only in workers.
 if (
   typeof SHARED_DEFAULTS === "undefined" &&
   typeof importScripts === "function"
 ) {
-  importScripts(
-    "shared.js",
-    "handoff.js",
-    "intercept.js",
-    "video-state.js",
-    "video-menu.js",
-  );
+  importScripts(...BACKGROUND_SCRIPTS);
 }
 
 // Content scripts only use runtime messaging. Disable their direct storage
@@ -235,7 +239,7 @@ if (typeof module !== "undefined" && module.exports) {
     KEEPALIVE_INTERVAL_MS,
     registerSniffer,
     syncVideoScript,
-    hasPageAccess,
+    hasVideoAccess,
     VIDEO_SCRIPT_ID,
     warnedTabsReady,
     mergeVideoFinds,
@@ -279,6 +283,7 @@ if (typeof module !== "undefined" && module.exports) {
     postToGrab,
     normalizeReferer,
     inspectHlsPlaylistWithGrab,
+    isHlsPlaylistFetchAllowed,
     // Test hooks: verify the public-inspection token bucket and bounded queue.
     _takeHlsInspectionToken: takeHlsInspectionToken,
     _withHlsInspectionSlot: withHlsInspectionSlot,

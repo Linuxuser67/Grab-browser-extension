@@ -10,6 +10,7 @@ const SHARED_PATH = path.join(__dirname, "..", "shared.js");
 const HANDOFF_PATH = path.join(__dirname, "..", "handoff.js");
 const INTERCEPT_PATH = path.join(__dirname, "..", "intercept.js");
 const VIDEO_STATE_PATH = path.join(__dirname, "..", "video-state.js");
+const HLS_PATH = path.join(__dirname, "..", "hls.js");
 const VIDEO_PATH = path.join(__dirname, "..", "video-menu.js");
 const CONTENT_PATH = path.join(__dirname, "..", "content.js");
 
@@ -21,6 +22,7 @@ const BG_SOURCE = [
   HANDOFF_PATH,
   INTERCEPT_PATH,
   VIDEO_STATE_PATH,
+  HLS_PATH,
   VIDEO_PATH,
   BG_PATH,
 ]
@@ -4157,23 +4159,26 @@ describe("context menu: one flat submenu, one click to Grab", () => {
     );
   });
 
-  test("requestRescan sends grab-rescan and debounces", async () => {
+  test("requestRescan targets and debounces each tab/frame independently", async () => {
     const chrome = makeChrome({});
     const bg = loadBackground(chrome);
     const sent = [];
-    chrome.tabs.sendMessage = async (tabId, msg) => {
-      sent.push({ tabId, msg });
+    chrome.tabs.sendMessage = async (tabId, msg, options) => {
+      sent.push({ tabId, msg, options });
     };
-    // First call sends immediately.
-    bg.requestRescan(42);
-    assert.equal(sent.length, 1);
-    assert.deepEqual(sent[0], { tabId: 42, msg: { type: "grab-rescan" } });
-    // Debounced: second call within 3s is ignored.
-    bg.requestRescan(42);
-    assert.equal(sent.length, 1, "debounced");
-    // Different tab is not debounced.
-    bg.requestRescan(43);
-    assert.equal(sent.length, 2);
+
+    bg.requestRescan(42, 7);
+    assert.deepEqual(sent, [{
+      tabId: 42,
+      msg: { type: "grab-rescan" },
+      options: { frameId: 7 },
+    }]);
+    bg.requestRescan(42, 7);
+    assert.equal(sent.length, 1, "same frame is debounced");
+    bg.requestRescan(42, 8);
+    assert.equal(sent.length, 2, "another frame in the same tab is independent");
+    bg.requestRescan(43, 7);
+    assert.equal(sent.length, 3, "another tab is independent");
   });
 });
 
@@ -4968,6 +4973,8 @@ describe("HLS master playlist filtering", () => {
     const bg = loadBackground(makeChrome());
     assert.equal(await bg.inspectHlsPlaylist("http://127.0.0.1/master.m3u8"), null);
     assert.equal(await bg.inspectHlsPlaylist("http://localhost/master.m3u8"), null);
+    assert.equal(bg.isHlsPlaylistFetchAllowed("http://192.168.1.1/master.m3u8", "http://localhost:3000"), false);
+    assert.equal(bg.isHlsPlaylistFetchAllowed("http://localhost/master.m3u8", "http://localhost:3000"), true);
     assert.equal(await bg.inspectHlsPlaylist("https://user:pass@example.com/master.m3u8"), null);
   });
 
@@ -5035,12 +5042,16 @@ describe("HLS master playlist filtering", () => {
         return result === null ? null : result.is_master;
       };
       assert.equal(await isMaster(sameHost, privateTab), true);
-      assert.equal(await isMaster(anotherLanHost, privateTab), true);
+      assert.equal(
+        await isMaster(anotherLanHost, privateTab),
+        null,
+        "a private page cannot probe a different private-network host",
+      );
       assert.equal(
         await isMaster(anotherLanHost, "https://public.example/watch"),
         null,
       );
-      assert.deepEqual(requests, [sameHost, anotherLanHost]);
+      assert.deepEqual(requests, [sameHost]);
     } finally {
       globalThis.fetch = originalFetch;
     }

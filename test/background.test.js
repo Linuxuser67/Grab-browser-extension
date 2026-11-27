@@ -11,6 +11,7 @@ const SHARED_PATH = path.join(__dirname, "..", "shared.js");
 const HANDOFF_PATH = path.join(__dirname, "..", "handoff.js");
 const INTERCEPT_PATH = path.join(__dirname, "..", "intercept.js");
 const VIDEO_STATE_PATH = path.join(__dirname, "..", "video-state.js");
+const HLS_PATH = path.join(__dirname, "..", "hls.js");
 const VIDEO_PATH = path.join(__dirname, "..", "video-menu.js");
 const FIREFOX_MANIFEST_PATH = path.join(__dirname, "..", "manifest.firefox.json");
 
@@ -22,6 +23,7 @@ const BG_SOURCE = [
   HANDOFF_PATH,
   INTERCEPT_PATH,
   VIDEO_STATE_PATH,
+  HLS_PATH,
   VIDEO_PATH,
   BG_PATH,
 ]
@@ -30,10 +32,9 @@ const BG_SOURCE = [
 
 test("Chromium and Firefox background scripts use the same load order", () => {
   const background = fs.readFileSync(BG_PATH, "utf8");
-  const importStart = background.indexOf("importScripts(");
-  const importEnd = background.indexOf(");", importStart);
-  assert.ok(importStart >= 0 && importEnd > importStart, "Chrome must declare importScripts");
-  const chromeScripts = [...background.slice(importStart, importEnd).matchAll(/"([^"]+)"/g)].map(([, file]) => file);
+  const scriptsMatch = /const BACKGROUND_SCRIPTS = Object\.freeze\((\[[\s\S]*?\])\);/.exec(background);
+  assert.ok(scriptsMatch, "Chrome must declare BACKGROUND_SCRIPTS");
+  const chromeScripts = JSON.parse(scriptsMatch[1].replace(/,\s*]/g, "]"));
   const firefoxManifest = JSON.parse(fs.readFileSync(FIREFOX_MANIFEST_PATH, "utf8"));
   assert.deepEqual(
     firefoxManifest.background.scripts,

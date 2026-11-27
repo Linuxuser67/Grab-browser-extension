@@ -6,27 +6,40 @@ from drifting. Run with --check in CI to fail when they're out of sync.
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CHROMIUM = ROOT / "manifest.json"
 FIREFOX = ROOT / "manifest.firefox.json"
+BACKGROUND = ROOT / "background.js"
+
+
+def background_scripts():
+    source = BACKGROUND.read_text()
+    match = re.search(
+        r"const BACKGROUND_SCRIPTS = Object\.freeze\((\[[\s\S]*?\])\);",
+        source,
+    )
+    if not match:
+        raise ValueError("background.js has no canonical BACKGROUND_SCRIPTS array")
+    # JavaScript arrays commonly use a trailing comma; remove it before
+    # decoding the JSON-compatible string array.
+    serialized = re.sub(r",\s*]", "]", match.group(1))
+    scripts = json.loads(serialized)
+    if not isinstance(scripts, list) or not all(isinstance(item, str) for item in scripts):
+        raise ValueError("BACKGROUND_SCRIPTS must be a JSON array of paths")
+    if len(scripts) != len(set(scripts)):
+        raise ValueError("BACKGROUND_SCRIPTS contains duplicate paths")
+    return scripts
 
 
 def generate():
     m = json.loads(CHROMIUM.read_text())
-    # Firefox uses background scripts, not a service worker.
-    m["background"] = {
-        "scripts": [
-            "shared.js",
-            "handoff.js",
-            "intercept.js",
-            "video-state.js",
-            "video-menu.js",
-            "background.js",
-        ]
-    }
+    # Firefox uses background scripts, not a service worker. Keep its load
+    # order aligned with Chromium's importScripts declaration in background.js.
+    m["background"] = {"scripts": [*background_scripts(), "background.js"]}
     # Firefox-only metadata.
     m["browser_specific_settings"] = {
         "gecko": {

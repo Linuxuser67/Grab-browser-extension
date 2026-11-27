@@ -29,6 +29,7 @@
       "handoff.js",
       "intercept.js",
       "video-state.js",
+      "hls.js",
       "video-menu.js",
       "background.js"
     ]

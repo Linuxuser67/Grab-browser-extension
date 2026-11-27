@@ -13,3 +13,5 @@ Available for Firefox and Chromium-based browsers. The Grab desktop app is requi
 Video detection is opt-in. When enabled, it can inspect pages and matching network responses on every HTTP(S) site where you grant optional site access. There is currently no per-site exclusion list.
 
 Use **Alt+G** to send the current tab, or right-click a link or media item and choose **Download with Grab**.
+
+Without pairing, sends go to whichever process is listening on `127.0.0.1:9412`; pair with Grab for verified delivery.

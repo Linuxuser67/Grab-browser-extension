@@ -15,59 +15,6 @@ const HANDOFF_RETRY_DELAYS_MS = [300, 900];
 const CONFIRM_TIMEOUT_MS = 130_000;
 /// A pairing handshake is a loopback round trip.
 const HELLO_TIMEOUT_MS = 3_000;
-/// Paired HLS inspection is read-only and returns only path keys.
-const HLS_INSPECT_TIMEOUT_MS = 5_000;
-const HLS_INSPECTION_HANDSHAKE_MAX_AGE_MS = 2_000;
-const MAX_HLS_INSPECT_RESPONSE_BYTES = 16 * 1024;
-const MAX_HLS_INSPECT_CHILDREN = 256;
-
-/// Share Grab's four-request HLS inspection budget across every tab and frame.
-/// Page-controlled URLs must not create an unbounded wait queue or consume
-/// the server's replay budget faster than its matching token bucket allows.
-const HLS_INSPECTION_CONCURRENCY = 4;
-const HLS_INSPECTION_QUEUE_LIMIT = 32;
-const HLS_INSPECTION_RATE_PER_SECOND = 4;
-const HLS_INSPECTION_BURST = 24;
-let activeHlsInspections = 0;
-const queuedHlsInspections = [];
-let hlsInspectionTokens = HLS_INSPECTION_BURST;
-let hlsInspectionTokenUpdatedAt = Date.now();
-
-function takeHlsInspectionToken(nowMs = Date.now()) {
-  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
-  const elapsedMs = Math.max(0, now - hlsInspectionTokenUpdatedAt);
-  hlsInspectionTokens = Math.min(
-    HLS_INSPECTION_BURST,
-    hlsInspectionTokens + elapsedMs * HLS_INSPECTION_RATE_PER_SECOND / 1000,
-  );
-  hlsInspectionTokenUpdatedAt = Math.max(hlsInspectionTokenUpdatedAt, now);
-  if (hlsInspectionTokens < 1) return false;
-  hlsInspectionTokens -= 1;
-  return true;
-}
-
-async function withHlsInspectionSlot(operation) {
-  if (activeHlsInspections < HLS_INSPECTION_CONCURRENCY) {
-    activeHlsInspections += 1;
-  } else {
-    if (queuedHlsInspections.length >= HLS_INSPECTION_QUEUE_LIMIT) return null;
-    await new Promise((resolve) => queuedHlsInspections.push(resolve));
-  }
-
-  try {
-    // Consume only when this request actually owns a slot. A rate-limited
-    // request returns null before handshake, HMAC, or network work begins.
-    if (!takeHlsInspectionToken()) return null;
-    return await operation();
-  } finally {
-    // Hand the occupied slot directly to the oldest waiter. The active count
-    // stays unchanged until the queue is empty, so no fifth request can enter.
-    const next = queuedHlsInspections.shift();
-    if (next) next();
-    else activeHlsInspections -= 1;
-  }
-}
-
 /// Launches Grab without handing it a download. The follow-up HTTP handoff
 /// carries the source-page referrer and, when enabled, the prepared cookie
 /// snapshot; the grab:// fallback can carry only the target URL.
@@ -116,7 +63,6 @@ function _setSleep(fn) {
 
 const SERVER_CONTEXT = "grab-server\u0000";
 const CLIENT_CONTEXT = "grab-client\u0000";
-const HLS_INSPECTION_CONTEXT = "grab-inspect-hls\u0000";
 // Shared pattern lives in shared.js.
 const STATUS_UNVERIFIED = -1;
 /// The POST was sent but the answer never arrived (timeout or connection
@@ -192,7 +138,7 @@ const KEEPALIVE_INTERVAL_MS = 20_000;
 /// whether pings defer that one is unverified. If the worker is stopped
 /// anyway, the browser download is simply left alone (it is cancelled only
 /// after Grab answers 200). A protocol that returns before the user answers
-/// would remove the limit; see README "Known limitations".
+/// would remove this wait; the current protocol waits for the user's decision.
 async function withWorkerKeepAlive(task, intervalMs = KEEPALIVE_INTERVAL_MS) {
   const ping = () => {
     try {
@@ -240,160 +186,6 @@ async function verifyGrab(secret) {
   if (!ok) return false;
   const expected = await hmacHex(secret, SERVER_CONTEXT, nonce);
   return constantTimeEqual(body && body.proof, expected);
-}
-
-/// Ask the paired Grab process to inspect a browser-observed public HLS URL.
-/// The request contains no cookies or Referer; the response contains no query
-/// strings. Null means the inspection was unavailable and callers must keep
-/// every candidate rather than guessing which rendition is a child.
-/// Prepare one inspector for a batch. It shares a recent listener proof
-/// between requests, but refreshes it after queueing has made that proof stale.
-/// Verification is deferred until the request owns an inspection slot.
-function createHlsInspectionInspectorForBatch() {
-  let verifiedSecret = null;
-  let verifiedAt = 0;
-  let verificationAttempted = false;
-  let verificationPromise = null;
-
-  const getFreshVerifiedSecret = async () => {
-    const now = Date.now();
-    if (
-      verificationAttempted &&
-      now >= verifiedAt &&
-      now - verifiedAt < HLS_INSPECTION_HANDSHAKE_MAX_AGE_MS
-    ) return verifiedSecret;
-
-    if (!verificationPromise) {
-      verificationPromise = (async () => {
-        let secret = null;
-        try {
-          const candidate = await getPairingCode();
-          if (candidate && await verifyGrab(candidate)) secret = candidate;
-        } catch {
-          // A failed proof leaves the inspection unavailable; never fall back
-          // to an unverified loopback POST.
-        }
-        verifiedSecret = secret;
-        verifiedAt = Date.now();
-        verificationAttempted = true;
-        return secret;
-      })();
-    }
-
-    const pending = verificationPromise;
-    try {
-      return await pending;
-    } finally {
-      if (verificationPromise === pending) verificationPromise = null;
-    }
-  };
-
-  return (value) => inspectHlsPlaylistWithGrab(value, getFreshVerifiedSecret);
-}
-
-/// Ask the paired Grab process to inspect a browser-observed public HLS URL.
-/// Standalone calls verify after acquiring a slot. Batch calls share a recent
-/// proof and refresh it on-slot when queueing makes it too old.
-async function inspectHlsPlaylistWithGrab(value, verifiedSecret = null) {
-  if (typeof value !== "string" || new TextEncoder().encode(value).length > 2048) {
-    return null;
-  }
-  let url;
-  try {
-    url = new URL(value);
-  } catch {
-    return null;
-  }
-  if (
-    (url.protocol !== "http:" && url.protocol !== "https:") ||
-    url.username ||
-    url.password ||
-    !/\.(?:m3u8|m3u)$/i.test(url.pathname)
-  ) return null;
-
-  return withHlsInspectionSlot(async () => {
-    // Verify the listener only after acquiring the slot. A batch shares the
-    // proof briefly, but renews it if this request waited behind earlier work.
-    let secret;
-    try {
-      if (typeof verifiedSecret === "function") {
-        secret = await verifiedSecret();
-      } else {
-        secret = typeof verifiedSecret === "string" ? verifiedSecret : await getPairingCode();
-        if (!secret || !(await verifyGrab(secret))) return null;
-      }
-    } catch {
-      return null;
-    }
-    if (!secret) return null;
-
-    // Create the timestamp, nonce, signature and deadline only after the
-    // slot and a sufficiently recent listener proof are both available.
-    const body = JSON.stringify({
-      url: value,
-      timestamp_ms: Date.now(),
-      nonce: bytesToHex(crypto.getRandomValues(new Uint8Array(16))),
-    });
-    if (new TextEncoder().encode(body).length > 4096) return null;
-
-    let token;
-    try {
-      token = await hmacHex(secret, HLS_INSPECTION_CONTEXT, body);
-    } catch {
-      return null;
-    }
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), HLS_INSPECT_TIMEOUT_MS);
-    try {
-      const response = await fetch(GRAB_BASE_URL + "/inspect-hls", {
-        method: "POST",
-        credentials: "omit",
-        referrerPolicy: "no-referrer",
-        redirect: "error",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Grab-Token": token,
-        },
-        body,
-        signal: controller.signal,
-      });
-      if (!response.ok) return null;
-      const text = await response.text();
-      if (new TextEncoder().encode(text).length > MAX_HLS_INSPECT_RESPONSE_BYTES) {
-        return null;
-      }
-      const result = JSON.parse(text);
-      if (
-        !result ||
-        typeof result.is_master !== "boolean" ||
-        !Array.isArray(result.child_keys) ||
-        result.child_keys.length > MAX_HLS_INSPECT_CHILDREN ||
-        !result.child_keys.every((key) => {
-          if (typeof key !== "string" || new TextEncoder().encode(key).length > 2048) return false;
-          try {
-            const child = new URL(key);
-            return (
-              (child.protocol === "http:" || child.protocol === "https:") &&
-              !child.username &&
-              !child.password &&
-              !child.search &&
-              !child.hash &&
-              child.origin + child.pathname === key
-            );
-          } catch {
-            return false;
-          }
-        }) ||
-        (!result.is_master && result.child_keys.length !== 0)
-      ) return null;
-      return { is_master: result.is_master, child_keys: result.child_keys };
-    } catch {
-      return null;
-    } finally {
-      clearTimeout(timer);
-    }
-  });
 }
 
 /// Check readiness for an explicit URL-only handoff when the extension has no
@@ -501,22 +293,6 @@ function fitHandoffBody(url, cookies, userAgent, requestMetadata) {
     if (byteLength(body) <= MAX_HANDOFF_BODY_BYTES) break;
   }
   return fit(body, retained.size);
-}
-
-/// Reading a site's cookies needs the optional "cookies" permission and access
-/// to that site; both are granted together when the user pairs. Either can be
-/// declined or revoked. When the Permissions API is unavailable, assume they
-/// are granted and let the read decide.
-async function hasCookiePermission() {
-  if (typeof chrome.permissions?.contains !== "function") return true;
-  try {
-    return await chrome.permissions.contains({
-      permissions: ["cookies"],
-      origins: SHARED_PAGE_ORIGINS,
-    });
-  } catch {
-    return false;
-  }
 }
 
 /// Read cookies in the shape Grab expects. Partitioned cookies are detected but
@@ -991,49 +767,7 @@ async function showCookieWarning(ctx) {
   await flagTab(ctx && ctx.tabId, ctx && ctx.cookieWarning);
 }
 
-/// True when the URL's file extension is on the user's skip list.
-
 // --- Explicit sends -------------------------------------------------------
-
-function createContextMenu() {
-  chrome.contextMenus.create({
-    id: "sendToGrab",
-    title: "Download with Grab",
-    contexts: ["link", "video", "audio", "image", "page"],
-  });
-}
-
-chrome.runtime.onInstalled.addListener(async () => {
-  const settings = await getSettings();
-  // removeAll first: onInstalled also fires on extension updates, when the
-  // menu may already exist (create would throw on a duplicate id).
-  await removeAllContextMenus();
-  if (settings.showContextMenu) createContextMenu();
-  // Re-register (or drop) the optional video-detector content script; an
-  // update from a build that declared it statically needs this once.
-  syncVideoScript();
-});
-
-chrome.storage.onChanged.addListener(async (changes, area) => {
-  if (area !== "sync") return;
-  if (changes.showContextMenu) {
-    // removeAll first: rapid toggles would otherwise stack a duplicate-id
-    // create on top of an in-flight one.
-    await removeAllContextMenus();
-    if (changes.showContextMenu.newValue) {
-      createContextMenu();
-      // removeAll also dropped the video submenu; rebuild it.
-      if (Number.isInteger(videoUi.activeTabId) && videoUi.activeTabId >= 0) {
-        refreshVideoMenu(videoUi.activeTabId);
-      }
-    }
-  }
-  if (changes.detectVideos) {
-    videoUi.detectVideosOn = changes.detectVideos.newValue !== false;
-    if (!videoUi.detectVideosOn) clearAllVideoUi();
-    syncVideoScript();
-  }
-});
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const id = info.menuItemId;
