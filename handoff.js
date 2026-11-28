@@ -554,6 +554,13 @@ async function postToGrab(url, ctx) {
         CONFIRM_TIMEOUT_MS,
       ),
     );
+    if (ctx && typeof ctx === "object") {
+      const pairingHeader = resp.headers?.get?.("x-grab-pairing");
+      if (typeof pairingHeader === "string" && pairingHeader.toLowerCase() === "stale") {
+        ctx.pairingWarning =
+          "Grab's saved pairing is stale. This handoff required confirmation without browser cookies or captions. Re-pair in Options to restore authenticated handoffs.";
+      }
+    }
     if (resp.status >= 200 && resp.status < 300 && ctx && typeof ctx === "object") {
       const acceptedHeader = resp.headers?.get?.("x-grab-cookies-accepted");
       if (acceptedHeader !== null && acceptedHeader !== undefined) {
@@ -772,7 +779,9 @@ async function explicitSend(url, tabId, incognito, sourceReferer, captionCandida
   }
   const tabArg =
     tabScope(tabId) ? { tabId } : {};
-  if (status === 0) {
+  if (ctx.pairingWarning) {
+    await showPairingWarning(ctx, status);
+  } else if (status === 0) {
     // Grab never came up: the OS launches it with the grab:// URL. That
     // fallback cannot carry the source-page Referer or browser cookies, so
     // surface any reason cookie forwarding was unavailable.
@@ -815,6 +824,20 @@ async function explicitSend(url, tabId, incognito, sourceReferer, captionCandida
   }
   // STATUS_MAYBE_SENT may have been accepted; never fall back because that
   // risks a duplicate download.
+}
+
+/// Show why a paired handoff was accepted only after confirmation.
+async function showPairingWarning(ctx, status) {
+  const outcome = status === 409
+    ? "Grab's confirmation was declined; the URL was not queued."
+    : status === 408
+      ? "Grab's confirmation timed out; the URL was not queued."
+      : status === 202
+        ? "Grab opened a confirmation card but did not queue the URL yet."
+        : "Grab accepted this URL through confirmation-only mode.";
+  const detail = (ctx && ctx.pairingWarning || "Grab's saved pairing is stale.") +
+    " " + outcome + " Re-pair in Options.";
+  await flagTab(ctx && ctx.tabId, detail);
 }
 
 /// Show why a handoff was accepted without a fully usable cookie jar.
