@@ -1361,7 +1361,14 @@ describe("HTTP handoff to Grab", () => {
 
   /// A Grab that answers GET /hello like the real one (a proof computed from
   /// the shared secret) unless told otherwise, and POST /add with `addStatus`.
-  function mockPairedGrab({ proof, helloStatus = 200, helloDown = false, addStatus = 200, acceptedCookies } = {}) {
+  function mockPairedGrab({
+    proof,
+    helloStatus = 200,
+    helloDown = false,
+    addStatus = 200,
+    acceptedCookies,
+    pairingState,
+  } = {}) {
     fetchCalls = [];
     globalThis.fetch = async (url, opts = {}) => {
       fetchCalls.push({ url, opts });
@@ -1381,6 +1388,9 @@ describe("HTTP handoff to Grab", () => {
           get(name) {
             if (name.toLowerCase() === "x-grab-cookies-accepted" && acceptedCookies !== undefined) {
               return String(acceptedCookies);
+            }
+            if (name.toLowerCase() === "x-grab-pairing" && pairingState !== undefined) {
+              return pairingState;
             }
             return null;
           },
@@ -1868,6 +1878,60 @@ describe("HTTP handoff to Grab", () => {
       ["session"]
     );
     assert.equal(ctx.cookieWarning, undefined);
+  });
+
+  test("explicit send surfaces a stale pairing on accepted and declined confirmation outcomes", async () => {
+    await pair();
+
+    mockPairedGrab({ pairingState: "stale", addStatus: 200 });
+    await bg.explicitSend("https://example.com/accepted.zip", 71, false);
+    assert.ok(bg._warnedTabs.has(71), "accepted handoff retains a pairing warning");
+    assert.ok(
+      chrome._calls.some(([name, args]) =>
+        name === "action.setTitle" &&
+        args.tabId === 71 &&
+        /stale|re-pair/i.test(args.title)
+      ),
+      "the originating tab explains that pairing must be refreshed",
+    );
+    assert.equal(posts().length, 1, "the accepted handoff is not retried");
+    assert.equal(tabsCreated().length, 0, "the accepted HTTP handoff does not fall back to grab://");
+
+    mockPairedGrab({ pairingState: "stale", addStatus: 409 });
+    await bg.explicitSend("https://example.com/declined.zip", 72, false);
+    assert.ok(bg._warnedTabs.has(72), "declined handoff still exposes stale pairing");
+    assert.ok(
+      chrome._calls.some(([name, args]) =>
+        name === "action.setTitle" &&
+        args.tabId === 72 &&
+        /declined.*not queued.*re-pair/i.test(args.title)
+      ),
+      "the warning preserves the declined outcome and explains how to repair pairing",
+    );
+    assert.equal(posts().length, 1, "the declined handoff is not retried");
+    assert.equal(tabsCreated().length, 0, "a response never triggers the grab:// fallback");
+  });
+
+  test("automatic interception warns about stale pairing without changing its acceptance rule", async () => {
+    await pair();
+    mockPairedGrab({ pairingState: "stale", addStatus: 200 });
+    await chrome._listeners["downloads.onCreated"]({
+      id: 791,
+      url: "https://example.com/stale-pairing.iso",
+      fileSize: -1,
+    });
+
+    assert.ok(
+      chrome._calls.some(([name, args]) =>
+        name === "action.setTitle" && /stale|re-pair/i.test(args.title)
+      ),
+      "automatic interception warns even when DownloadItem has no tab ID",
+    );
+    assert.ok(
+      chrome._calls.some(([name, id]) => name === "cancel" && id === 791),
+      "the browser copy is cancelled only after Grab returns HTTP 200",
+    );
+    assert.equal(posts().length, 1, "the accepted automatic handoff is not retried");
   });
 
   test("Grab-reported cookie drops are visible to the caller", async () => {
