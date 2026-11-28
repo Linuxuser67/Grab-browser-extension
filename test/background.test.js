@@ -2398,6 +2398,42 @@ describe("HTTP handoff to Grab", () => {
     );
   });
 
+  for (const status of [202, 408, 409]) {
+    test(`automatic interception keeps cookie warnings for HTTP ${status}`, async () => {
+      await pair();
+      mockPairedGrab({ addStatus: status });
+      chrome.permissions = { contains: async () => false };
+      chrome.cookies.getAll = async () => {
+        throw new Error("cookies must not be read when the optional permission is absent");
+      };
+      const id = 900 + status;
+      await chrome._listeners["downloads.onCreated"]({
+        id,
+        url: `https://example.com/non-queued-${status}.iso`,
+        fileSize: -1,
+      });
+
+      assert.ok(
+        chrome._calls.some(([name, args]) =>
+          name === "action.setTitle" &&
+          /optional Cookies permission/i.test(args.title)
+        ),
+        "the missing-cookie-permission warning remains visible for a non-queued handoff",
+      );
+      assert.equal(posts().length, 1, "the confirmation response is not retried");
+      assert.equal(
+        chrome._calls.some(([name, itemId]) => name === "cancel" && itemId === id),
+        false,
+        "the browser copy remains when Grab did not return HTTP 200",
+      );
+      assert.equal(
+        chrome._calls.some(([name, itemId]) => name === "removeFile" && itemId === id),
+        false,
+        "the partial browser copy is not removed before Grab queues it",
+      );
+    });
+  }
+
   test("automatic interception leaves the download in the browser when Grab is down", async () => {
     await pair();
     mockPairedGrab({ helloDown: true });
