@@ -67,8 +67,12 @@ async function interceptDownload(item) {
     requirePairing: true,
   };
   const status = await postToGrabWithRetry(url, ctx);
+  if (ctx.pairingWarning) {
+    await showPairingWarning(ctx, status);
+  } else if (status === 200 && ctx.cookieWarning) {
+    await showCookieWarning(ctx);
+  }
   if (status !== 200) return;
-  if (ctx.cookieWarning) await showCookieWarning(ctx);
 
   try {
     await claimDownload(item.id);
